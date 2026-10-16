@@ -128,6 +128,7 @@ venv\Scripts\python.exe scripts\test_language.py      # язык, фильтр �
 venv\Scripts\python.exe scripts\test_tools.py         # инструменты и sandbox
 venv\Scripts\python.exe scripts\test_realtime.py      # протоколы Gemini/OpenAI Realtime
 venv\Scripts\python.exe scripts\test_spotify.py       # Spotify Web API
+venv\Scripts\python.exe scripts\test_browser.py       # browser_open и fallback на системный браузер
 venv\Scripts\python.exe scripts\smoke_gui.py          # сборка окна без показа
 venv\Scripts\python.exe scripts\smoke_agent.py        # агентный цикл (заглушка LLM)
 venv\Scripts\python.exe scripts\smoke_realtime_app.py # интеграция realtime и GUI
