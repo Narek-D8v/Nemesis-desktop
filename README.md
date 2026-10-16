@@ -6,7 +6,10 @@
 LLM-агентом с вызовом инструментов, локальным и облачным голосом.
 
 **Исходный код:** <https://github.com/Narek-D8v/Nemesis-desktop> ·
-**Автор:** Narek Haroyan (Narek-D8v) · **Лицензия:** GNU GPLv3 (см. `LICENSE`)
+
+**Автор:** Narek Haroyan (Narek-D8v) · 
+
+**Лицензия:** GNU GPLv3 (см. `LICENSE`)
 
 ## Возможности
 
