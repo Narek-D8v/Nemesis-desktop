@@ -1,5 +1,7 @@
 # Немуся (Nemesis)
 
+[![CI Tests & Checks](https://github.com/Narek-D8v/Nemesis-desktop/actions/workflows/tests.yml/badge.svg)](https://github.com/Narek-D8v/Nemesis-desktop/actions/workflows/tests.yml)
+
 Голосовой ассистент для Windows на Python с графическим интерфейсом (PySide6),
 LLM-агентом с вызовом инструментов, локальным и облачным голосом.
 
