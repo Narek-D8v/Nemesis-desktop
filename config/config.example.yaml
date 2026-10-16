@@ -1,0 +1,190 @@
+# ============================================================
+#  Немуся (Nemesis) — конфигурация
+#  Скопируйте в config.yaml и настройте под себя.
+#  API-ключи лучше хранить в OS keyring (окно «Настройки» GUI),
+#  но можно и здесь — тогда файл НЕ должен попадать в git.
+# ============================================================
+
+assistant:
+  name: "Немуся"
+  full_name: "Немесис"
+  language: "ru"
+  # Язык ответов: auto — на языке собеседника, ru/en — принудительно
+  reply_language: "auto"
+  personality: >
+    Ты — Немуся (полное имя Немесис), дружелюбный и эффективный голосовой ассистент.
+    Отвечай кратко, по делу, на языке собеседника. У тебя есть доступ к инструментам —
+    используй их, когда это помогает выполнить задачу. Не выдумывай результаты
+    инструментов. При опасных действиях сначала объясни, что собираешься сделать.
+
+# --- LLM ---
+llm:
+  # Провайдер по умолчанию: openrouter | gemini | anthropic | openai | ollama
+  default_provider: "gemini"
+  # Модель по умолчанию (формат зависит от провайдера)
+  default_model: "gemini/gemini-2.0-flash"
+  temperature: 0.7
+  max_tokens: 4096
+  # Автоматически переключаться на резервного провайдера при ошибке
+  fallback:
+    - provider: "openrouter"
+      model: "openrouter/anthropic/claude-3.5-sonnet"
+    - provider: "openai"
+      model: "gpt-4o-mini"
+  providers:
+    openrouter:
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: ""        # или в keyring
+    gemini:
+      api_key: ""
+    anthropic:
+      api_key: ""
+    openai:
+      api_key: ""
+      api_base: "https://api.openai.com/v1"
+    ollama:
+      api_base: "http://localhost:11434"
+
+# --- Голос ---
+voice:
+  enabled: true
+  # Активация по слову
+  wake_word:
+    enabled: true
+    engine: "vosk"            # vosk | porcupine | off
+    words: ["немуся", "немесис", "немо", "неми"]
+    vosk_model_path: "data/models/vosk-ru"
+    porcupine_access_key: ""
+  # Распознавание речи
+  stt:
+    engine: "faster-whisper"  # faster-whisper | openai
+    model: "small"            # tiny | base | small | medium | large-v3
+    language: "ru"
+    device: "auto"            # auto | cpu | cuda
+  # Синтез речи
+  tts:
+    engine: "edge-tts"        # edge-tts | openai | elevenlabs
+    voice: "ru-RU-DmitryNeural"
+    rate: "+0%"
+    volume: "+0%"
+  # Режим реального времени (непрерывный голосовой диалог без пауз STT/TTS)
+  realtime:
+    enabled: true
+    # gemini | openai — облачные; local — офлайн-аналог (локальные STT/LLM/TTS)
+    provider: "gemini"
+    gemini_model: "gemini-2.5-flash-native-audio-latest"
+    gemini_voice: "Aoede"     # Puck, Charon, Kore, Fenrir, Aoede
+    openai_model: "gpt-realtime"
+    openai_voice: "marin"
+    audio: true
+    # Слово активации («Немуся») запускает диалог: облако, иначе — локальный режим
+    wake_activates: true
+    # Если нет интернета/ключа — автоматически переходить на локальный аналог
+    offline_fallback: true
+  # Прерывать ассистента голосом. false — микрофон молчит, пока ассистент
+  # говорит (полудуплекс): меньше самопрослушивания/эха и реакции на шум.
+  barge_in: true
+  # Подавление шума микрофона.
+  noise:
+    provider: "rnnoise"       # builtin | rnnoise | krisp | off
+    # rnnoise — локальный AI-шумодав (BSD, CPU, без API и интернета).
+    # Рекомендуемая замена Krisp. Требует nemus/voice/_rnnoise/rnnoise.dll.
+    # Krisp — коммерческий SDK (нужна лицензия + модель .kef от krisp.ai).
+    # Если rnnoise/krisp не настроены/недоступны — используется builtin.
+    krisp_api_key: ""
+    krisp_model_path: ""
+    krisp_frame_ms: 10
+    krisp_suppression: 100.0
+
+# --- Инструменты и разрешения ---
+tools:
+  enabled: true
+  # full-auto | smart | confirm-all
+  # smart — безопасные инструменты выполняются сразу, опасные требуют подтверждения.
+  permission_mode: "smart"
+  # Авто-разрешение этих инструментов даже в режиме smart
+  auto_allow:
+    - "get_time"
+    - "web_search"
+    - "read_file"
+  # Всегда запрещённые (безопасность)
+  deny:
+    - "format_disk"
+  # Рабочая папка для собственных скриптов и файлов ассистента.
+  # Запись/удаление/выполнение скриптов по умолчанию ограничены этой папкой.
+  workspace: "data/workspace"
+  # true — разрешить инструментам писать/удалять файлы вне workspace
+  # (по умолчанию false — безопаснее).
+  allow_outside_workspace: false
+  # Чтобы ассистент свободно видел экран и управлял им в режиме smart,
+  # добавьте сюда (иначе каждое действие потребует подтверждения):
+  #   - "see_screen"
+  #   - "control_screen"
+
+# --- Экран (компьютерное зрение и управление) ---
+screen:
+  enabled: true
+  # Максимальная ширина снимка, отдаваемого vision-модели.
+  # 0 (рекомендуется) — снимок 1:1 с экраном: координаты картинки == пиксели экрана,
+  # клики не «плывут». Большие значения уменьшают картинку (дешевле токены), но
+  # тогда see_screen рисует сетку с координатами и всё равно отдаёт пиксели экрана.
+  max_width: 0
+  # Как «показывать» экран see_screen:
+  #   auto — сам определяет, понимает ли модель изображения (рекомендуется);
+  #   image — всегда отправлять снимок;
+  #   ocr — никогда не отправлять снимок: локальный cv2 + Windows OCR возвращает
+  #         текст и координаты (для текстовых моделей без vision).
+  vision_mode: "auto"
+  # Ширина снимка для локального OCR (Windows OCR, через winrt-Windows.Media.Ocr).
+  ocr_max_width: 2200
+  # Язык распознавания текста на экране.
+  ocr_lang: "ru-RU"
+  # Дополнительно искать области/элементы интерфейса контурами cv2.
+  detect_regions: true
+  # Сколько распознанных строк максимум отдавать модели.
+  max_lines: 80
+  # Рисовать координатную сетку, если снимок всё же уменьшается (max_width > 0).
+  draw_grid: true
+
+# --- Память ---
+memory:
+  database: "data/nemus.db"
+  long_term: true
+  # Для векторной памяти (опционально, требует доп. зависимости)
+  embeddings_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+# --- Spotify (Web API) ---
+# 1) Создайте приложение: https://developer.spotify.com/dashboard
+# 2) В Redirect URIs добавьте ровно: http://127.0.0.1:8888/callback
+#    (Spotify запрещает «localhost»; 127.0.0.1 — можно, порт для loopback гибкий.)
+#    Нажмите Add, затем Save. Адрес должен совпадать посимвольно.
+# 3) Скопируйте Client ID и Client Secret сюда (или Secret в keyring).
+# 4) Один раз войдите: Настройки → Spotify → «Войти в Spotify» (или запустите
+#    scripts/spotify_auth.py). Client ID/Secret сами по себе НЕ дают доступа —
+#    нужен вход, после которого создаётся data/spotify_token.json.
+# ВНИМАНИЕ: с февраля 2026 Spotify требует Spotify Premium у владельца приложения
+# в режиме разработки, а управление воспроизведением (play/pause/next) работает
+# только на аккаунтах Premium. Без Premium можно только открыть приложение и
+# управлять медиа-клавишами (media_control).
+spotify:
+  enabled: true
+  client_id: ""
+  client_secret: ""
+  redirect_uri: "http://127.0.0.1:8888/callback"
+  default_device: ""          # имя устройства, напр. "Мой компьютер"
+  market: "RU"
+  cache_path: "data/spotify_token.json"
+
+# --- GUI ---
+gui:
+  theme: "dark"
+  # Язык интерфейса: ru | en (применяется после перезапуска)
+  language: "ru"
+  always_on_top: false
+  start_minimized: false
+  hotkey: "ctrl+alt+space"    # push-to-talk
+
+# --- Прочее ---
+logging:
+  level: "INFO"
+  file: "data/nemus.log"

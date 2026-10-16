@@ -1,0 +1,53 @@
+[project]
+name = "nemus"
+version = "0.1.0"
+description = "Немуся (Nemesis) — голосовой ассистент на Python"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Narek Haroyan (Narek-D8v)", url = "https://github.com/Narek-D8v" }]
+dynamic = ["dependencies"]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3.13",
+    "Environment :: Win32 (MS Windows)",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[project.scripts]
+nemus = "nemus.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements-core.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["nemus*"]
+
+# ---------------------------------------------------------------------------
+#  Ruff (линтер + форматтер)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["venv", ".venv", "data", "build", "dist"]
+
+[tool.ruff.lint]
+# Базовый набор: ошибки, неиспользуемые импорты/переменные, сортировка импортов,
+# предупреждения и типичные баги. pyupgrade (UP) намеренно не включён, чтобы не
+# переписывать сложившийся стиль (str+Enum, typing.Callable и т.п.).
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501"]  # длина строк контролируется форматтером
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["E402", "BLE001"]
+"plugins/*" = ["N999"]
+
+# ---------------------------------------------------------------------------
+#  Проверки
+# ---------------------------------------------------------------------------
+#  Тесты — это автономные скрипты в scripts/ (запускаются напрямую,
+#  без pytest), см. раздел «Разработка» в README.md.

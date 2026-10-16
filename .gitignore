@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Виртуальное окружение
+venv/
+.venv/
+env/
+
+# Секреты и локальный конфиг
+config/config.yaml
+.env
+.env.*
+
+# Логи и временные файлы
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Данные (память, логи, модели)
+data/
+!data/.gitkeep
+
+# Кэш
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Сборка
+build/
+dist/
+*.spec
+
+# IDE
+.idea/
+.vscode/

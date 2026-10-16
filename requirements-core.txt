@@ -1,0 +1,11 @@
+# --- Ядро / конфиг / утилиты ---
+pydantic>=2.7
+pydantic-settings>=2.3
+PyYAML>=6.0
+python-dotenv>=1.0
+loguru>=0.7
+keyring>=25.0
+httpx>=0.27
+
+# --- GUI ---
+PySide6>=6.7

@@ -1,0 +1,113 @@
+"""Запись звука и энергетический VAD."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import sounddevice as sd
+
+
+@dataclass
+class AudioConfig:
+    sample_rate: int = 16000
+    channels: int = 1
+    block_ms: int = 30  # размер блока в мс
+
+    @property
+    def blocksize(self) -> int:
+        return int(self.sample_rate * self.block_ms / 1000)
+
+
+class EnergyVAD:
+    """Простой энергетический детектор речи (по RMS)."""
+
+    def __init__(
+        self,
+        threshold: float = 0.015,
+        silence_ms: int = 1200,
+        min_speech_ms: int = 300,
+    ) -> None:
+        self.threshold = threshold
+        self.silence_ms = silence_ms
+        self.min_speech_ms = min_speech_ms
+        self._speaking = False
+        self._speech_ms = 0
+        self._silence_ms = 0
+        self._min_blocks = int(min_speech_ms / 30)
+
+    @property
+    def speaking(self) -> bool:
+        return self._speaking
+
+    def feed(self, block: np.ndarray, block_ms: int) -> str:
+        """Обрабатывает блок, возвращает событие: 'start'|'end'|None."""
+        energy = float(np.sqrt(np.mean(block.astype(np.float32) ** 2)))
+        is_speech = energy >= self.threshold
+
+        if is_speech:
+            self._silence_ms = 0
+            if not self._speaking:
+                self._speech_ms += block_ms
+                if self._speech_ms >= self.min_speech_ms:
+                    self._speaking = True
+                    return "start"
+            return None
+
+        if self._speaking:
+            self._speech_ms = 0
+            self._silence_ms += block_ms
+            if self._silence_ms >= self.silence_ms:
+                self._speaking = False
+                self._silence_ms = 0
+                return "end"
+        else:
+            self._speech_ms = 0
+        return None
+
+    def reset(self) -> None:
+        self._speaking = False
+        self._speech_ms = 0
+        self._silence_ms = 0
+
+
+class Recorder:
+    """Записывает звук с микрофона через sounddevice."""
+
+    def __init__(self, config: AudioConfig | None = None) -> None:
+        self.config = config or AudioConfig()
+        self._stream: sd.InputStream | None = None
+
+    def read_block(self) -> np.ndarray:
+        """Блокирующее чтение одного блока звука."""
+        if self._stream is None:
+            raise RuntimeError("Поток не открыт. Используй open().")
+        block, _ = self._stream.read(self.config.blocksize)
+        return np.asarray(block).reshape(-1)
+
+    def open(self) -> None:
+        if self._stream is not None:
+            return
+        self._stream = sd.InputStream(
+            samplerate=self.config.sample_rate,
+            channels=self.config.channels,
+            dtype="int16",
+            blocksize=self.config.blocksize,
+        )
+        self._stream.start()
+
+    def close(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._stream = None
+
+    def __enter__(self) -> "Recorder":
+        self.open()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
