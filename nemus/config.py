@@ -12,13 +12,18 @@ API-ключи могут храниться в OS keyring (см. ``nemus.utils.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # Собранный exe: config/, data/, plugins/ лежат рядом с Nemesis.exe.
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 DATA_DIR = PROJECT_ROOT / "data"
 

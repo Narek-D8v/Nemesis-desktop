@@ -1,0 +1,63 @@
+name: Build Windows Executable
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconsole --onedir --name "Nemesis" `
+            --collect-all litellm `
+            --collect-all vosk `
+            --collect-all faster_whisper `
+            --collect-all ctranslate2 `
+            --collect-all sounddevice `
+            --collect-submodules keyring.backends `
+            --add-data "nemus/voice/_rnnoise/rnnoise.dll;nemus/voice/_rnnoise" `
+            nemus/__main__.py
+
+      - name: Copy runtime files next to exe
+        run: |
+          Copy-Item "config\config.example.yaml","LICENSE","README.md" "dist\Nemesis\" -Force
+          Copy-Item "plugins" "dist\Nemesis\plugins" -Recurse -Force
+          Get-ChildItem "dist\Nemesis\plugins" -Recurse -Directory -Filter "__pycache__" |
+            Remove-Item -Recurse -Force
+
+      - name: Compress artifact
+        run: Compress-Archive -Path "dist\Nemesis\*" -DestinationPath "Nemesis-Windows.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nemesis-Windows-Executable
+          path: Nemesis-Windows.zip
+
+      - name: Attach archive to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Nemesis-Windows.zip

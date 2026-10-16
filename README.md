@@ -58,6 +58,23 @@ venv\Scripts\python.exe -m pip install -r requirements.txt
 venv\Scripts\python.exe -m nemus
 ```
 
+## Готовые сборки (exe)
+
+Готовый `Nemesis.exe` для Windows собирается автоматически в GitHub Actions
+(`.github/workflows/build.yml`) при публикации релиза. Скачать: вкладка
+**Releases** → `Nemesis-Windows.zip`.
+
+1. Распакуйте архив в любую папку (например, `D:\Nemesis`).
+2. Запустите `Nemesis.exe`. При первом запуске рядом появятся `config/`, `data/`
+   и `plugins/` — там лежат конфиг (`config/config.yaml`), логи (`data/nemus.log`)
+   и скачанные модели.
+3. При первом использовании микрофона/синтеза речи скачаются модели Vosk и
+   faster-whisper в `data/models/`.
+
+Сборка сделана через PyInstaller в режиме `onedir`: рядом с `Nemesis.exe` лежит
+папка `_internal/` — её нужно сохранять вместе с exe. Браузерный инструмент
+(`playwright`) в exe не входит; для его работы запускайте приложение из исходников.
+
 ## Настройка
 
 1. Скопируйте `config/config.example.yaml` в `config/config.yaml` (или правьте прямо в GUI).
@@ -73,7 +90,7 @@ venv\Scripts\python.exe -m nemus
 > перечислены в `.gitignore`, но **при загрузке файлов через веб-интерфейс GitHub
 > `.gitignore` не действует**. Загружайте только исходники: `nemus/`, `plugins/`,
 > `scripts/`, `config/config.example.yaml`, `README.md`, `LICENSE`,
-> `pyproject.toml`, `requirements*.txt`, `run.bat`, `.gitignore`.
+> `pyproject.toml`, `requirements*.txt`, `run.bat`, `.gitignore`, `.github/`.
 
 ## Разрешения и безопасность
 
@@ -139,6 +156,7 @@ plugins/            # пользовательские инструменты (�
 scripts/            # ручные проверки и smoke-тесты
 config/             # config.yaml (локальный) и пример
 data/               # БД, логи, модели, workspace (в git не попадает)
+.github/workflows/  # CI: тесты (tests.yml) и сборка exe (build.yml)
 ```
 
 ## Автор
