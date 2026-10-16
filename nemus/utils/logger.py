@@ -17,17 +17,18 @@ def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
         return
 
     logger.remove()
-    logger.add(
-        sys.stderr,
-        level=level.upper(),
-        colorize=True,
-        format=(
-            "<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | "
-            "<cyan>{name}</cyan> — <level>{message}</level>"
-        ),
-        backtrace=False,
-        diagnose=False,
-    )
+    if sys.stderr is not None:
+        logger.add(
+            sys.stderr,
+            level=level.upper(),
+            colorize=True,
+            format=(
+                "<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | "
+                "<cyan>{name}</cyan> — <level>{message}</level>"
+            ),
+            backtrace=False,
+            diagnose=False,
+        )
 
     if log_file:
         path = Path(log_file)
