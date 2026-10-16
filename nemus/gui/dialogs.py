@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -115,11 +116,13 @@ class SettingsDialog(QDialog):
         layout.addLayout(header)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_llm_tab(), i18n.tr("tab.llm"))
-        tabs.addTab(self._build_voice_tab(), i18n.tr("tab.voice"))
-        tabs.addTab(self._build_spotify_tab(), i18n.tr("tab.spotify"))
-        tabs.addTab(self._build_tools_tab(), i18n.tr("tab.tools"))
-        tabs.addTab(self._build_about_tab(), i18n.tr("tab.about"))
+        tabs.addTab(self._scrollable(self._build_llm_tab()), i18n.tr("tab.llm"))
+        tabs.addTab(self._scrollable(self._build_voice_tab()), i18n.tr("tab.voice"))
+        tabs.addTab(
+            self._scrollable(self._build_spotify_tab()), i18n.tr("tab.spotify")
+        )
+        tabs.addTab(self._scrollable(self._build_tools_tab()), i18n.tr("tab.tools"))
+        tabs.addTab(self._scrollable(self._build_about_tab()), i18n.tr("tab.about"))
         layout.addWidget(tabs)
 
         buttons = QHBoxLayout()
@@ -134,6 +137,16 @@ class SettingsDialog(QDialog):
         buttons.addWidget(cancel_btn)
         buttons.addWidget(save_btn)
         layout.addLayout(buttons)
+
+    @staticmethod
+    def _scrollable(widget: QWidget) -> QScrollArea:
+        """Оборачивает содержимое вкладки в прокручиваемую область."""
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setWidget(widget)
+        return area
 
     # ------------------------------------------------------------------ LLM
     def _build_llm_tab(self) -> QWidget:
