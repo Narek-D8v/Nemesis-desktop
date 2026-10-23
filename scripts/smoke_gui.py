@@ -10,6 +10,13 @@ import os
 import sys
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

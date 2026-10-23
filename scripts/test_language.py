@@ -12,6 +12,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+
+# На Windows консоль по умолчанию cp1251/cp1252 — без этого печать кириллицы
+# падает UnicodeEncodeError при запуске вне PYTHONUTF8/PYTHONIOENCODING.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
