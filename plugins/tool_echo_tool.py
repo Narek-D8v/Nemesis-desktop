@@ -1,4 +1,6 @@
 from nemus.core.tools.base import Tool, ToolResult
+
+
 class EchoTool(Tool):
     name = 'echo_tool'
     description = 'Повторяет введенное сообщение.'
