@@ -75,6 +75,13 @@ def main() -> int:
     window.show()
 
     window.submit_text("Сколько будет 7*6?")
+    # пока агент думает, в чате должен быть статус «Думаю…», а не «Слушаю…»
+    from nemus.gui import i18n
+
+    assert i18n.tr("state.thinking") in window.state_label.text(), (
+        window.state_label.text()
+    )
+    print("ok  статус в чате: Думаю…")
 
     result = {"ok": False}
 
@@ -92,6 +99,10 @@ def main() -> int:
     app.exec()
 
     assert result["ok"], "GUI не показал результат агента"
+    assert i18n.tr("state.idle") in window.state_label.text(), (
+        window.state_label.text()
+    )
+    print("ok  статус после ответа: Готова")
     print("\nGUI SMOKE TEST PASSED")
     return 0
 
