@@ -32,6 +32,10 @@ LLM-агентом с вызовом инструментов, локальны�
     приложения и даже когда кнопка «Слушать» выключена; по слову активации
     запускается Realtime-диалог (или обычное прослушивание, если
     `voice.realtime.wake_activates: false`);
+  - по слову активации можно запускать навыки (навыки wake word): время,
+    YouTube, Spotify (открыть/воспроизвести/пауза) и свои через
+    `voice.wake_word.skills` в `config.yaml` — опасные действия отдаются
+    агенту на подтверждение;
   - распознавание речи — faster-whisper (офлайн);
   - синтез речи — edge-tts: сотни голосов на десятках языков, выбираются во
     вкладке «Озвучка (TTS)» окна настроек (локаль, голос, скорость, громкость,
@@ -150,15 +154,15 @@ venv\Scripts\python.exe scripts\test_notes.py         # заметки о пол
 venv\Scripts\python.exe scripts\test_realtime.py      # протоколы Gemini/OpenAI Realtime
 venv\Scripts\python.exe scripts\test_spotify.py       # Spotify Web API
 venv\Scripts\python.exe scripts\test_browser.py       # browser_open и fallback на системный браузер
+venv\Scripts\python.exe scripts\test_wake_skills.py   # навыки wake word
 venv\Scripts\python.exe scripts\smoke_gui.py          # сборка окна без показа
-venv\Scripts\python.exe scripts\smoke_agent.py        # агентный цикл (заглушка LLM)
 venv\Scripts\python.exe scripts\smoke_realtime_app.py # интеграция realtime и GUI
 ```
 
 Для GUI-скриптов в headless-среде задайте `QT_QPA_PLATFORM=offscreen`.
 Часть скриптов (`test_voice.py`, `test_wake_*.py`, `test_local_live.py`)
 требует микрофон, модель wake word или API-ключ. Офлайн-скрипты
-(`test_language.py`, `test_tools.py`, `test_realtime.py`, `smoke_agent.py`,
+(`test_language.py`, `test_tools.py`, `test_realtime.py`,
 `smoke_gui.py`, `smoke_realtime_app.py`) запускаются автоматически в CI
 (`.github/workflows/tests.yml`).
 
