@@ -38,7 +38,7 @@ include = ["nemus*"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-exclude = ["venv", ".venv", "data", "build", "dist"]
+exclude = ["venv", ".venv", "data", "build", "dist", "plugins"]
 
 [tool.ruff.lint]
 # Базовый набор: ошибки, неиспользуемые импорты/переменные, сортировка импортов,

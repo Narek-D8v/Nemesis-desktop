@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
@@ -132,13 +133,14 @@ class CreateToolTool(Tool):
         "и сразу делает доступным. Используй это, когда подходящего встроенного инструмента нет или его нужно улучшить. Код должен содержать класс-наследник Tool. "
         "Пример каркаса:\n"
         "from nemus.core.tools.base import Tool, ToolResult\n"
+        "\n"
+        "\n"
         "class MyTool(Tool):\n"
         "    name = 'my_tool'\n"
         "    description = 'Что делает'\n"
         "    parameters = {'type':'object','properties':{'x':{'type':'string'}},'required':['x']}\n"
         "    def execute(self, x='', **_):\n"
-        "        return ToolResult.success(f'сделал {x}')"
-    )
+        "        return ToolResult.success(f'сделал {x}')\n"    )
     parameters = {
         "type": "object",
         "properties": {
@@ -190,6 +192,23 @@ class CreateToolTool(Tool):
         plugins_dir.mkdir(parents=True, exist_ok=True)
         path = plugins_dir / f"tool_{name}.py"
         existed = path.exists()
+        # Нормализуем код: перенос строк, завершающий перевод строки,
+        # и, если доступен ruff, автоформатирование (чтобы плагин проходил ruff).
+        code = code.rstrip("\n") + "\n"
+        try:
+            import subprocess
+
+            path.write_text(code, encoding="utf-8")
+            subprocess.run(
+                [sys.executable, "-m", "ruff", "format", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if path.exists():
+                code = path.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
         try:
             path.write_text(code, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
