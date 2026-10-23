@@ -28,14 +28,25 @@ LLM-агентом с вызовом инструментов, локальны�
   элементов, поэтому `control_screen` умеет нажимать `click_element(id=…)` или
   `click_text(text=…)` — без угадывания координат.
 - **Голос**:
-  - wake word «Немуся» (Vosk, офлайн);
+  - wake word «Немуся» (Vosk, офлайн). Слушается постоянно — с запуска
+    приложения и даже когда кнопка «Слушать» выключена; по слову активации
+    запускается Realtime-диалог (или обычное прослушивание, если
+    `voice.realtime.wake_activates: false`);
   - распознавание речи — faster-whisper (офлайн);
-  - синтез речи — edge-tts;
+  - синтез речи — edge-tts: сотни голосов на десятках языков, выбираются во
+    вкладке «Озвучка (TTS)» окна настроек (локаль, голос, скорость, громкость,
+    кнопка «Прослушать»);
   - подавление шума — builtin / RNNoise (офлайн) / Krisp SDK.
 - **Режим реального времени** (непрерывный голосовой диалог): Gemini Live, OpenAI Realtime
   или локальный офлайн-аналог (STT → LLM → TTS).
 - **Память** на SQLite: история диалога и долговременные факты.
-- **Плагины**: свои инструменты в `plugins/`.
+- **Заметки о пользователе**: Немуся сама записывает, когда посчитает нужным
+  (имя, предпочтения, планы, договорённости), инструменты `write_note` /
+  `read_notes`, файл — `data/notes.md` (`memory.notes_file`). Это обычный
+  markdown: его можно открыть и поправить руками, а свежие заметки
+  подкладываются в системный промпт, чтобы она помнила между сессиями.
+  Выключается через `memory.notes: false`.
+- **Плагины**: свои инструменты в `plugins/`. Ассистент умеет писать их сам по просьбе (`create_tool`): просите «научись делать X» — Немуся создаст и сразу подключит новый инструмент.
 - **Язык**: ответы на языке собеседника (`assistant.reply_language: auto`) без
   «внутренних рассуждений» в выводе, либо принудительно русский/английский.
   Интерфейс переключается между русским и английским (`gui.language`).
@@ -67,7 +78,7 @@ venv\Scripts\python.exe -m nemus
 (`.github/workflows/build.yml`) при публикации релиза. Скачать: вкладка
 **Releases** → `Nemesis-Windows.zip`.
 
-1. Распакуйте архив в любую папку (например, `D:\Nemesis`).
+1. Распакуйте архив в любую папку на любом диске (путь нигде не зашит).
 2. Запустите `Nemesis.exe`. При первом запуске рядом появятся `config/`, `data/`
    и `plugins/` — там лежат конфиг (`config/config.yaml`), логи (`data/nemus.log`)
    и скачанные модели.
@@ -77,6 +88,9 @@ venv\Scripts\python.exe -m nemus
 Сборка сделана через PyInstaller в режиме `onedir`: рядом с `Nemesis.exe` лежит
 папка `_internal/` — её нужно сохранять вместе с exe. Браузерный инструмент
 (`playwright`) в exe не входит; для его работы запускайте приложение из исходников.
+
+Локально собрать так же, как в CI, можно командой `pyinstaller Nemesis.spec`
+(единый источник настроек сборки — `Nemesis.spec`).
 
 ## Настройка
 
@@ -100,12 +114,18 @@ venv\Scripts\python.exe -m nemus
 - `tools.permission_mode`: `full-auto` | `smart` | `confirm-all`. Рекомендуется `smart` —
   безопасные инструменты выполняются сразу, опасные (`run_shell`, `run_python`,
   `delete_path`, `install_package`, `create_tool`) требуют подтверждения в GUI.
-- `tools.workspace` — рабочая папка ассистента. Запись, удаление и запуск скриптов
-  **ограничены** этой папкой. Чтение файлов не ограничивается. Отключить ограничение:
-  `tools.allow_outside_workspace: true`.
+- `tools.workspace` — рабочая папка ассистента по умолчанию. Чтение файлов не
+  ограничивается; запись/запуск ограничены этой папкой, пока не включите
+  `tools.allow_outside_workspace: true` (в этом режиме ассистент работает с
+  файлами в любом месте системы).
 - `fetch_url` не позволяет обращаться к локальным/внутренним адресам (защита от SSRF).
-- `create_tool` статически проверяет код плагина (запрет `os`/`sys`/`subprocess`/`eval`/dunder
-  и т.п.), но остаётся DANGEROUS — подтверждайте только понятный вам код.
+- `create_tool` статически проверяет код плагина: запрещены сеть (`socket`,
+  `requests`, `urllib`…), низкоуровневый доступ (`ctypes`, `signal`, `pty`,
+  `importlib`, `pickle`), `eval`/`exec`/`__import__` и dunder-хаки. Файлы, ОС и
+  консоль (`os`, `subprocess`, `pathlib`, `shutil`, `tempfile`, `glob`, `open`)
+  разрешены — плагин не должен быть бесполезнее `run_python`. Инструмент остаётся
+  DANGEROUS — подтверждайте только понятный вам код. Имя в аргументе
+  `name` должно совпадать с `name = '...'` внутри класса-наследника `Tool`.
 - `see_screen` — риск SAFE (только снимок), `control_screen` — DANGEROUS (управляет ПК).
   Чтобы ассистент работал с экраном без постоянных подтверждений, добавьте
   `see_screen` и/или `control_screen` в `tools.auto_allow` либо используйте
@@ -126,6 +146,7 @@ venv\Scripts\python.exe -m compileall -q nemus scripts
 ```bat
 venv\Scripts\python.exe scripts\test_language.py      # язык, фильтр рассуждений, i18n
 venv\Scripts\python.exe scripts\test_tools.py         # инструменты и sandbox
+venv\Scripts\python.exe scripts\test_notes.py         # заметки о пользователе (NoteBook)
 venv\Scripts\python.exe scripts\test_realtime.py      # протоколы Gemini/OpenAI Realtime
 venv\Scripts\python.exe scripts\test_spotify.py       # Spotify Web API
 venv\Scripts\python.exe scripts\test_browser.py       # browser_open и fallback на системный браузер
@@ -136,7 +157,48 @@ venv\Scripts\python.exe scripts\smoke_realtime_app.py # интеграция rea
 
 Для GUI-скриптов в headless-среде задайте `QT_QPA_PLATFORM=offscreen`.
 Часть скриптов (`test_voice.py`, `test_wake_*.py`, `test_local_live.py`)
-требует микрофон, модель wake word или API-ключ.
+требует микрофон, модель wake word или API-ключ. Офлайн-скрипты
+(`test_language.py`, `test_tools.py`, `test_realtime.py`, `smoke_agent.py`,
+`smoke_gui.py`, `smoke_realtime_app.py`) запускаются автоматически в CI
+(`.github/workflows/tests.yml`).
+
+## MCP-серверы
+
+Немуся умеет подключать внешние [MCP](https://modelcontextprotocol.io)‑серверы
+по stdio (Node.js, Python и т. п.). Инструменты сервера автоматически
+попадают в список инструментов агента.
+
+Включение в `config/config.yaml`:
+
+```yaml
+mcp:
+  enabled: true
+  refresh_seconds: 60
+  servers:
+    - command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "data"]
+      cwd: "."
+      env: {}
+      enabled: true
+```
+
+- `command`, `args`, `cwd`, `env` — как у обычного процесса.
+- `refresh_seconds` — период обновления списка инструментов.
+- В GUI: вкладка **«MCP»** в окне настроек — добавление/правка серверов
+  (команда, аргументы, рабочая папка, переменные окружения), кнопка
+  «Проверить» (живое подключение и список инструментов), «Обновить
+  инструменты» и статус уже подключённых инструментов.
+- Все MCP-инструменты имеют уровень риска `DANGEROUS`: это внешний код,
+  который не проверяется правилами разрешений, поэтому в режимах `smart` и
+  `confirm-all` вызов требует подтверждения.
+- Если пакет `mcp` не установлен, интеграция полностью отключается, а
+  остальные функции продолжают работать.
+
+Проверка подключения (запустит тестовый сервер и вызовет его инструменты):
+
+```bash
+python scripts/test_mcp.py
+```
 
 ## Структура проекта
 
@@ -150,6 +212,7 @@ nemus/
     language.py     # определение языка, инструкции языка и запрет рассуждений
     factory.py      # сборка ядра, инъекция настроек в инструменты
     memory.py       # SQLite: история и факты
+    mcp.py          # MCP-серверы (stdio) и их инструменты
     permissions.py  # политика разрешений
     tools/          # встроенные инструменты + sandbox + volume
     providers/      # единый слой сообщений/tool-calls
@@ -160,6 +223,7 @@ plugins/            # пользовательские инструменты (�
 scripts/            # ручные проверки и smoke-тесты
 config/             # config.yaml (локальный) и пример
 data/               # БД, логи, модели, workspace (в git не попадает)
+Nemesis.spec        # единая конфигурация сборки PyInstaller (локально и в CI)
 .github/workflows/  # CI: тесты (tests.yml) и сборка exe (build.yml)
 ```
 

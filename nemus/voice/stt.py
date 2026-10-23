@@ -11,15 +11,52 @@ import numpy as np
 from nemus.utils.logger import logger
 
 
+def build_hotwords(config: Any) -> str:
+    """Собирает подсказки-слова для STT: имя ассистента + частые команды."""
+    words: list[str] = []
+    name = getattr(getattr(config, "assistant", None), "name", "")
+    if name:
+        words.append(name)
+    full_name = getattr(getattr(config, "assistant", None), "full_name", "")
+    if full_name:
+        words.append(full_name)
+    words.extend(
+        [
+            "открой", "закрой", "включи", "выключи", "запусти", "останови",
+            "громче", "тише", "поставь", "напиши", "создай", "удали",
+            "напомни", "таймер", "часы", "будильник", "музыка", "погода",
+        ]
+    )
+    stt = getattr(getattr(config, "voice", None), "stt", None)
+    extra = getattr(stt, "hotwords", "") if stt is not None else ""
+    if extra:
+        words.extend(w for w in extra.replace(",", " ").split() if w)
+    # убираем дубли, сохраняя порядок
+    seen: set[str] = set()
+    uniq = [w for w in words if not (w in seen or seen.add(w))]
+    return " ".join(uniq)
+
+
 class STTEngine:
     """Лениво загружаемая модель faster-whisper с прогревом и быстрым decode."""
 
     def __init__(
-        self, model: str = "small", language: str = "ru", device: str = "auto"
+        self,
+        model: str = "small",
+        language: str = "ru",
+        device: str = "auto",
+        beam_size: int = 5,
+        hotwords: str = "",
+        initial_prompt: str = "Это короткая голосовая команда ассистенту.",
     ) -> None:
         self.model_size = model
         self.language = language
         self.device = device
+        # beam_size>1 заметно снижает ошибки распознавания коротких команд
+        self.beam_size = max(1, int(beam_size))
+        # подсказки-слова (hotwords) повышают вероятность верного варианта
+        self.hotwords = hotwords.strip()
+        self.initial_prompt = initial_prompt
         self._model: Any = None
         self._lock = threading.Lock()
 
@@ -77,14 +114,16 @@ class STTEngine:
         else:
             arr = audio.astype(np.float32)
         model = self._load()
-        segments, _info = model.transcribe(
-            arr,
-            language=self.language,
-            beam_size=1,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-            condition_on_previous_text=False,
-            temperature=0.0,
-            initial_prompt="Это короткая голосовая команда ассистенту.",
-        )
+        kwargs: dict[str, Any] = {
+            "language": self.language,
+            "beam_size": self.beam_size,
+            "vad_filter": True,
+            "vad_parameters": {"min_silence_duration_ms": 300},
+            "condition_on_previous_text": False,
+            "temperature": 0.0,
+            "initial_prompt": self.initial_prompt,
+        }
+        if self.hotwords:
+            kwargs["hotwords"] = self.hotwords
+        segments, _info = model.transcribe(arr, **kwargs)
         return " ".join(seg.text.strip() for seg in segments).strip()

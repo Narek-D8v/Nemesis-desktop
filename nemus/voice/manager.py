@@ -14,9 +14,15 @@ from nemus.utils.logger import logger
 from nemus.voice.audio import AudioConfig, EnergyVAD, Recorder
 from nemus.voice.audio_dsp import AudioCleaner  # noqa: F401 (реэкспорт)
 from nemus.voice.noise import create_noise_reducer
-from nemus.voice.stt import STTEngine
-from nemus.voice.tts import TTSEngine
-from nemus.voice.wakeword import VoskWakeWord, download_model, model_available
+from nemus.voice.params import SAMPLE_RATE, VAD_SILENCE_MS, VAD_THRESHOLD
+from nemus.voice.stt import STTEngine, build_hotwords
+from nemus.voice.tts import TTSEngine, resolve_openai_key
+from nemus.voice.wakeword import (
+    VoskWakeWord,
+    download_model,
+    model_available,
+    normalize_words,
+)
 
 OnText = Callable[[str], None]
 OnState = Callable[[AssistState], None]
@@ -34,34 +40,51 @@ class VoiceManager:
         on_state: OnState,
         on_amplitude: OnAmplitude = None,
         on_wake: OnWake = None,
+        wake_only: bool = False,
     ) -> None:
         self.config = config
         self.on_text = on_text
         self.on_state = on_state
         self.on_amplitude = on_amplitude
         self.on_wake = on_wake
+        self._wake_only = wake_only
 
-        audio_cfg = AudioConfig(sample_rate=16000)
+        audio_cfg = AudioConfig()
         self.recorder = Recorder(audio_cfg)
         self.cleaner = create_noise_reducer(
-            config.voice.noise, sample_rate=16000, block_ms=audio_cfg.block_ms
+            config.voice.noise, sample_rate=audio_cfg.sample_rate, block_ms=audio_cfg.block_ms
         )
-        self.vad = EnergyVAD(threshold=0.012, silence_ms=600)
-        self.stt = STTEngine(
-            model=config.voice.stt.model,
-            language=config.voice.stt.language,
-            device=config.voice.stt.device,
-        )
-        self.tts = TTSEngine(
-            voice=config.voice.tts.voice,
-            rate=config.voice.tts.rate,
-            volume=config.voice.tts.volume,
-        )
+        self.vad = EnergyVAD(threshold=VAD_THRESHOLD, silence_ms=VAD_SILENCE_MS)
+        self.stt = None
+        if not wake_only:
+            self.stt = STTEngine(
+                model=config.voice.stt.model,
+                language=config.voice.stt.language,
+                device=config.voice.stt.device,
+                beam_size=config.voice.stt.beam_size,
+                hotwords=build_hotwords(config),
+            )
+        self.tts = None
+        if not wake_only:
+            tts_cfg = config.voice.tts
+            self.tts = TTSEngine(
+                voice=tts_cfg.voice,
+                rate=tts_cfg.rate,
+                volume=tts_cfg.volume,
+                engine=tts_cfg.engine,
+                model=tts_cfg.openai_model,
+                api_key=resolve_openai_key(config.llm.providers),
+            )
 
         self._thread: threading.Thread | None = None
         self._running = False
         self._wakeword: VoskWakeWord | None = None
         self._last_wake = 0.0
+
+    @property
+    def wake_only(self) -> bool:
+        """True — менеджер только слушает слово активации (без записи команд)."""
+        return self._wake_only
 
     # ------------------------------------------------------------------- state
     def start(self) -> bool:
@@ -70,12 +93,16 @@ class VoiceManager:
             return True
         if not self._init_wakeword():
             return False
+        if self._wake_only and self._wakeword is None:
+            logger.warning("Wake-слушатель не нужен: модель слова активации недоступна.")
+            return False
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         # прогрев STT в фоне — первая команда не будет «тормозить»
-        threading.Thread(target=self.stt.warmup, daemon=True, name="stt-warmup").start()
-        logger.info("Голосовой ввод запущен.")
+        if self.stt is not None:
+            threading.Thread(target=self.stt.warmup, daemon=True, name="stt-warmup").start()
+        logger.info("Голосовой ввод запущен." if not self._wake_only else "Wake-слушатель запущен.")
         return True
 
     def stop(self) -> None:
@@ -86,9 +113,14 @@ class VoiceManager:
             self.recorder.close()
         except Exception:  # noqa: BLE001
             pass
-        self.tts.stop()
+        if self.tts is not None:
+            self.tts.stop()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
+        # Разрываем цикл ссылок VoiceManager <-> Thread: иначе объект никогда
+        # не освободится обычным счётчиком ссылок и попадёт под cyclic GC,
+        # который может abort'ить процесс при разборе нативных ресурсов.
+        self._thread = None
         close = getattr(self.cleaner, "close", None)
         if callable(close):
             try:
@@ -99,6 +131,8 @@ class VoiceManager:
 
     def speak(self, text: str, block: bool = False) -> None:
         """Озвучивает текст (для ответов ассистента)."""
+        if self.tts is None:
+            return
         self.tts.speak(text, block=block)
 
     # ---------------------------------------------------------------- wake word
@@ -115,8 +149,13 @@ class VoiceManager:
 
                 model_path = str(download_model(DATA_DIR / "models"))
                 cfg.vosk_model_path = model_path
+            if cfg.engine == "vosk":
+                cfg.words = normalize_words(cfg.words)
+            logger.info(
+                f"Wake word слушает: {', '.join(cfg.words)} (модель {model_path})"
+            )
             self._wakeword = VoskWakeWord(
-                model_path, cfg.words, sample_rate=16000
+                model_path, cfg.words, sample_rate=SAMPLE_RATE
             )
             return True
         except Exception as exc:  # noqa: BLE001
@@ -143,12 +182,22 @@ class VoiceManager:
                     pcm = clean.astype(np.int16).tobytes()
                     if self._wakeword.feed(pcm):
                         self._handle_wake()
-                else:
-                    self._record_command()
+                    # В режиме wake_only после срабатывания не нужно сразу
+                    # запускать запись команды — app сам запустит Realtime.
+                    if self._wake_only:
+                        continue
+                # В wake_only режиме без wakeword нечего делать — просто ждём
+                if self._wake_only:
+                    continue
+                self._record_command()
         except Exception:  # noqa: BLE001
             logger.exception("Сбой голосового цикла")
         finally:
             self.recorder.close()
+            try:
+                self.cleaner.close()
+            except Exception:  # noqa: BLE001
+                pass
             self._running = False
 
     def _handle_wake(self) -> None:

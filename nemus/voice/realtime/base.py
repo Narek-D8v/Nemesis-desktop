@@ -15,6 +15,7 @@ from nemus.core.tools.base import Tool, ToolResult
 from nemus.core.tools.registry import ToolRegistry
 from nemus.utils.logger import logger
 from nemus.utils.redact import redact_secrets
+from nemus.voice.params import SAMPLE_RATE
 
 
 class RealtimeState(str, Enum):
@@ -47,7 +48,7 @@ class BaseRealtimeSession(ABC):
     """
 
     provider: str = ""
-    send_rate: int = 16000
+    send_rate: int = SAMPLE_RATE
     receive_rate: int = 24000
 
     def __init__(
@@ -74,6 +75,7 @@ class BaseRealtimeSession(ABC):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._last_state: RealtimeState | None = None
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> bool:
@@ -129,6 +131,10 @@ class BaseRealtimeSession(ABC):
             asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def _emit_state(self, state: RealtimeState) -> None:
+        # каждые 60 мс приходит новый аудио-чанк: не дёргаем GUI повтором
+        if state == self._last_state:
+            return
+        self._last_state = state
         if self.cb.on_state:
             try:
                 self.cb.on_state(state)

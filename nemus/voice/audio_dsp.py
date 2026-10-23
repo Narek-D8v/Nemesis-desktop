@@ -16,6 +16,8 @@ import math
 
 import numpy as np
 
+from nemus.voice.params import BLOCK_MS, SAMPLE_RATE
+
 
 class AudioCleaner:
     """Фильтрует шум: одно-полюсный ВЧ-фильтр + шумовые ворота.
@@ -27,14 +29,14 @@ class AudioCleaner:
 
     def __init__(
         self,
-        sample_rate: int = 16000,
+        sample_rate: int = SAMPLE_RATE,
         highpass_hz: float = 80.0,
         min_rms: float = 0.003,
         gate_ratio: float = 2.5,
         max_threshold: float = 0.05,
         hangover_ms: int = 120,
         floor_window_ms: int = 2000,
-        block_ms: int = 30,
+        block_ms: int = BLOCK_MS,
     ) -> None:
         self.sample_rate = sample_rate
         self.highpass_hz = highpass_hz

@@ -8,16 +8,36 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from nemus.utils.logger import logger
+from nemus.voice.params import SAMPLE_RATE
 
 DEFAULT_MODEL = "vosk-model-small-ru-0.22"
 MODEL_URL = f"https://alphacephei.com/vosk/models/{DEFAULT_MODEL}.zip"
+#: Слова по умолчанию: используются, если в конфиге пусто или битая кодировка.
+DEFAULT_WAKE_WORDS = ("немуся", "немесис", "немо")
+
+
+def normalize_words(words: list[str]) -> list[str]:
+    """Чистит слова активации и подставляет дефолтные при пустом/битом списке."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in words:
+        word = (raw or "").strip().lower().replace("ё", "е")
+        if not word or word in seen:
+            continue
+        # U+FFFD — следы битой кодировки; латиница русской моделью не ловится.
+        if "\ufffd" in word or not any("а" <= ch <= "я" for ch in word):
+            continue
+        seen.add(word)
+        cleaned.append(word)
+    return cleaned or list(DEFAULT_WAKE_WORDS)
+
 
 
 class VoskWakeWord:
     """Детектор ключевого слова на русском (Vosk KWS)."""
 
     def __init__(
-        self, model_path: str | Path, words: list[str], sample_rate: int = 16000
+        self, model_path: str | Path, words: list[str], sample_rate: int = SAMPLE_RATE
     ) -> None:
         import vosk  # noqa: PLC0415 — локальный импорт для скорости старта
 

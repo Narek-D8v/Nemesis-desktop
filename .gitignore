@@ -33,6 +33,7 @@ data/
 build/
 dist/
 *.spec
+!Nemesis.spec
 
 # IDE
 .idea/

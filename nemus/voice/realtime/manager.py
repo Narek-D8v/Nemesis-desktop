@@ -12,6 +12,7 @@ from nemus.core.providers.registry import PROVIDER_SPECS
 from nemus.core.tools.base import Tool
 from nemus.core.tools.registry import ToolRegistry
 from nemus.utils.logger import logger
+from nemus.voice.params import MIC_BLOCK_MS, SAMPLE_RATE
 from nemus.voice.realtime.base import BaseRealtimeSession, RealtimeCallbacks
 
 
@@ -57,18 +58,20 @@ class RealtimeManager:
             )
             return False
 
-        common = {
-            "callbacks": self.cb,
-            "registry": self.registry,
-            "permissions": self.permissions,
-            "confirm": self.confirm,
-            "system_prompt": self.system_prompt,
-            "barge_in": self.config.voice.barge_in,
-            "noise_reducer": self._noise_reducer(),
-            "reply_language": getattr(self.config.assistant, "reply_language", "auto"),
-        }
-
         try:
+            common = {
+                "callbacks": self.cb,
+                "registry": self.registry,
+                "permissions": self.permissions,
+                "confirm": self.confirm,
+                "system_prompt": self.system_prompt,
+                "barge_in": self.config.voice.barge_in,
+                "noise_reducer": self._noise_reducer(),
+                "reply_language": getattr(
+                    self.config.assistant, "reply_language", "auto"
+                ),
+            }
+
             if rc.provider == "gemini":
                 from nemus.voice.realtime.gemini_live import GeminiLiveSession
 
@@ -98,7 +101,15 @@ class RealtimeManager:
             return False
 
         logger.info(f"Запуск realtime-сессии: {rc.provider} ({rc.audio=})")
-        return self.session.start()
+        try:
+            return self.session.start()
+        except Exception as exc:  # noqa: BLE001
+            # Сбой коннекта/аудио не должен ронять приложение: UI получит
+            # cb_error и покажет сообщение, а не молча умрёт слот Qt.
+            logger.exception("Не удалось запустить realtime-сессию")
+            self.cb_error(str(exc))
+            self.session = None
+            return False
 
     def stop(self) -> None:
         if self.session is not None:
@@ -117,7 +128,9 @@ class RealtimeManager:
     def _noise_reducer(self):
         from nemus.voice.noise import create_noise_reducer
 
-        return create_noise_reducer(self.config.voice.noise, sample_rate=16000, block_ms=60)
+        return create_noise_reducer(
+            self.config.voice.noise, sample_rate=SAMPLE_RATE, block_ms=MIC_BLOCK_MS
+        )
 
     def _api_key(self, provider: str) -> str:
         pc = self.config.llm.providers.get(provider)

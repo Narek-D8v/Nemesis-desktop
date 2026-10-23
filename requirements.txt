@@ -1,25 +1,17 @@
 # ============================================================
 #  Немуся (Nemesis) — зависимости
 #  Устанавливается через: pip install -r requirements.txt
+#  Базовое ядро вынесено в requirements-core.txt (используется
+#  также как источник [tool.setuptools.dynamic].dependencies).
 # ============================================================
 
-# --- Ядро / конфиг / утилиты ---
-pydantic>=2.7
-pydantic-settings>=2.3
-PyYAML>=6.0
-python-dotenv>=1.0
-loguru>=0.7
-keyring>=25.0
-httpx>=0.27
-
-# --- GUI ---
-PySide6>=6.7
+# --- Ядро / конфиг / утилиты + GUI ---
+-r requirements-core.txt
 
 # --- LLM провайдеры ---
 litellm>=1.40
 openai>=1.30
 anthropic>=0.30
-google-genai>=1.0
 
 # --- Голос: реальное время (Gemini Live / OpenAI Realtime) ---
 websockets>=12.0
@@ -47,6 +39,10 @@ Pillow>=10.0
 
 # --- Инструменты: музыка (Spotify Web API) ---
 spotipy>=2.23
+
+# --- MCP (Model Context Protocol): опционально, при отсутствии пакета
+#     интеграция полностью отключается ---
+mcp>=2.0
 
 # --- Экран: cv2 + локальный OCR для текстовых моделей ---
 opencv-python-headless>=4.9

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -18,6 +20,103 @@ SCOPE = (
     "user-read-playback-state user-modify-playback-state "
     "user-read-currently-playing playlist-read-private user-read-private"
 )
+
+#: таймаут HTTP-запросов к Web API Spotify (секунды)
+SPOTIFY_HTTP_TIMEOUT = 10
+
+#: сколько треков из «дальше в очереди» возвращаем после включения нового трека
+_QUEUE_RESTORE_LIMIT = 15
+#: сколько раз ждём подтверждения, что воспроизведение реально началось
+_PLAY_VERIFY_TRIES = 4
+#: пауза между проверками старта воспроизведения (секунды)
+_PLAY_VERIFY_DELAY = 0.25
+
+#: служебные слова голосовых запросов («включи любую песню …») —
+#: убираем их перед поиском, иначе Spotify ищет по мусорной фразе
+_QUERY_FILLERS = (
+    "включи",
+    "включить",
+    "включай",
+    "поставь",
+    "запусти",
+    "давай",
+    "пожалуйста",
+    "мне",
+    "нам",
+    "любую",
+    "любая",
+    "любой",
+    "любые",
+    "любого",
+    "какую-нибудь",
+    "какую нибудь",
+    "какой-нибудь",
+    "что-нибудь",
+    "что нибудь",
+    "нибудь",
+    "песню",
+    "песня",
+    "песни",
+    "песен",
+    "песенку",
+    "песенки",
+    "трек",
+    "трека",
+    "треки",
+    "треков",
+    "композицию",
+    "композиция",
+    "музыку",
+    "музыка",
+    "мелодию",
+    "исполнителя",
+    "исполнитель",
+    "исполнительницы",
+    "группы",
+    "группа",
+    "певца",
+    "певицы",
+    "spotify",
+    "спотифай",
+    "спотифая",
+    "спотифае",
+    "спотифайе",
+    "из",
+)
+
+
+def _strip_fillers(query: str) -> str:
+    """Убирает служебные слова из голосового запроса.
+
+    «включи любую песню алены швец» -> «алены швец». Если после чистки ничего
+    не осталось, возвращает исходный запрос.
+    """
+    q = (query or "").strip()
+    if not q:
+        return q
+    cleaned = q
+    for word in _QUERY_FILLERS:
+        cleaned = re.sub(
+            rf"(?<!\w){re.escape(word)}(?!\w)", " ", cleaned, flags=re.IGNORECASE
+        )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+    return cleaned or q
+
+
+def _norm_name(text: str) -> str:
+    """Нормализация названия для сравнения: регистр, пунктуация, эмодзи."""
+    low = (text or "").casefold()
+    low = re.sub(r"[^\w\s]+", " ", low)
+    return re.sub(r"\s+", " ", low).strip()
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Склонение существительного после числа: 1 трек, 2 трека, 5 треков."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} {one}"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} {few}"
+    return f"{n} {many}"
 
 
 def redirect_uri_problem(uri: str) -> str:
@@ -208,8 +307,16 @@ class SpotifyTool(Tool):
         "'play' — продолжить воспроизведение, 'pause' — пауза, "
         "'next' — следующий трек, 'previous' — предыдущий, "
         "'current' — что сейчас играет, "
-        "'play_track' — найти и включить трек (нужен параметр query), "
-        "'play_playlist' — включить плейлист (параметр query), "
+        "'play_track' — найти и включить трек (параметр query: название трека "
+        "и/или исполнитель), "
+        "'play_artist' — включить песни исполнителя (параметр query: имя; "
+        "используй для «включи песню/песни X», «что-нибудь из X», «любую песню X»), "
+        "'play_playlist' — включить плейлист (параметр query: название; свои "
+        "плейлисты ищутся первыми), "
+        "'playlists' — показать плейлисты пользователя (вызывай, если просят "
+        "«какие у меня плейлисты» или название плейлиста неизвестно), "
+        "'queue_track' — добавить трек в очередь БЕЗ остановки текущего "
+        "(параметр query; используй, если просят «добавь в очередь/дальше»), "
         "'volume' — установить громкость в процентах (параметр percent), "
         "'devices' — список устройств, "
         "'set_device' — выбрать устройство по имени (параметр device). "
@@ -226,12 +333,16 @@ class SpotifyTool(Tool):
                 "type": "string",
                 "description": (
                     "Действие: open, play, pause, next, previous, current, play_track, "
-                    "play_playlist, volume, devices, set_device."
+                    "play_artist, play_playlist, playlists, queue_track, volume, "
+                    "devices, set_device."
                 ),
             },
             "query": {
                 "type": "string",
-                "description": "Название трека или плейлиста (для play_track/play_playlist).",
+                "description": (
+                    "Название трека, исполнитель или плейлист "
+                    "(для play_track/play_artist/play_playlist/queue_track)."
+                ),
             },
             "percent": {
                 "type": "integer",
@@ -249,6 +360,8 @@ class SpotifyTool(Tool):
     def __init__(self) -> None:
         self.settings: Any = None
         self._client: Any = None
+        #: кэш типа аккаунта Spotify: Free не запускает одиночный трек по запросу
+        self._free_account: bool | None = None
 
     # ------------------------------------------------------------------ client
     def _get_client(self) -> Any:
@@ -292,7 +405,9 @@ class SpotifyTool(Tool):
                 "Убедитесь, что в браузере вы РАЗРЕШИЛИ доступ приложению и увидели "
                 "страницу «Готово!». Для управления воспроизведением нужен Spotify Premium."
             )
-        self._client = spotipy.Spotify(auth_manager=auth, requests_timeout=10)
+        self._client = spotipy.Spotify(
+            auth_manager=auth, requests_timeout=SPOTIFY_HTTP_TIMEOUT
+        )
         return self._client
 
     def _active_device_id(self, sp: Any) -> str | None:
@@ -329,6 +444,9 @@ class SpotifyTool(Tool):
 
         try:
             return self._dispatch(sp, action, kwargs)
+        except RuntimeError as exc:
+            # наши сообщения уже дружелюбные (например, «Spotify не начал…»)
+            return ToolResult.failure(str(exc))
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(self._friendly_error(exc))
 
@@ -352,6 +470,8 @@ class SpotifyTool(Tool):
             return self._current(sp)
         if action == "devices":
             return self._devices(sp)
+        if action == "playlists":
+            return self._playlists(sp)
         if action == "set_device":
             return self._set_device(sp, kwargs.get("device", ""))
 
@@ -363,27 +483,153 @@ class SpotifyTool(Tool):
             )
 
         if action == "play":
-            sp.start_playback(device_id=device_id)
-            return ToolResult.success("Продолжаю воспроизведение.")
+            return self._player_call(sp, device_id, "Продолжаю воспроизведение.", sp.start_playback)
         if action == "pause":
-            sp.pause_playback(device_id=device_id)
-            return ToolResult.success("Пауза.")
+            return self._player_call(sp, device_id, "Пауза.", sp.pause_playback)
         if action == "next":
-            sp.next_track(device_id=device_id)
-            return ToolResult.success("Следующий трек.")
+            return self._player_call(sp, device_id, "Следующий трек.", sp.next_track)
         if action == "previous":
-            sp.previous_track(device_id=device_id)
-            return ToolResult.success("Предыдущий трек.")
+            return self._player_call(sp, device_id, "Предыдущий трек.", sp.previous_track)
         if action == "volume":
             percent = int(kwargs.get("percent", 50))
             percent = max(0, min(100, percent))
-            sp.volume(percent, device_id=device_id)
-            return ToolResult.success(f"Громкость {percent}%.")
+            return self._player_call(sp, device_id, f"Громкость {percent}%.", sp.volume, percent)
         if action == "play_track":
             return self._play_track(sp, device_id, kwargs.get("query", ""))
+        if action == "play_artist":
+            return self._play_artist(sp, device_id, kwargs.get("query", ""))
+        if action == "queue_track":
+            return self._queue_track(sp, device_id, kwargs.get("query", ""))
         if action == "play_playlist":
             return self._play_playlist(sp, device_id, kwargs.get("query", ""))
         return ToolResult.failure(f"Неизвестное действие: {action}")
+
+    # --------------------------------------------------------- устойчивый плеер
+    @staticmethod
+    def _wake_device(sp: Any, device_id: str) -> None:
+        """Пробуждает устройство через transfer_playback (лучшее, что можем сделать)."""
+        try:
+            sp.transfer_playback(device_id, force_play=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _player_call(
+        self, sp: Any, device_id: str, ok_msg: str, fn: Any, *args: Any
+    ) -> ToolResult:
+        """Выполняет команду плеера; при NO_ACTIVE_DEVICE будит устройство и повторяет."""
+        for attempt in (0, 1):
+            if attempt:
+                self._wake_device(sp, device_id)
+                time.sleep(0.4)
+            try:
+                fn(*args, device_id=device_id)
+                return ToolResult.success(ok_msg)
+            except Exception as exc:  # noqa: BLE001
+                if attempt == 0 and "NO_ACTIVE_DEVICE" in str(exc):
+                    continue
+                return ToolResult.failure(self._friendly_error(exc))
+        return ToolResult.failure("Не удалось выполнить команду Spotify.")
+
+    def _is_free_account(self, sp: Any) -> bool:
+        """True для Free-аккаунта Spotify (результат кэшируется на сессию).
+
+        Free не умеет «включить конкретный трек по запросу» — Spotify принимает
+        команду, но воспроизведение не начинается. Запрос ``/me`` нужен один раз.
+        """
+        if self._free_account is not None:
+            return self._free_account
+        try:
+            me = sp.me() or {}
+        except Exception:  # noqa: BLE001
+            return False  # не знаем — идём обычным путём
+        product = str(me.get("product") or "").strip().lower()
+        self._free_account = product == "free"
+        return self._free_account
+
+    def _wait_playing(self, sp: Any) -> bool:
+        """Дожидается подтверждения, что воспроизведение реально идёт."""
+        for _ in range(_PLAY_VERIFY_TRIES):
+            try:
+                pb = sp.current_playback()
+            except Exception:  # noqa: BLE001
+                pb = None
+            if pb and pb.get("is_playing"):
+                return True
+            time.sleep(_PLAY_VERIFY_DELAY)
+        return False
+
+    def _start_playback(
+        self, sp: Any, device_id: str, restore: list[str], **play_kwargs: Any
+    ) -> None:
+        """Стартует воспроизведение (первая попытка — как есть; если Spotify не
+        начал играть — будим устройство через transfer_playback и повторяем).
+
+        Восстановление очереди уходит в фоновый поток: раньше каждый трек
+        добавлялся в очередь последовательными HTTP-запросами ДО ответа
+        пользователю, из-за чего голосовой ответ задерживался на секунды.
+        """
+        for attempt in (0, 1):
+            if attempt:
+                self._wake_device(sp, device_id)
+                time.sleep(0.4)
+            try:
+                sp.start_playback(device_id=device_id, **play_kwargs)
+            except Exception as exc:
+                if attempt == 0:
+                    continue  # вторая попытка — после пробуждения устройства
+                raise RuntimeError(self._friendly_error(exc)) from exc
+            if self._wait_playing(sp):
+                self._restore_queue_async(sp, restore)
+                return
+            # Spotify принял команду, но играть не начал: на Free-аккаунте так
+            # ведёт себя запуск одиночного трека (context_uri работает). Повтор
+            # той же команды не поможет — выходим, чтобы caller выбрал фолбэк.
+            break
+        raise RuntimeError(
+            "Spotify не начал воспроизведение. Откройте приложение Spotify на "
+            "нужном устройстве и попробуйте снова (также помогает: Настройки → "
+            "Spotify → устройство по умолчанию)."
+        )
+
+    def _snapshot_queue(self, sp: Any) -> list[str]:
+        """URI треков «дальше в очереди» (при сбое — пусто, игру не мешаем)."""
+        try:
+            data = sp.queue() or {}
+        except Exception:  # noqa: BLE001
+            return []
+        items = data.get("queue") or []
+        uris: list[str] = []
+        for item in items:
+            uri = item.get("uri") if isinstance(item, dict) else None
+            if uri:
+                uris.append(str(uri))
+        return uris[:_QUEUE_RESTORE_LIMIT]
+
+    def _restore_queue_async(self, sp: Any, uris: list[str]) -> None:
+        """Возвращает очередь в фоне, чтобы не задерживать ответ пользователю."""
+        if not uris:
+            return
+        threading.Thread(
+            target=self._restore_queue,
+            args=(sp, uris),
+            daemon=True,
+            name="spotify-queue",
+        ).start()
+
+    def _restore_queue(self, sp: Any, uris: list[str]) -> int:
+        """Возвращает треки в очередь после включения нового (порядок сохраняется).
+
+        ``add_to_queue`` добавляет только в конец, поэтому перебираем в исходном
+        порядке: первый добавленный станет первым «дальше».
+        """
+        added = 0
+        for uri in uris:
+            try:
+                sp.add_to_queue(uri)
+            except Exception:  # noqa: BLE001
+                break  # лимиты API или недоступный трек — не настаиваем
+            added += 1
+        return added
 
     # ------------------------------------------------------------------ helpers
     def _current(self, sp: Any) -> ToolResult:
@@ -433,38 +679,179 @@ class SpotifyTool(Tool):
                     return it
         return None
 
+    @staticmethod
+    def _queue_note(restore: list[str]) -> str:
+        if not restore:
+            return ""
+        return (
+            " Очередь сохранена: впереди ещё "
+            + _plural(len(restore), "трек", "трека", "треков")
+            + "."
+        )
+
     def _play_track(self, sp: Any, device_id: str, query: str) -> ToolResult:
+        if not query.strip():
+            return ToolResult.failure("Не указано название трека (query).")
+        track = self._search_first(sp, query, "track")
+        if track is None:
+            cleaned = _strip_fillers(query)
+            if cleaned != query:
+                track = self._search_first(sp, cleaned, "track")
+        if track is None:
+            # возможно, назвали исполнителя — включим его песни
+            return self._play_artist(sp, device_id, query)
+        artists = ", ".join(a.get("name", "") for a in track.get("artists", []))
+        # запоминаем «дальше в очереди»: start_playback затирает её, возвращаем
+        restore = self._snapshot_queue(sp)
+        album = (track.get("album") or {}).get("uri")
+        if album and self._is_free_account(sp):
+            # Free-аккаунт: одиночный трек по запросу Spotify молча не запускает,
+            # поэтому сразу включаем альбом с нужной позиции (лишней секунды
+            # ожидания неудачного запуска не тратим).
+            self._start_playback(
+                sp,
+                device_id,
+                restore,
+                context_uri=album,
+                offset={"uri": track["uri"]},
+            )
+        else:
+            try:
+                self._start_playback(sp, device_id, restore, uris=[track["uri"]])
+            except RuntimeError:
+                # Не знали тип аккаунта (или Premium с ограничением) — одиночный
+                # трек не стартовал. Включаем альбом/исполнителя этого трека.
+                based_on_album = bool(album)
+                context = album
+                if not context:
+                    for artist in track.get("artists") or []:
+                        context = artist.get("uri")
+                        break
+                if not context:
+                    raise
+                extra: dict[str, Any] = {}
+                if based_on_album:
+                    extra["offset"] = {"uri": track["uri"]}
+                self._start_playback(
+                    sp, device_id, restore, context_uri=context, **extra
+                )
+        message = f"Включаю «{track.get('name')}» — {artists}."
+        message += self._queue_note(restore)
+        return ToolResult.success(message)
+
+    def _play_artist(self, sp: Any, device_id: str, query: str) -> ToolResult:
+        if not query.strip():
+            return ToolResult.failure("Не указан исполнитель (query).")
+        artist = self._search_first(sp, query, "artist")
+        if artist is None:
+            cleaned = _strip_fillers(query)
+            if cleaned != query:
+                artist = self._search_first(sp, cleaned, "artist")
+        if artist is None:
+            return ToolResult.failure(f"Исполнитель «{query}» не найден.")
+        restore = self._snapshot_queue(sp)
+        self._start_playback(sp, device_id, restore, context_uri=artist["uri"])
+        message = f"Включаю песни исполнителя «{artist.get('name')}»."
+        message += self._queue_note(restore)
+        return ToolResult.success(message)
+
+    def _queue_track(self, sp: Any, device_id: str, query: str) -> ToolResult:
         if not query.strip():
             return ToolResult.failure("Не указано название трека (query).")
         track = self._search_first(sp, query, "track")
         if not track:
             return ToolResult.failure(f"Трек «{query}» не найден.")
         artists = ", ".join(a.get("name", "") for a in track.get("artists", []))
-        sp.start_playback(device_id=device_id, uris=[track["uri"]])
-        return ToolResult.success(f"Включаю «{track.get('name')}» — {artists}.")
+        try:
+            sp.add_to_queue(track["uri"], device_id=device_id)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(self._friendly_error(exc))
+        return ToolResult.success(f"Добавил в очередь: «{track.get('name')}» — {artists}.")
+
+    def _user_playlists(self, sp: Any) -> list[dict[str, Any]]:
+        """Плейлисты пользователя (включая приватные); при сбое — пусто."""
+        try:
+            data = sp.current_user_playlists(limit=50) or {}
+        except Exception:  # noqa: BLE001
+            return []
+        return [p for p in (data.get("items") or []) if p and p.get("name")]
+
+    def _playlists(self, sp: Any) -> ToolResult:
+        items = self._user_playlists(sp)
+        if not items:
+            return ToolResult.success("В вашей медиатеке Spotify плейлистов не найдено.")
+        names = [str(p.get("name", "")).strip() for p in items]
+        return ToolResult.success("Ваши плейлисты: " + "; ".join(names) + ".")
+
+    def _find_user_playlist(self, sp: Any, query: str) -> dict[str, Any] | None:
+        """Ищет свой плейлист по названию (точное, подстрока в обе стороны)."""
+        q = _norm_name(query)
+        if not q:
+            return None
+        partial = None
+        for playlist in self._user_playlists(sp):
+            name = _norm_name(str(playlist.get("name", "")))
+            if not name:
+                continue
+            if name == q:
+                return playlist
+            if partial is None and (q in name or (len(name) >= 3 and name in q)):
+                partial = playlist
+        return partial
 
     def _play_playlist(self, sp: Any, device_id: str, query: str) -> ToolResult:
         if not query.strip():
             return ToolResult.failure("Не указано название плейлиста (query).")
-        playlist = self._search_first(sp, query, "playlist")
-        if not playlist:
-            return ToolResult.failure(f"Плейлист «{query}» не найден.")
-        sp.start_playback(device_id=device_id, context_uri=playlist["uri"])
-        return ToolResult.success(f"Включаю плейлист «{playlist.get('name')}».")
+        # свои плейлисты (в т.ч. приватные) каталожным поиском не находятся
+        playlist = self._find_user_playlist(sp, query)
+        if playlist is None:
+            playlist = self._search_first(sp, query, "playlist")
+        if playlist is None:
+            cleaned = _strip_fillers(query)
+            if cleaned != query:
+                playlist = self._search_first(sp, cleaned, "playlist")
+        if playlist is None:
+            names = [str(p.get("name", "")) for p in self._user_playlists(sp)][:8]
+            hint = (" Ваши плейлисты: " + "; ".join(names) + ".") if names else ""
+            return ToolResult.failure(f"Плейлист «{query}» не найден.{hint}")
+        restore = self._snapshot_queue(sp)
+        self._start_playback(
+            sp, device_id, restore, context_uri=playlist["uri"]
+        )
+        message = f"Включаю плейлист «{playlist.get('name')}»."
+        message += self._queue_note(restore)
+        return ToolResult.success(message)
 
     @staticmethod
     def _friendly_error(exc: Exception) -> str:
         name = type(exc).__name__
         text = str(exc)
-        if "PREMIUM_REQUIRED" in text or "player command failed" in text.lower():
+        low = text.lower()
+        if "restriction violated" in low:
+            return (
+                "Spotify запрещает это действие: на Free-аккаунте нельзя включать "
+                "конкретный трек — только плейлист, альбом или исполнителя."
+            )
+        if "premium_required" in low or "premium required" in low:
             return "Для управления воспроизведением нужен аккаунт Spotify Premium."
-        if "NO_ACTIVE_DEVICE" in text:
+        if "no_active_device" in low:
             return "Нет активного устройства Spotify. Откройте Spotify и включите музыку."
+        if "player command failed" in low:
+            return f"Spotify отклонил команду: {text}"
         if "403" in text:
             return (
                 "Spotify отклонил запрос (403). С 2026 года Web API требует Spotify "
                 "Premium у владельца приложения; также проверьте, что ваш аккаунт "
                 "добавлен в User Management приложения."
+            )
+        if "429" in text:
+            return "Слишком много запросов к Spotify — повторите через минуту."
+        if "Restriction violated" in text:
+            return "Spotify запрещает это действие для текущего трека (режим воспроизведения)."
+        if "404" in text:
+            return (
+                "Команда отклонена (404): воспроизведение недоступно — проверьте, "
+                "что приложение Spotify открыто на нужном устройстве."
             )
         return f"Ошибка Spotify ({name}): {text}"
 

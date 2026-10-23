@@ -5,14 +5,22 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 import traceback
 from typing import Any
 
 import websockets
 
-from nemus.core.language import anti_reasoning_directive
+from nemus.config import DEFAULT_GEMINI_VOICE
+from nemus.core.language import (
+    REPLY_AUTO,
+    anti_reasoning_directive,
+    detect_language,
+    reply_language_directive,
+)
 from nemus.utils.logger import logger
 from nemus.utils.redact import redact_secrets
+from nemus.voice.params import SAMPLE_RATE
 from nemus.voice.realtime.audio_io import MicStreamer, SpeakerPlayer
 from nemus.voice.realtime.base import BaseRealtimeSession, RealtimeState
 
@@ -26,16 +34,16 @@ class GeminiLiveSession(BaseRealtimeSession):
     """Реализация протокола BidiGenerateContent (Gemini Live API)."""
 
     provider = "gemini"
-    send_rate = 16000
+    send_rate = SAMPLE_RATE
     receive_rate = 24000
-    mic_rate = 16000
+    mic_rate = SAMPLE_RATE
 
     def __init__(
         self,
         api_key: str,
         model: str,
         audio: bool = True,
-        voice: str = "Aoede",
+        voice: str = DEFAULT_GEMINI_VOICE,
         language: str = "ru-RU",
         **kwargs: Any,
     ) -> None:
@@ -56,6 +64,16 @@ class GeminiLiveSession(BaseRealtimeSession):
         self._user_buf = ""
         self._asst_buf = ""       # расшифровка произнесённого (outputAudioTranscription)
         self._asst_parts_buf = ""  # текст из modelTurn (text-сессии)
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
+        self._detected_lang = ""
+
+        # диагностика задержки: конец речи -> первый звук ответа
+        self._voice_ts = 0.0
+        self._voice_start = 0.0
+        self._mic_spoke = False
+        self._speech_end_ts: float | None = None
+        self._tool_reply_ts: float | None = None
+        self._awaiting_model = False
 
     # ------------------------------------------------------------------ run
     async def _run(self) -> None:
@@ -143,7 +161,7 @@ class GeminiLiveSession(BaseRealtimeSession):
                     "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
                     "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
                     "prefixPaddingMs": 20,
-                    "silenceDurationMs": 550,
+                    "silenceDurationMs": 400,
                 }
             }
 
@@ -175,9 +193,49 @@ class GeminiLiveSession(BaseRealtimeSession):
     # ----------------------------------------------------------- audio hooks
     def _on_mic_chunk(self, chunk: bytes) -> None:
         """Вызывается из потока звука — мостим в цикл asyncio."""
+        self._track_voice(chunk)
         loop = self._loop
         if loop is not None and not loop.is_closed() and self._running:
             loop.call_soon_threadsafe(self._mic_queue.put_nowait, chunk)
+
+    def _track_voice(self, chunk: bytes) -> None:
+        """Оценивает начало/конец речи по громкости.
+
+        Используется для замера задержки и для статуса «Думаю…»: после паузы
+        пользователь ждёт ответ, а не «слушает».
+        """
+        usable = len(chunk) - len(chunk) % 2
+        if usable < 2:
+            return
+        samples = memoryview(chunk)[:usable].cast("h")
+        rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+        now = time.monotonic()
+        if rms >= 300:
+            if not self._mic_spoke:
+                self._voice_start = now
+            self._voice_ts = now
+            self._mic_spoke = True
+            self._speech_end_ts = None
+            if self._awaiting_model:
+                # пользователь заговорил снова (или шум) — снова слушаем
+                self._awaiting_model = False
+                self._want_state(RealtimeState.LISTENING)
+        elif self._mic_spoke and now - self._voice_ts >= 0.35:
+            self._mic_spoke = False
+            self._speech_end_ts = self._voice_ts
+            # Слишком короткий всплеск (щелчок, стук) за реплику не считаем.
+            if self._voice_ts - self._voice_start < 0.3:
+                return
+            # Реплика закончилась, ответа ещё нет — это «думает».
+            if self._speaker is None or not self._speaker.is_playing:
+                self._awaiting_model = True
+                self._want_state(RealtimeState.THINKING)
+
+    def _want_state(self, state: RealtimeState) -> None:
+        """Смена состояния из потока микрофона — через цикл сессии."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed() and self._running:
+            loop.call_soon_threadsafe(self._emit_state, state)
 
     async def _mic_loop(self) -> None:
         while self._running:
@@ -190,14 +248,14 @@ class GeminiLiveSession(BaseRealtimeSession):
     async def _send_audio(self, chunk: bytes) -> None:
         if self._ws is None:
             return
+        # Современное поле Live API (mediaChunks устарело и в gemini-3.8-live
+        # игнорируется — модель просто не слышит микрофон).
         message = {
             "realtimeInput": {
-                "mediaChunks": [
-                    {
-                        "mimeType": f"audio/pcm;rate={self.send_rate}",
-                        "data": base64.b64encode(chunk).decode("ascii"),
-                    }
-                ]
+                "audio": {
+                    "mimeType": f"audio/pcm;rate={self.send_rate}",
+                    "data": base64.b64encode(chunk).decode("ascii"),
+                }
             }
         }
         await self._ws.send(json.dumps(message))
@@ -229,13 +287,49 @@ class GeminiLiveSession(BaseRealtimeSession):
         if "serverContent" in message:
             await self._handle_server_content(message["serverContent"])
         elif "toolCall" in message:
-            await self._handle_tool_call(message["toolCall"])
+            # Инструменты ходят в сеть секундами (Spotify и т.п.) — не блокируем
+            # приём аудио/реплик: иначе ответ модели задерживается на всё время
+            # выполнения инструмента.
+            self._speech_end_ts = None
+            self._awaiting_model = True
+            self._emit_state(RealtimeState.THINKING)
+            task = asyncio.create_task(self._handle_tool_call(message["toolCall"]))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
 
     async def _handle_server_content(self, content: dict[str, Any]) -> None:
         user_text = content.get("inputTranscription", {}).get("text", "")
         if user_text:
             self._user_buf += user_text
-            self._emit_state(RealtimeState.LISTENING)
+            # подстраиваемся под язык пользователя в режиме авто
+            if self.reply_language == REPLY_AUTO:
+                detected = detect_language(user_text)
+                if detected and detected != self._detected_lang:
+                    self._detected_lang = detected
+                    try:
+                        await self._send(
+                            {
+                                "clientContent": {
+                                    "turns": [
+                                        {
+                                            "role": "user",
+                                            "parts": [
+                                                {
+                                                    "text": f"[Языковая настройка] {reply_language_directive(REPLY_AUTO, detected)}"
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                    "turnComplete": True,
+                                }
+                            }
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+            # финальная расшифровка приходит уже после паузы: не сбиваем
+            # «Думаю…» обратно на «Слушаю…»
+            if not self._awaiting_model:
+                self._emit_state(RealtimeState.LISTENING)
 
         asst_text = content.get("outputTranscription", {}).get("text", "")
         if asst_text:
@@ -249,6 +343,19 @@ class GeminiLiveSession(BaseRealtimeSession):
                 continue
             inline = part.get("inlineData") or part.get("audio")
             if inline and inline.get("data"):
+                self._awaiting_model = False
+                now = time.monotonic()
+                if self._speech_end_ts is not None:
+                    latency = (now - self._speech_end_ts) * 1000
+                    logger.info(
+                        f"Задержка ответа: {latency:.0f} мс "
+                        "(конец речи → первый звук)"
+                    )
+                    self._speech_end_ts = None
+                elif self._tool_reply_ts is not None:
+                    latency = (now - self._tool_reply_ts) * 1000
+                    logger.info(f"Задержка ответа после инструмента: {latency:.0f} мс")
+                    self._tool_reply_ts = None
                 if self._play_queue is not None:
                     audio = base64.b64decode(inline["data"])
                     self._play_queue.put_nowait(audio)
@@ -259,6 +366,7 @@ class GeminiLiveSession(BaseRealtimeSession):
         if content.get("interrupted"):
             self._asst_buf = ""
             self._asst_parts_buf = ""
+            self._awaiting_model = False
             self._drain_play_queue()
             if self._speaker is not None:
                 self._speaker.clear()
@@ -277,30 +385,38 @@ class GeminiLiveSession(BaseRealtimeSession):
             self._emit_state(RealtimeState.LISTENING)
 
     async def _handle_tool_call(self, tool_call: dict[str, Any]) -> None:
-        calls = tool_call.get("functionCalls") or tool_call.get("function_calls") or []
-        responses: list[dict[str, Any]] = []
-        for call in calls:
-            name = call.get("name", "")
-            args = call.get("args") or call.get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
-            logger.info(f"Gemini Live tool call: {name}({args})")
-            # в отдельном потоке, чтобы не блокировать аудио-цикл (и ждать GUI-подтверждение)
-            result = await asyncio.to_thread(self._execute_tool, name, args)
-            responses.append(
-                {
-                    "id": call.get("id", ""),
-                    "name": name,
-                    "response": {"result": result.to_model()},
-                }
-            )
-        if self._ws is not None and responses:
-            await self._ws.send(
-                json.dumps({"toolResponse": {"functionResponses": responses}})
-            )
+        try:
+            calls = tool_call.get("functionCalls") or tool_call.get("function_calls") or []
+            responses: list[dict[str, Any]] = []
+            for call in calls:
+                name = call.get("name", "")
+                args = call.get("args") or call.get("arguments") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                logger.info(f"Gemini Live tool call: {name}({args})")
+                # в отдельном потоке, чтобы не блокировать аудио-цикл
+                # (и ждать GUI-подтверждение)
+                result = await asyncio.to_thread(self._execute_tool, name, args)
+                logger.info(f"Gemini Live tool result: {name} -> {result.content[:300]}")
+                responses.append(
+                    {
+                        "id": call.get("id", ""),
+                        "name": name,
+                        "response": {"result": result.to_model()},
+                    }
+                )
+            if self._ws is not None and responses:
+                await self._ws.send(
+                    json.dumps({"toolResponse": {"functionResponses": responses}})
+                )
+                self._tool_reply_ts = time.monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Gemini Live: ошибка обработки tool call")
 
     # ------------------------------------------------------------------ misc
     async def _send_text(self, text: str) -> None:

@@ -11,6 +11,9 @@ import webbrowser
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
 from nemus.utils.logger import logger
 
+#: таймаут загрузки страницы в Playwright (мс)
+PAGE_LOAD_TIMEOUT_MS = 30_000
+
 
 class PlaywrightOpenTool(Tool):
     name = "browser_open"
@@ -44,7 +47,11 @@ class PlaywrightOpenTool(Tool):
                 started = True
                 try:
                     page = browser.new_page()
-                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=PAGE_LOAD_TIMEOUT_MS,
+                    )
                     title = page.title()
                 finally:
                     browser.close()

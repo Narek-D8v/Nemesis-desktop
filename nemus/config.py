@@ -73,12 +73,61 @@ class LLMConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
+class WakeSkillConfig(BaseModel):
+    """Навык слова активации: фразы → вызов инструмента из реестра."""
+
+    name: str = ""
+    #: фразы-триггеры; достаточно вхождения любой из них
+    phrases: list[str] = Field(default_factory=list)
+    #: имя инструмента (get_time, open_url, spotify, …)
+    tool: str = ""
+    #: аргументы вызова инструмента
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+def default_wake_skills() -> list[WakeSkillConfig]:
+    """Полезные навыки «из коробки» (работают локально, без модели)."""
+    return [
+        WakeSkillConfig(
+            name="time",
+            phrases=["который час", "сколько времени", "время сейчас"],
+            tool="get_time",
+        ),
+        WakeSkillConfig(
+            name="youtube",
+            phrases=["открой ютуб", "открой youtube", "включи ютуб"],
+            tool="open_url",
+            arguments={"url": "https://www.youtube.com"},
+        ),
+        WakeSkillConfig(
+            name="spotify_open",
+            phrases=["открой spotify", "открой спотифай", "запусти spotify"],
+            tool="spotify",
+            arguments={"action": "open"},
+        ),
+        WakeSkillConfig(
+            name="music_play",
+            phrases=["включи музыку", "играй музыку", "продолжи музыку"],
+            tool="spotify",
+            arguments={"action": "play"},
+        ),
+        WakeSkillConfig(
+            name="music_pause",
+            phrases=["пауза", "останови музыку", "выключи музыку"],
+            tool="spotify",
+            arguments={"action": "pause"},
+        ),
+    ]
+
+
 class WakeWordConfig(BaseModel):
     enabled: bool = True
     engine: Literal["vosk", "porcupine", "off"] = "vosk"
     words: list[str] = Field(default_factory=lambda: ["немуся", "немесис", "немо"])
-    vosk_model_path: str = "data/models/vosk-ru"
+    vosk_model_path: str = "data/models/vosk-model-small-ru-0.22"
     porcupine_access_key: str = ""
+    #: навыки: короткие фразы, выполняющие инструмент без обращения к LLM
+    skills: list[WakeSkillConfig] = Field(default_factory=lambda: default_wake_skills())
 
 
 class STTConfig(BaseModel):
@@ -86,13 +135,26 @@ class STTConfig(BaseModel):
     model: str = "small"
     language: str = "ru"
     device: str = "auto"
+    #: ширина лучевого поиска: больше — точнее, но медленнее
+    beam_size: int = 5
+    #: дополнительные подсказки-слова для распознавания (через пробел/запятую)
+    hotwords: str = ""
 
 
 class TTSConfig(BaseModel):
+    # edge-tts (облачный, бесплатный) | openai (нужен ключ) | system (Windows SAPI)
     engine: str = "edge-tts"
     voice: str = "ru-RU-DmitryNeural"
     rate: str = "+0%"
     volume: str = "+0%"
+    #: модель OpenAI TTS (движок «openai»)
+    openai_model: str = "gpt-4o-mini-tts"
+
+
+#: Голос по умолчанию для Gemini Live (дублируется дефолтами realtime-сессий).
+DEFAULT_GEMINI_VOICE = "Aoede"
+#: Голос по умолчанию для OpenAI Realtime (дублируется дефолтами realtime-сессий).
+DEFAULT_OPENAI_VOICE = "marin"
 
 
 class RealtimeConfig(BaseModel):
@@ -102,9 +164,9 @@ class RealtimeConfig(BaseModel):
     # gemini | openai — облачные; local — офлайн-аналог на локальных STT/TTS/LLM
     provider: Literal["gemini", "openai", "local"] = "gemini"
     gemini_model: str = "gemini-2.5-flash-native-audio-latest"
-    gemini_voice: str = "Aoede"
+    gemini_voice: str = DEFAULT_GEMINI_VOICE
     openai_model: str = "gpt-realtime"
-    openai_voice: str = "marin"
+    openai_voice: str = DEFAULT_OPENAI_VOICE
     # Отправлять/принимать аудио (иначе — только текст)
     audio: bool = True
     # Слово активации запускает диалог реального времени
@@ -169,10 +231,13 @@ class ScreenConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     database: str = "data/nemus.db"
+    #: долговременные факты (инструменты remember_fact/recall_fact).
+    #: false — агент ведёт только историю диалога, без сохранения фактов.
     long_term: bool = True
-    embeddings_model: str = (
-        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
+    #: заметки о пользователе в markdown-файле (write_note/read_notes);
+    #: Немуся записывает их по своему усмотрению, файл можно править руками.
+    notes: bool = True
+    notes_file: str = "data/notes.md"
 
 
 class SpotifyConfig(BaseModel):
@@ -189,9 +254,9 @@ class SpotifyConfig(BaseModel):
 
 class GUIConfig(BaseModel):
     theme: str = "dark"
+    #: держать окно поверх других окон
     always_on_top: bool = False
     start_minimized: bool = False
-    hotkey: str = "ctrl+alt+space"
     #: язык интерфейса: ru | en (применяется при следующем запуске)
     language: str = "ru"
 
@@ -199,6 +264,30 @@ class GUIConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     file: str = "data/nemus.log"
+
+
+class MCPConfig(BaseModel):
+    """Настройки Model Context Protocol (инструменты сторонних серверов).
+
+    Серверы — stdio-прокси на Python/Node; секция «mcp» в config.yaml.
+    Без серверов интеграция отключается, даже если enabled: true.
+    """
+
+    enabled: bool = True
+    refresh_seconds: int = 60
+    servers: list["MCPServerConfig"] = Field(default_factory=list)
+
+
+class MCPServerConfig(BaseModel):
+    """Один MCP-сервер (stdio-прокси)."""
+
+    #: человекочитаемое название для GUI-списка (пусто — показывается команда)
+    name: str = ""
+    command: str = "node"
+    args: list[str] = Field(default_factory=list)
+    cwd: str = "."
+    enabled: bool = True
+    env: dict[str, str] = Field(default_factory=dict)
 
 
 class Config(BaseModel):
@@ -211,6 +300,7 @@ class Config(BaseModel):
     spotify: SpotifyConfig = Field(default_factory=SpotifyConfig)
     gui: GUIConfig = Field(default_factory=GUIConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
 
 
 # --------------------------------------------------------------------------
@@ -262,6 +352,45 @@ def _resolve_path(path_str: str) -> str:
     return str(p if p.is_absolute() else PROJECT_ROOT / p)
 
 
+def to_relative_path(path_str: str) -> str:
+    """Возвращает путь относительно корня проекта, если он лежит внутри него.
+
+    Нужна для сохранения конфига: в памяти пути абсолютные (``load_config``
+    разворачивает их), а в ``config.yaml`` они должны оставаться переносимыми.
+    Пути вне проекта не трогаем — они заданы пользователем осознанно.
+    """
+    if not path_str:
+        return path_str
+    p = Path(path_str)
+    if not p.is_absolute():
+        return path_str
+    try:
+        return p.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(p)
+
+
+#: Поля-пути, которые при сохранении конфига возвращаются в относительный вид.
+PATH_FIELDS: tuple[tuple[str, ...], ...] = (
+    ("memory", "database"),
+    ("memory", "notes_file"),
+    ("logging", "file"),
+    ("voice", "wake_word", "vosk_model_path"),
+    ("spotify", "cache_path"),
+    ("tools", "workspace"),
+)
+
+
+def relativize_paths(cfg: Config) -> None:
+    """Преобразует известные абсолютные пути конфига обратно в относительные."""
+    for field_path in PATH_FIELDS:
+        target: Any = cfg
+        for name in field_path[:-1]:
+            target = getattr(target, name)
+        last = field_path[-1]
+        setattr(target, last, to_relative_path(getattr(target, last)))
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Загружает конфигурацию, объединяя YAML, env и значения по умолчанию."""
     data: dict[str, Any] = {}
@@ -277,6 +406,7 @@ def load_config(config_path: Path | None = None) -> Config:
 
     # Пути к данным — абсолютные
     cfg.memory.database = _resolve_path(cfg.memory.database)
+    cfg.memory.notes_file = _resolve_path(cfg.memory.notes_file)
     cfg.logging.file = _resolve_path(cfg.logging.file)
     cfg.voice.wake_word.vosk_model_path = _resolve_path(
         cfg.voice.wake_word.vosk_model_path

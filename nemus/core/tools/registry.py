@@ -63,7 +63,8 @@ class ToolRegistry:
             return tool.execute(**arguments)
         except TypeError as exc:
             return ToolResult.failure(f"Неверные аргументы для {name}: {exc}")
-        except Exception as exc:  # noqa: BLE001
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            # SystemExit (exit()/sys.exit() из плагина) не должен валить приложение.
             logger.exception(f"Ошибка выполнения инструмента {name}")
             return ToolResult.failure(f"{name} упал с ошибкой: {exc}")
 
@@ -83,8 +84,12 @@ class ToolRegistry:
                 continue
             try:
                 loaded += self._load_plugin_file(path)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Не удалось загрузить плагин {path.name}: {exc}")
+            except (Exception, SystemExit) as exc:  # noqa: BLE001
+                # SystemExit (exit()/sys.exit() в плагине) и прочие падения
+                # плагина — только в лог, приложение продолжает работать.
+                logger.warning(
+                    f"Не удалось загрузить плагин {path.name}: {type(exc).__name__}: {exc}"
+                )
         return loaded
 
     def _load_plugin_file(self, path: Path) -> int:
@@ -94,7 +99,12 @@ class ToolRegistry:
             return 0
         module = importlib.util.module_from_spec(spec)
         sys.modules[mod_name] = module
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            # half-loaded module must not stay in sys.modules
+            sys.modules.pop(mod_name, None)
+            raise
 
         count = 0
         if hasattr(module, "register"):
@@ -105,7 +115,7 @@ class ToolRegistry:
                 try:
                     self.register(attr())
                     count += 1
-                except Exception:  # noqa: BLE001
+                except (Exception, SystemExit):  # noqa: BLE001
                     continue
         logger.info(f"Плагин {path.name}: загружено инструментов — {count}")
         return count

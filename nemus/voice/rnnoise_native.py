@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import threading
 
 import numpy as np
 
@@ -77,22 +78,28 @@ class Denoiser:
         self._lib = lib
         self._state: ctypes.c_void_p | None = lib.rnnoise_create(None)
         self.frame_size = int(lib.rnnoise_get_frame_size())
+        self._lock = threading.Lock()
 
     def process(self, frame_int16: np.ndarray) -> tuple[np.ndarray, float]:
         """Обрабатывает один кадр (int16), возвращает (очищенный int16, вероятность речи)."""
-        if self._state is None:
-            raise RnnoiseUnavailable("Сессия RNNoise не инициализирована.")
         f = np.ascontiguousarray(frame_int16, dtype=np.float32)
         if f.shape[0] < self.frame_size:
             f = np.pad(f, (0, self.frame_size - f.shape[0]))
         ptr = f.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        prob = float(self._lib.rnnoise_process_frame(self._state, ptr, ptr))
+        with self._lock:
+            if self._state is None:
+                raise RnnoiseUnavailable("Сессия RNNoise не инициализирована.")
+            prob = float(self._lib.rnnoise_process_frame(self._state, ptr, ptr))
         return f.astype(np.int16)[: frame_int16.shape[0]], prob
 
     def close(self) -> None:
-        if self._state is not None:
-            self._lib.rnnoise_destroy(self._state)
-            self._state = None
+        # Идемпотентно и потокобезопасно: close() вызывается и из stop() (GUI),
+        # и из finally фонового цикла — двойной rnnoise_destroy (без лока оба
+        # потока проходят проверку) портит кучу → 0xC0000374.
+        with self._lock:
+            if self._state is not None:
+                self._lib.rnnoise_destroy(self._state)
+                self._state = None
 
     def __del__(self) -> None:  # pragma: no cover - best effort
         try:

@@ -9,6 +9,8 @@ from urllib.parse import urljoin, urlsplit
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
 
 _MAX_REDIRECTS = 5
+#: таймаут HTTP-запроса при чтении страницы (секунды)
+FETCH_TIMEOUT = 20
 
 
 class UnsafeUrl(ValueError):
@@ -131,7 +133,7 @@ class FetchUrlTool(Tool):
             from markdownify import markdownify as md
 
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            with httpx.Client(follow_redirects=False, timeout=20) as client:
+            with httpx.Client(follow_redirects=False, timeout=FETCH_TIMEOUT) as client:
                 resp = self._get_following_redirects(client, url.strip(), headers)
             soup = BeautifulSoup(resp.text, "html.parser")
             for tag in soup(["script", "style", "nav", "footer", "noscript"]):

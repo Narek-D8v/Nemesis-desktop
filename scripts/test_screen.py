@@ -171,12 +171,73 @@ def test_agent_injects_image() -> None:
     print("OK agent: изображение экрана попало в контекст модели")
 
 
+def test_clipboard_unicode() -> None:
+    """Кириллица в буфере обмена: WinAPI, без COM/Qt и без потери символов."""
+    from nemus.core.tools.clipboard import get_clipboard, set_clipboard
+
+    if sys.platform != "win32":
+        print("SKIP clipboard: проверка только для Windows")
+        return
+    previous = get_clipboard()
+    text = "Рецепт блинчиков: 2 яйца, 500 мл молока — щепотка соли."
+    try:
+        assert set_clipboard(text), "не удалось положить Unicode-текст в буфер"
+        assert get_clipboard() == text, "буфер обмена исказил кириллицу"
+    finally:
+        if previous:
+            set_clipboard(previous)
+    print("OK clipboard: кириллица без COM/Qt")
+
+
+class FakeWriter:
+    def __init__(self) -> None:
+        self.typed: list[str] = []
+        self.hotkeys: list[tuple[str, ...]] = []
+
+    def write(self, text, interval=0.0):  # noqa: ANN001
+        self.typed.append(text)
+
+    def hotkey(self, *keys):  # noqa: ANN002
+        self.hotkeys.append(tuple(keys))
+
+
+def test_control_type_unicode() -> None:
+    """Нелатинский текст — только через буфер обмена; результат не обрезается."""
+    tool = screen.ControlScreenTool()
+    tool.settings = get_config().screen
+    fake = FakeWriter()
+    text = "Рецепт блинчиков:\n1. Ингредиенты: 2 яйца, 500 мл молока."
+    calls: list[str] = []
+    original = screen.paste_text
+
+    try:
+        screen.paste_text = lambda pg, value: calls.append(value) or True
+        res = tool._type(fake, {"text": text})
+        assert res.ok and calls == [text], (res.content, calls)
+        assert f"{len(text)} символов" in res.content, res.content
+        assert not fake.typed, "кириллица не должна набираться typewrite"
+    finally:
+        screen.paste_text = original
+
+    try:
+        screen.paste_text = lambda pg, value: False
+        res = tool._type(fake, {"text": "Привет"})
+        assert not res.ok, res.content
+        assert "НЕ введён" in res.content, res.content
+        assert not fake.typed, fake.typed
+    finally:
+        screen.paste_text = original
+    print("OK control_screen: Unicode через буфер обмена, без тихой потери")
+
+
 def main() -> int:
     test_vision_detection()
     test_see_screen()
     test_elements_and_coords()
     test_control_validation()
     test_control_disabled()
+    test_clipboard_unicode()
+    test_control_type_unicode()
     test_see_screen_ocr_fallback()
     test_see_screen_scaled()
     test_see_screen_ocr_regions()

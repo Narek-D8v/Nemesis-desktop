@@ -20,6 +20,7 @@ RNNoise обрабатывает фиксированные кадры 480 от�
 from __future__ import annotations
 
 import collections
+import threading
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,7 @@ import numpy as np
 from nemus.config import NoiseConfig
 from nemus.utils.logger import logger
 from nemus.voice.audio_dsp import AudioCleaner
+from nemus.voice.params import BLOCK_MS, SAMPLE_RATE
 
 
 class NoiseReducer:
@@ -50,7 +52,7 @@ class BuiltinNoiseReducer(NoiseReducer):
 
     name = "builtin"
 
-    def __init__(self, sample_rate: int = 16000, block_ms: int = 30) -> None:
+    def __init__(self, sample_rate: int = SAMPLE_RATE, block_ms: int = BLOCK_MS) -> None:
         self._cleaner = AudioCleaner(sample_rate=sample_rate, block_ms=block_ms)
 
     def reset(self) -> None:
@@ -77,7 +79,7 @@ class RNNoiseReducer(NoiseReducer):
     name = "rnnoise"
     TARGET_RATE = 48000
 
-    def __init__(self, sample_rate: int = 16000) -> None:
+    def __init__(self, sample_rate: int = SAMPLE_RATE) -> None:
         from nemus.voice import rnnoise_native as rn
 
         if not rn.available():
@@ -149,6 +151,10 @@ class RNNoiseReducer(NoiseReducer):
             self._den.close()
         except Exception:  # noqa: BLE001
             pass
+        # PyAV-ресемплеры держат нативные ресурсы; освобождаем их здесь,
+        # чтобы они не разбирались позже сборщиком мусора (это роняло процесс).
+        self._up = None
+        self._down = None
 
 
 class KrispNoiseReducer(NoiseReducer):
@@ -164,7 +170,7 @@ class KrispNoiseReducer(NoiseReducer):
 
     def __init__(
         self,
-        sample_rate: int = 16000,
+        sample_rate: int = SAMPLE_RATE,
         api_key: str = "",
         model_path: str = "",
         frame_ms: int = 10,
@@ -190,6 +196,7 @@ class KrispNoiseReducer(NoiseReducer):
         self._frame_samples = max(1, int(round(sample_rate * frame_ms / 1000)))
         self._buffer: collections.deque[float] = collections.deque()
         self._out: list[np.ndarray] = []
+        self._lock = threading.Lock()
 
         if not KrispNoiseReducer._global_inited:
             try:
@@ -281,26 +288,36 @@ class KrispNoiseReducer(NoiseReducer):
         return np.clip(y * 32768.0, -32768, 32767).astype(np.int16)
 
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
-        proc = getattr(self._nc, "process", None)
-        if proc is None:
-            proc = self._nc.processFloat
-        return proc(frame, self.suppression)
+        with self._lock:
+            nc = self._nc
+            if nc is None:
+                return frame  # сессия уже закрыта — пропускаем без гонки
+            proc = getattr(nc, "process", None)
+            if proc is None:
+                proc = nc.processFloat
+            return proc(frame, self.suppression)
 
     def close(self) -> None:
+        # Идемпотентно и потокобезопасно: stop() (GUI) и finally фонового
+        # цикла могут звать close() одновременно — двойной destroy сессии
+        # (нативный SDK) портит кучу (0xC0000374).
+        with self._lock:
+            nc, self._nc = self._nc, None
+        if nc is None:
+            return
         for attr in ("destroy", "close", "delete"):
-            fn = getattr(self._nc, attr, None)
+            fn = getattr(nc, attr, None)
             if callable(fn):
                 try:
                     fn()
                 except Exception:  # noqa: BLE001
                     pass
                 break
-        self._nc = None
 
 
 # ---------------------------------------------------------------------- factory
 def create_noise_reducer(
-    cfg: NoiseConfig, sample_rate: int = 16000, block_ms: int = 30
+    cfg: NoiseConfig, sample_rate: int = SAMPLE_RATE, block_ms: int = BLOCK_MS
 ) -> NoiseReducer:
     """Создаёт редюсер шума по конфигу; при любой ошибке провайдера — откат
     на встроенный фильтр (или off, если так задано)."""

@@ -366,7 +366,7 @@ class MainWindow(QMainWindow):
             self.input.setFocus()
 
     def _on_settings(self) -> None:
-        dialog = SettingsDialog(self)
+        dialog = SettingsDialog(self, core=self.core)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
             self.settings_saved.emit()
 

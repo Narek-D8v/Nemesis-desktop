@@ -28,6 +28,65 @@ def _rms(block: np.ndarray) -> float:
     return float(np.sqrt(np.mean(x * x)))
 
 
+class _FakeStream:
+    """Заглушка sounddevice-потока: считает вызовы нативных start/stop/close."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.stops = 0
+        self.closes = 0
+
+    def start(self) -> None:
+        self.starts += 1
+
+    def stop(self) -> None:
+        self.stops += 1
+
+    def close(self) -> None:
+        self.closes += 1
+
+    def read(self, frames: int) -> tuple[np.ndarray, None]:
+        return np.zeros((frames, 1), dtype=np.int16), None
+
+
+class _FakeSd:
+    """Подмена модуля sounddevice: InputStream/OutputStream на одну заглушку."""
+
+    def __init__(self, stream: _FakeStream) -> None:
+        self._stream = stream
+        self.opens = 0
+
+    def InputStream(self, **_kw: object) -> _FakeStream:
+        self.opens += 1
+        return self._stream
+
+    def OutputStream(self, **_kw: object) -> _FakeStream:
+        self.opens += 1
+        return self._stream
+
+
+def _hammer(fn) -> list[Exception]:  # noqa: ANN001
+    """Одновременный вызов fn из 8 потоков; возвращает пойманные ошибки."""
+    import threading
+
+    barrier = threading.Barrier(8)
+    errors: list[Exception] = []
+
+    def _run() -> None:
+        try:
+            barrier.wait()
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_run) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+
 def test_gate_suppresses_noise() -> None:
     c = AudioCleaner(sample_rate=SR, block_ms=BLOCK_MS)
     outs = [_rms(c.clean(_noise(0.01))) for _ in range(80)]
@@ -97,10 +156,76 @@ def test_speaker_prebuffer_and_playing() -> None:
     print("ok  SpeakerPlayer: пре-буфер, воспроизведение, clear")
 
 
+def test_recorder_close_idempotent_concurrent() -> None:
+    """Регресс крэша 0xC0000374: stop() (GUI) и finally фонового цикла
+    одновременно закрывали один и тот же Stream -> двойной Pa_CloseStream
+    портил кучу PortAudio и убивал процесс."""
+    import nemus.voice.audio as va
+    from nemus.voice.audio import Recorder
+
+    fake = _FakeStream()
+    fake_sd = _FakeSd(fake)
+    orig_sd = va.sd
+    va.sd = fake_sd
+    try:
+        rec = Recorder()
+        rec.open()
+        rec.open()  # повторный open не создаёт второй поток
+        assert fake_sd.opens == 1, f"open() создал {fake_sd.opens} потока"
+
+        errors = _hammer(rec.close)
+        assert not errors, errors
+        assert fake.closes == 1, f"Stream.close() вызван {fake.closes} раз(а)"
+        assert fake.stops == 1, f"Stream.stop() вызван {fake.stops} раз(а)"
+        assert rec._stream is None
+
+        rec.close()  # ещё один вызов — no-op
+        assert fake.closes == 1
+    finally:
+        va.sd = orig_sd
+    print("ok  Recorder: close() идемпотентен при гонке из 8 потоков")
+
+
+def test_realtime_streams_close_idempotent_concurrent() -> None:
+    """Тот же регресс (двойной Stream.close -> 0xC0000374) для потоков
+    realtime-сессии: MicStreamer и SpeakerPlayer."""
+    from nemus.voice.realtime import audio_io
+    from nemus.voice.realtime.audio_io import MicStreamer, SpeakerPlayer
+
+    orig_sd = audio_io.sd
+    try:
+        mic_fake = _FakeStream()
+        audio_io.sd = _FakeSd(mic_fake)
+        mic = MicStreamer(SR, on_chunk=lambda _d: None)
+        assert mic.start()
+        errors = _hammer(mic.stop)
+        assert not errors, errors
+        assert mic_fake.closes == 1, f"MicStreamer: closes={mic_fake.closes}"
+        mic.stop()  # no-op
+        assert mic_fake.closes == 1
+
+        sp_fake = _FakeStream()
+        audio_io.sd = _FakeSd(sp_fake)
+        sp = SpeakerPlayer(SR)
+        assert sp.start()
+        sp.play(b"\x00\x01" * 300)
+        errors = _hammer(sp.stop)
+        assert not errors, errors
+        assert sp_fake.closes == 1, f"SpeakerPlayer: closes={sp_fake.closes}"
+        assert not sp._buf and not sp.is_playing
+        sp.stop()  # no-op
+        assert sp_fake.closes == 1
+    finally:
+        audio_io.sd = orig_sd
+    print("ok  MicStreamer/SpeakerPlayer: stop() идемпотентен при гонке")
+
+
 if __name__ == "__main__":
     test_gate_suppresses_noise()
     test_speech_passes()
     test_highpass_removes_dc()
     test_no_gate_when_disabled()
     test_speaker_prebuffer_and_playing()
+    test_recorder_close_idempotent_concurrent()
+    test_realtime_streams_close_idempotent_concurrent()
     print("\nAUDIO DSP TESTS PASSED")

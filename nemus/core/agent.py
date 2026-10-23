@@ -56,15 +56,55 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
     reply_language = getattr(config.assistant, "reply_language", REPLY_AUTO)
     rules = [
         "Для реальных действий используй инструменты, не выдумывай результаты.",
-        "Если данных не хватает — задай уточняющий вопрос.",
+        "Внимательно анализируй запрос: если он неясен, неполон или двусмысленен — задай чёткий уточняющий вопрос, не делай предположений.",
+        "Речь распознаётся на слух и может содержать ошибки: если запрос выглядит бессмысленно, обрывочно или противоречит контексту — не выполняй его наугад, а вежливо переспроси, что имелось в виду.",
         reply_language_directive(reply_language),
         anti_reasoning_directive(),
-        "В твоём полном распоряжении Python: ты можешь писать собственные "
+        "В твоём полном распоряжении Python и консоль: ты можешь писать собственные "
         "скрипты и файлы (write_file/append_file), запускать их "
-        "(run_python с параметром path или code, run_shell), ставить библиотеки "
-        "(install_package) и создавать новые инструменты (create_tool). "
-        "Не отказывайся от задачи из-за отсутствия готового инструмента — напиши и "
-        "запусти собственный код, сложи результаты в свою рабочую папку.",
+        "(run_python с параметром path или code, run_shell с cmd/powershell), ставить "
+        "библиотеки (install_package). "
+        "Ты умеешь расширять себя: если просят добавить новую возможность, «научиться» "
+        "чему-то или нужного инструмента просто нет — напиши плагин через create_tool "
+        "(класс-наследник Tool в plugins/, он сразу станет доступен). "
+        "Не отказывайся от задачи из-за отсутствия готового инструмента — "
+        "напиши код или создай инструмент через create_tool, сложи результаты в рабочую папку.",
+        "Никогда не отвечай «не умею», «не могу», «нет доступа» или «в целях безопасности» "
+        "до того, как попробовал инструменты. Ограничений на Python и консоль нет: "
+        "файлы можно создавать и менять в любом месте системы, любые команды и скрипты "
+        "выполняются. Если инструмент вернул ошибку — обойди её другим способом "
+        "(другой путь, run_shell вместо run_python, свой скрипт), и только после "
+        "нескольких попыток объясни, что именно не получается.",
+        "Проверяй результат действий: не сообщай об успехе, пока не убедишься — "
+        "прочитай созданный файл (read_file), посмотри на экран (see_screen) или "
+        "проверь состояние инструментом. Если действие могло не сработать (клик по "
+        "неверному элементу, набор в не то окно, переключатель play/pause) — проверь "
+        "и при необходимости повтори. Не выдумывай, что «сделано», если результат не "
+        "подтверждён.",
+        "Медиа: play_pause — это ПЕРЕКЛЮЧАТЕЛЬ (нажимает play/pause, состояние "
+        "неизвестно), для гарантированной остановки используй action='stop', для "
+        "запуска — play_pause только если уверен, что сейчас пауза. Не говори "
+        "«включаю», если вызывал stop, и наоборот.",
+
+        "MCP (Model Context Protocol) поддерживается: внешние MCP-серверы подключаются "
+        "во вкладке «MCP» настроек (пресеты: filesystem, fetch, git, memory, time, "
+        "everything, github) или импортом mcp_config.json. Их инструменты появляются в "
+        "списке доступных с именами вида «сервер__инструмент» и вызываются как обычные "
+        "tools. Если сейчас MCP-инструментов в списке нет — это значит, что серверы не "
+        "настроены; предложи настроить (не говори, что MCP не поддерживается).",
+
+        "Автоматизация Windows: чтобы управлять приложением, видео, игрой или окном, "
+        "используй связку see_screen (что на экране) → control_screen (клик по "
+        "элементу/тексту, ввод, клавиши), press_key (стрелки, пробел, хоткеи), "
+        "media_control (play_pause/next/volume), open_application (запуск программы). "
+        "Примеры: «перемотай видео на 1:24» — открой плеер (open_application или "
+        "control_screen), затем либо нажми клавиши перемотки нужное число раз "
+        "(action='key', напр. ['right'] — обычно +5 сек), либо кликни по шкале "
+        "прогресса в позиции ~20% ширины, либо напиши скрипт с pyautogui через "
+        "run_python (если библиотеки нет — install_package). "
+        "«Открой файл/папку/программу/сайт» — open_url/open_application или "
+        "run_shell (start \"путь\"). Любую однотипную задачу автоматизируй скриптом, "
+        "а не повторяй ручные действия в цикле.",
     ]
     if "spotify" in registry.names and "media_control" in registry.names:
         rules.append(
@@ -73,14 +113,46 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
             "приложение (spotify action='open'), а затем управляй медиа-клавишами "
             "(media_control: play_pause, next_track, previous_track)."
         )
+
+    notes_block = ""
+    if "write_note" in registry.names:
+        rules.append(
+            "Веди заметки о пользователе: когда узнаёшь что-то важное или полезное "
+            "для будущих бесед (имя, предпочтения, планы, события, договорённости) — "
+            "молча сохрани заметку через write_note, по своему усмотрению, без "
+            "разрешений и упоминаний в ответе. Не дублируй уже записанное."
+        )
+        notes_block = _notes_for_prompt(config)
+
     rules_text = "\n".join(f"- {r}" for r in rules)
     return (
         f"{config.assistant.personality}\n\n"
         f"Текущее время: {now}. Операционная система: {os_info}.\n"
         f"Рабочая папка для твоих файлов и скриптов: {workspace}.\n"
         f"Доступные инструменты: {tool_names}.\n"
+        f"{notes_block}"
         "Правила:\n"
         f"{rules_text}"
+    )
+
+
+def _notes_for_prompt(config: Config) -> str:
+    """Блок «Заметки о пользователе» для системного промпта (или пусто)."""
+    memory = getattr(config, "memory", None)
+    notes_file = getattr(memory, "notes_file", "")
+    if not getattr(memory, "notes", False) or not notes_file:
+        return ""
+    try:
+        from nemus.core.notes import NoteBook
+
+        body = NoteBook(notes_file).format_for_prompt()
+    except OSError:
+        return ""
+    if not body:
+        return ""
+    return (
+        "Твои заметки о пользователе (доступны и через read_notes):\n"
+        f"{body}\n"
     )
 
 
@@ -160,10 +232,12 @@ class Agent:
         self.history.append(user_msg)
         self._persist(user_msg)
         self._apply_language_hint(user_text)
-        tools = self.registry.schemas() if len(self.registry) else None
 
         for step in range(self.max_steps):
             logger.debug(f"Агент: шаг {step + 1}")
+            # схемы берём каждый шаг: инструмент, созданный агентом через
+            # create_tool, сразу попадает в список и доступен модели
+            tools = self.registry.schemas() if len(self.registry) else None
             try:
                 response = yield from self._stream_response(tools)
             except ProviderError as exc:

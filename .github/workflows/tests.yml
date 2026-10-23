@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
@@ -24,6 +24,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install ruff
+          pip install -r requirements.txt
 
       - name: Lint with Ruff
         run: |
@@ -32,3 +33,17 @@ jobs:
       - name: Run project compilation check
         run: |
           python -m compileall -q nemus scripts
+
+      - name: Run offline test scripts
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = "Stop"
+          python scripts/test_language.py
+          python scripts/test_tools.py
+          python scripts/test_mcp.py
+          python scripts/test_realtime.py
+          python scripts/smoke_agent.py
+          python scripts/smoke_gui.py
+          python scripts/smoke_realtime_app.py

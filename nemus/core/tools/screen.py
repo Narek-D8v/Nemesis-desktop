@@ -3,7 +3,7 @@
 ``see_screen`` — «показывает» экран модели. Если модель поддерживает
 изображения (vision) — отправляется снимок. Если модель текстовая — включается
 локальный cv2/OCR-конвейер: снимок обрабатывается OpenCV, текст распознаётся
-средствами Windows (winsdk), а элементы ищутся контурами cv2.
+средствами Windows (winrt-Windows.Media.Ocr), а элементы ищутся контурами cv2.
 
 Все координаты в системе — **пиксели экрана**. Снимок по умолчанию делается 1:1
 с экраном, поэтому координаты на картинке совпадают с координатами экрана и не
@@ -18,19 +18,29 @@ import asyncio
 import base64
 import concurrent.futures
 import io
-import sys
+import threading
 from typing import Any
 
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
+from nemus.core.tools.clipboard import paste_text
 
 #: размер последнего снимка (ширина, высота) в пикселях изображения.
 _last_image_size: tuple[int, int] = (0, 0)
+
+#: Шаг координатной сетки в пикселях **экрана** (при уменьшении снимка).
+GRID_STEP_SCREEN_PX = 100
+#: Минимальный шаг сетки в пикселях изображения, чтобы подписи не налезали.
+_GRID_MIN_STEP_PX = 24
 #: размер экрана (ширина, высота).
 _last_screen_size: tuple[int, int] = (0, 0)
 #: во сколько раз картинка уменьшена относительно экрана (>= 1.0).
 _last_scale: float = 1.0
 #: пронумерованные элементы последнего снимка (координаты — пиксели экрана).
 _last_elements: list[dict[str, Any]] = []
+
+#: защищает согласованность состояния последнего снимка между потоками
+#: (текстовый чат и realtime-сессия выполняются в разных потоках).
+_state_lock = threading.Lock()
 
 #: подстроки имён моделей, которые обычно понимают изображения
 _KNOWN_VISION = (
@@ -141,6 +151,32 @@ def _encode_png(image: Any) -> tuple[str, bytes]:
     return "data:image/png;base64," + base64.b64encode(raw).decode("ascii"), raw
 
 
+def _store_state(
+    screen: tuple[int, int],
+    image_size: tuple[int, int],
+    scale: float,
+    elements: list[dict[str, Any]],
+) -> None:
+    """Атомарно сохраняет состояние последнего снимка экрана."""
+    global _last_image_size, _last_screen_size, _last_scale, _last_elements
+
+    with _state_lock:
+        _last_screen_size = screen
+        _last_image_size = image_size
+        _last_scale = scale
+        _last_elements = list(elements)
+
+
+def _get_screen_size() -> tuple[int, int]:
+    with _state_lock:
+        return _last_screen_size
+
+
+def _get_elements() -> list[dict[str, Any]]:
+    with _state_lock:
+        return list(_last_elements)
+
+
 def _to_screen(x: Any, y: Any) -> tuple[int, int]:
     """Приводит координаты к пикселям экрана и ограничивает их границами."""
     try:
@@ -148,10 +184,11 @@ def _to_screen(x: Any, y: Any) -> tuple[int, int]:
         sy = int(round(float(y)))
     except (TypeError, ValueError):
         raise ValueError("координаты должны быть числами") from None
-    if _last_screen_size[0]:
-        sx = max(0, min(sx, _last_screen_size[0] - 1))
-    if _last_screen_size[1]:
-        sy = max(0, min(sy, _last_screen_size[1] - 1))
+    screen = _get_screen_size()
+    if screen[0]:
+        sx = max(0, min(sx, screen[0] - 1))
+    if screen[1]:
+        sy = max(0, min(sy, screen[1] - 1))
     return sx, sy
 
 
@@ -170,8 +207,7 @@ def _overlay_grid(image: Any, screen: tuple[int, int], scale: float) -> Any:
         from PIL import Image
 
         arr = np.array(image.convert("RGB"))
-        step_screen = 100
-        step = max(24, int(step_screen / scale))
+        step = max(_GRID_MIN_STEP_PX, int(GRID_STEP_SCREEN_PX / scale))
         color = (255, 0, 0)
         for x in range(step, image.width, step):
             cv2.line(arr, (x, 0), (x, image.height), color, 1)
@@ -214,7 +250,7 @@ def _run_coro(coro: Any) -> Any:
 
 
 def _ocr_png(png_bytes: bytes, lang: str) -> Any:
-    """Распознаёт текст на PNG через Windows OCR (winsdk)."""
+    """Распознаёт текст на PNG через Windows OCR (winrt-Windows.Media.Ocr)."""
     from winrt.windows.globalization import Language
     from winrt.windows.graphics.imaging import BitmapDecoder
     from winrt.windows.media.ocr import OcrEngine
@@ -392,26 +428,21 @@ class SeeScreenTool(Tool):
         return model_supports_vision(model, mode)
 
     def execute(self, **_: object) -> ToolResult:
-        global _last_image_size, _last_screen_size, _last_scale, _last_elements
-
         settings = self.settings or ScreenSettings()
         if not settings.enabled:
             return ToolResult.failure("Просмотр экрана отключён в настройках.")
 
         screen = _screen_size()
-        _last_screen_size = screen
         use_image = self._use_image()
         limit = settings.max_width if use_image else settings.ocr_max_width
         try:
             image, scale = _capture(limit)
-            _last_image_size = (image.width, image.height)
-            _last_scale = scale
             _, raw = _encode_png(image)
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Не удалось сделать снимок экрана: {exc}")
 
         elements = _build_elements(image, raw, scale, settings)
-        _last_elements = elements
+        _store_state(screen, (image.width, image.height), scale, elements)
         listing = _format_elements(elements)
         hint = (
             "Чтобы кликнуть по элементу, вызови "
@@ -554,7 +585,7 @@ class ControlScreenTool(Tool):
             "click_text",
             "drag",
         )
-        if action in needs_view and _last_screen_size[0] == 0:
+        if action in needs_view and _get_screen_size()[0] == 0:
             return ToolResult.failure(
                 "Сначала вызови see_screen, чтобы понять, где находится нужный элемент."
             )
@@ -582,13 +613,14 @@ class ControlScreenTool(Tool):
 
     # ------------------------------------------------------------- actions
     def _click_element(self, pg: Any, kw: dict[str, Any], settings: ScreenSettings) -> ToolResult:
-        if not _last_elements:
+        elements = _get_elements()
+        if not elements:
             return ToolResult.failure("Список элементов пуст — вызови see_screen.")
         try:
             element_id = int(kw.get("id"))
         except (TypeError, ValueError):
             return ToolResult.failure("Для click_element нужен числовой id.")
-        for element in _last_elements:
+        for element in elements:
             if element["id"] == element_id:
                 x, y = _to_screen(element["cx"], element["cy"])
                 pg.click(x=x, y=y)
@@ -603,7 +635,7 @@ class ControlScreenTool(Tool):
         if not query:
             return ToolResult.failure("Для click_text нужен text.")
         match = _find_element(query)
-        if match is None and not _last_elements:
+        if match is None and not _get_elements():
             _refresh_elements(settings)
             match = _find_element(query)
         if match is None:
@@ -657,13 +689,19 @@ class ControlScreenTool(Tool):
         text = str(kw.get("text") or "")
         if not text:
             return ToolResult.failure("Для type нужен text.")
+        # Длину сообщаем целиком: обрезанный фрагмент модель принимает за
+        # неполный ввод и повторяет печать (дубли текста в окне).
         if text.isascii():
             pg.write(text, interval=0.02)
-            return ToolResult.success(f"Набран текст: «{text[:60]}».")
-        if _paste_text(pg, text):
-            return ToolResult.success(f"Вставлен текст: «{text[:60]}».")
-        pg.write(text, interval=0.02)
-        return ToolResult.success(f"Набран текст: «{text[:60]}».")
+            return ToolResult.success(f"Набран текст ({len(text)} символов).")
+        if paste_text(pg, text):
+            return ToolResult.success(
+                f"Вставлен текст ({len(text)} символов) из буфера обмена."
+            )
+        return ToolResult.failure(
+            "Не удалось вставить нелатинский текст: буфер обмена недоступен. "
+            "Текст НЕ введён — не повторяй ввод, сообщи об ошибке."
+        )
 
     def _key(self, pg: Any, kw: dict[str, Any]) -> ToolResult:
         keys = kw.get("keys")
@@ -694,7 +732,7 @@ def _find_element(query: str) -> dict[str, Any] | None:
     if not needle:
         return None
     best: dict[str, Any] | None = None
-    for element in _last_elements:
+    for element in _get_elements():
         if element["kind"] != "text":
             continue
         text = (element.get("text") or "").lower()
@@ -706,48 +744,11 @@ def _find_element(query: str) -> dict[str, Any] | None:
 
 
 def _refresh_elements(settings: ScreenSettings) -> None:
-    global _last_image_size, _last_screen_size, _last_scale, _last_elements
-
     screen = _screen_size()
-    _last_screen_size = screen
     image, scale = _capture(settings.ocr_max_width)
-    _last_image_size = (image.width, image.height)
-    _last_scale = scale
     _, raw = _encode_png(image)
-    _last_elements = _build_elements(image, raw, scale, settings)
-
-
-def _paste_text(pg: Any, text: str) -> bool:
-    """Печатает нелатинский текст через буфер обмена (Ctrl+V)."""
-    if not _set_clipboard(text):
-        return False
-    modifier = "command" if sys.platform == "darwin" else "ctrl"
-    pg.hotkey(modifier, "v")
-    return True
-
-
-def _set_clipboard(text: str) -> bool:
-    try:
-        from PySide6.QtWidgets import QApplication
-
-        app = QApplication.instance()
-        if app is not None:
-            app.clipboard().setText(text)
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        import tkinter
-
-        root = tkinter.Tk()
-        root.withdraw()
-        root.clipboard_clear()
-        root.clipboard_append(text)
-        root.update()
-        root.destroy()
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    elements = _build_elements(image, raw, scale, settings)
+    _store_state(screen, (image.width, image.height), scale, elements)
 
 
 def screen_tools() -> list[Tool]:

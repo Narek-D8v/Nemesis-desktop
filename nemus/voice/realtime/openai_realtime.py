@@ -9,12 +9,22 @@ from typing import Any
 
 import websockets
 
-from nemus.core.language import anti_reasoning_directive
+from nemus.config import DEFAULT_OPENAI_VOICE
+from nemus.core.language import (
+    REPLY_AUTO,
+    anti_reasoning_directive,
+    detect_language,
+    reply_language_directive,
+)
 from nemus.utils.logger import logger
+from nemus.voice.params import SAMPLE_RATE
 from nemus.voice.realtime.audio_io import MicStreamer, SpeakerPlayer, resample_pcm16
 from nemus.voice.realtime.base import BaseRealtimeSession, RealtimeState
 
 _WS_URL = "wss://api.openai.com/v1/realtime"
+
+#: Модель транскрипции входного аудио в Realtime API.
+TRANSCRIPTION_MODEL = "whisper-1"
 
 
 class OpenAIRealtimeSession(BaseRealtimeSession):
@@ -23,13 +33,13 @@ class OpenAIRealtimeSession(BaseRealtimeSession):
     provider = "openai"
     send_rate = 24000
     receive_rate = 24000
-    mic_rate = 16000
+    mic_rate = SAMPLE_RATE
 
     def __init__(
         self,
         api_key: str,
         model: str,
-        voice: str = "marin",
+        voice: str = DEFAULT_OPENAI_VOICE,
         audio: bool = True,
         temperature: float = 0.7,
         **kwargs: Any,
@@ -48,14 +58,19 @@ class OpenAIRealtimeSession(BaseRealtimeSession):
         self._speaker: SpeakerPlayer | None = None
         self._mic_queue: asyncio.Queue[bytes] | None = None
         self._play_queue: asyncio.Queue[bytes] | None = None
-        self._user_buf = ""
-        self._asst_buf = ""
-        self._responding = False
+    @property
+    def _detected_lang(self) -> str:
+        return getattr(self, "_detected_lang_cache", "")
+
+    @_detected_lang.setter
+    def _detected_lang(self, value: str) -> None:
+        self._detected_lang_cache = value
 
     # ------------------------------------------------------------------ run
     async def _run(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._emit_state(RealtimeState.CONNECTING)
+        self._detected_lang_cache = ""
         if not self._running:
             return
         self._mic_queue = asyncio.Queue()
@@ -131,7 +146,7 @@ class OpenAIRealtimeSession(BaseRealtimeSession):
             "voice": self._voice,
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
-            "input_audio_transcription": {"model": "whisper-1"},
+            "input_audio_transcription": {"model": TRANSCRIPTION_MODEL},
             "turn_detection": {
                 "type": "server_vad",
                 "threshold": 0.6,
@@ -210,11 +225,37 @@ class OpenAIRealtimeSession(BaseRealtimeSession):
                 if self._speaker is not None:
                     self._speaker.clear()
                 await self._send({"type": "response.cancel"})
+        elif etype == "input_audio_buffer.speech_stopped":
+            # пользователь закончил говорить — модель ещё думает
+            self._emit_state(RealtimeState.THINKING)
         elif etype == "conversation.item.input_audio_transcription.delta":
             self._user_buf += event.get("delta", "")
         elif etype == "conversation.item.input_audio_transcription.completed":
             text = event.get("transcript", "") or self._user_buf
-            self._emit_user_text(text.strip())
+            text = text.strip()
+            if text and getattr(self, "reply_language", REPLY_AUTO) == REPLY_AUTO:
+                detected = detect_language(text)
+                if detected and getattr(self, "_detected_lang_cache", "") != detected:
+                    self._detected_lang_cache = detected
+                    try:
+                        await self._send(
+                            {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": f"[Языковая настройка] {reply_language_directive(REPLY_AUTO, detected)}",
+                                        }
+                                    ],
+                                },
+                            }
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+            self._emit_user_text(text)
             self._user_buf = ""
         elif etype == "response.audio_transcript.delta":
             self._asst_buf += event.get("delta", "")
@@ -237,34 +278,53 @@ class OpenAIRealtimeSession(BaseRealtimeSession):
             self._asst_buf = ""
         elif etype in ("response.done", "response.cancelled"):
             self._responding = False
-            self._emit_state(RealtimeState.LISTENING)
+            # если инструмент ещё выполняется — рано показывать «Слушаю…»
+            if self._pending_tools:
+                self._emit_state(RealtimeState.THINKING)
+            else:
+                self._emit_state(RealtimeState.LISTENING)
         elif etype == "response.function_call_arguments.done":
-            await self._handle_tool_call(event)
+            # Инструменты ходят в сеть секундами — не блокируем приём аудио.
+            self._pending_tools += 1
+            self._emit_state(RealtimeState.THINKING)
+            task = asyncio.create_task(self._handle_tool_call(event))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
         elif etype == "response.created":
             self._responding = True
+            self._emit_state(RealtimeState.THINKING)
 
     async def _handle_tool_call(self, event: dict[str, Any]) -> None:
-        name = event.get("name", "")
-        call_id = event.get("call_id", "")
-        raw_args = event.get("arguments", "{}")
         try:
-            args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
-        except json.JSONDecodeError:
-            args = {}
-        logger.info(f"OpenAI Realtime tool call: {name}({args})")
-        # в отдельном потоке, чтобы не блокировать аудио-цикл (и ждать GUI-подтверждение)
-        result = await asyncio.to_thread(self._execute_tool, name, args)
-        await self._send(
-            {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": result.to_model(),
-                },
-            }
-        )
-        await self._send({"type": "response.create"})
+            name = event.get("name", "")
+            call_id = event.get("call_id", "")
+            raw_args = event.get("arguments", "{}")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+            except json.JSONDecodeError:
+                args = {}
+            logger.info(f"OpenAI Realtime tool call: {name}({args})")
+            # в отдельном потоке, чтобы не блокировать аудио-цикл
+            # (и ждать GUI-подтверждение)
+            result = await asyncio.to_thread(self._execute_tool, name, args)
+            logger.info(f"OpenAI Realtime tool result: {name} -> {result.content[:300]}")
+            await self._send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": result.to_model(),
+                    },
+                }
+            )
+            await self._send({"type": "response.create"})
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("OpenAI Realtime: ошибка обработки tool call")
+        finally:
+            self._pending_tools = max(0, self._pending_tools - 1)
 
     # ------------------------------------------------------------------ misc
     async def _send(self, message: dict[str, Any]) -> None:

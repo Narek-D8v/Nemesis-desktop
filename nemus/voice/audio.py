@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 import numpy as np
 import sounddevice as sd
 
+from nemus.voice.params import BLOCK_MS, SAMPLE_RATE
+
 
 @dataclass
 class AudioConfig:
-    sample_rate: int = 16000
+    sample_rate: int = SAMPLE_RATE
     channels: int = 1
-    block_ms: int = 30  # размер блока в мс
+    block_ms: int = BLOCK_MS  # размер блока в мс
 
     @property
     def blocksize(self) -> int:
@@ -72,38 +75,52 @@ class EnergyVAD:
 
 
 class Recorder:
-    """Записывает звук с микрофона через sounddevice."""
+    """Записывает звук с микрофона через sounddevice.
+
+    Потокобезопасно: ``open()``/``close()`` могут вызываться одновременно из
+    GUI-потока (VoiceManager.stop) и фонового цикла записи (_loop). Раньше
+    двойной вызов ``Stream.close()`` приводил к STATUS_HEAP_CORRUPTION
+    (0xC0000374) в PortAudio — вылет всего приложения.
+    """
 
     def __init__(self, config: AudioConfig | None = None) -> None:
         self.config = config or AudioConfig()
         self._stream: sd.InputStream | None = None
+        self._lock = threading.Lock()
 
     def read_block(self) -> np.ndarray:
         """Блокирующее чтение одного блока звука."""
-        if self._stream is None:
+        stream = self._stream
+        if stream is None:
             raise RuntimeError("Поток не открыт. Используй open().")
-        block, _ = self._stream.read(self.config.blocksize)
+        block, _ = stream.read(self.config.blocksize)
         return np.asarray(block).reshape(-1)
 
     def open(self) -> None:
-        if self._stream is not None:
-            return
-        self._stream = sd.InputStream(
-            samplerate=self.config.sample_rate,
-            channels=self.config.channels,
-            dtype="int16",
-            blocksize=self.config.blocksize,
-        )
-        self._stream.start()
+        with self._lock:
+            if self._stream is not None:
+                return
+            stream = sd.InputStream(
+                samplerate=self.config.sample_rate,
+                channels=self.config.channels,
+                dtype="int16",
+                blocksize=self.config.blocksize,
+            )
+            stream.start()
+            self._stream = stream
 
     def close(self) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self._stream = None
+        # «Отписываем» поток под локом: только один поток дойдёт до
+        # stop()/close(), повторный вызов станет no-op.
+        with self._lock:
+            stream, self._stream = self._stream, None
+        if stream is None:
+            return
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def __enter__(self) -> "Recorder":
         self.open()

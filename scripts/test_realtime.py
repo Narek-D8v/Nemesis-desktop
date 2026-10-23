@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import sys
 import threading
+import time
+from pathlib import Path
 
-import numpy as np
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from nemus.config import get_config
-from nemus.core.permissions import PermissionManager
-from nemus.core.tools.base import RiskLevel, Tool, ToolResult
-from nemus.core.tools.registry import ToolRegistry
-from nemus.voice.realtime import RealtimeCallbacks, RealtimeManager
-from nemus.voice.realtime.audio_io import resample_pcm16
+import numpy as np  # noqa: E402
+
+from nemus.config import get_config  # noqa: E402
+from nemus.core.permissions import PermissionManager  # noqa: E402
+from nemus.core.tools.base import RiskLevel, Tool, ToolResult  # noqa: E402
+from nemus.core.tools.registry import ToolRegistry  # noqa: E402
+from nemus.voice.realtime import (  # noqa: E402
+    RealtimeCallbacks,
+    RealtimeManager,
+    RealtimeState,
+)
+from nemus.voice.realtime.audio_io import resample_pcm16  # noqa: E402
 
 
 class _SafeTool(Tool):
@@ -262,6 +274,57 @@ def _registry_for_prompt():
     return reg
 
 
+def test_gemini_audio_and_latency() -> None:
+    from nemus.voice.realtime.gemini_live import GeminiLiveSession
+
+    class _FakeWs:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(json.loads(raw))
+
+    config = get_config(reload=True)
+    seen: list[RealtimeState] = []
+    session = GeminiLiveSession(
+        api_key="test",
+        model="gemini-3.8-live",
+        registry=ToolRegistry(),
+        permissions=PermissionManager(config),
+        callbacks=RealtimeCallbacks(on_state=seen.append),
+        system_prompt="тест",
+    )
+    ws = _FakeWs()
+    session._ws = ws
+    asyncio.run(session._send_audio(b"\x01\x00" * 480))
+    payload = ws.sent[0]["realtimeInput"]
+    assert payload["audio"]["mimeType"] == "audio/pcm;rate=16000"
+    assert "mediaChunks" not in payload, "устаревшее поле игнорируется новыми моделями"
+    print("ok  Gemini Live: микрофон уходит в поле audio")
+
+    setup = session._setup_message()
+    assert setup["model"] == "models/gemini-3.8-live"
+    detection = setup["realtimeInputConfig"]["automaticActivityDetection"]
+    assert detection["silenceDurationMs"] == 400
+    print("ok  Gemini Live: setup")
+
+    # Диагностика задержки: после паузы 0.35 с фиксируется конец речи
+    session._mic_spoke = True
+    session._voice_ts = time.monotonic() - 0.5
+    session._track_voice(b"\x00\x00" * 480)
+    assert session._speech_end_ts is not None
+    session._track_voice(b"\x10\x27" * 480)
+    assert session._speech_end_ts is None
+    print("ok  Gemini Live: замер конца речи")
+
+    # Статус «Думаю…» не должен дублироваться на каждый аудио-чанк
+    session._emit_state(RealtimeState.THINKING)
+    session._emit_state(RealtimeState.THINKING)
+    session._emit_state(RealtimeState.LISTENING)
+    assert seen == [RealtimeState.THINKING, RealtimeState.LISTENING], seen
+    print("ok  Gemini Live: статусы без дублей")
+
+
 def main() -> int:
     failures = 0
     for test in (
@@ -272,6 +335,7 @@ def main() -> int:
         test_gui_button,
         test_bridge_confirm_threading,
         test_settings_dialog,
+        test_gemini_audio_and_latency,
     ):
         try:
             test()

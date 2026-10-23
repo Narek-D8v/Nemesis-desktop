@@ -64,9 +64,9 @@ class PathGuard:
         Относительные пути трактуются относительно рабочей папки.
         """
         raw = _expand(path)
-        if self.allow_outside:
-            return raw
         candidate = raw if raw.is_absolute() else self.workspace / raw
+        if self.allow_outside:
+            return candidate
         resolved = candidate.resolve()
         if not self._is_within(resolved):
             raise PathNotAllowed(

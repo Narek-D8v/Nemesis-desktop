@@ -13,6 +13,8 @@ from nemus.core.tools.sandbox import PathGuard, PathNotAllowed
 
 MAX_OUTPUT = 20_000
 DEFAULT_TIMEOUT = 120
+#: таймаут установки/обновления пакетов pip (секунды)
+INSTALL_TIMEOUT = 600
 
 
 class RunPythonTool(Tool):
@@ -177,7 +179,7 @@ class InstallPackageTool(Tool):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=600,
+                timeout=INSTALL_TIMEOUT,
             )
         except subprocess.TimeoutExpired:
             return ToolResult.failure("Установка заняла слишком много времени.")

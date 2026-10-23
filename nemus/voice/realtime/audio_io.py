@@ -58,6 +58,7 @@ class MicStreamer:
         )
         self._stream: sd.InputStream | None = None
         self._running = False
+        self._lock = threading.Lock()
 
     def start(self) -> bool:
         if self._running:
@@ -75,14 +76,18 @@ class MicStreamer:
                 pass
 
         try:
-            self._stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="int16",
-                blocksize=self.blocksize,
-                callback=_callback,
-            )
-            self._stream.start()
+            with self._lock:
+                if self._stream is not None:
+                    return True
+                stream = sd.InputStream(
+                    samplerate=self.sample_rate,
+                    channels=1,
+                    dtype="int16",
+                    blocksize=self.blocksize,
+                    callback=_callback,
+                )
+                stream.start()
+                self._stream = stream
             self._running = True
             return True
         except Exception as exc:  # noqa: BLE001
@@ -90,14 +95,20 @@ class MicStreamer:
             return False
 
     def stop(self) -> None:
+        """Останавливает поток. Идемпотентно и потокобезопасно.
+
+        Раньше одновременный вызов из GUI-потока и потока сессии приводил к
+        двойному ``Stream.close()`` и порче кучи PortAudio (0xC0000374).
+        """
         self._running = False
-        if self._stream is not None:
+        with self._lock:
+            stream, self._stream = self._stream, None
+        if stream is not None:
             try:
-                self._stream.stop()
-                self._stream.close()
+                stream.stop()
+                stream.close()
             except Exception:  # noqa: BLE001
                 pass
-            self._stream = None
         close = getattr(self.cleaner, "close", None)
         if callable(close):
             try:
@@ -114,7 +125,7 @@ class SpeakerPlayer:
     блоки в тайминге железа. Небольшой пре-буфер гасит джиттер сети.
     """
 
-    def __init__(self, sample_rate: int, prebuffer_ms: int = 150, block_ms: int = 20):
+    def __init__(self, sample_rate: int, prebuffer_ms: int = 120, block_ms: int = 20):
         self.sample_rate = sample_rate
         self._lock = threading.Lock()
         self._buf = bytearray()
@@ -139,15 +150,20 @@ class SpeakerPlayer:
         if self._running:
             return True
         try:
-            self._stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="int16",
-                blocksize=self._blocksize,
-                callback=self._callback,
-                latency="low",
-            )
-            self._stream.start()
+            with self._lock:
+                if self._stream is not None:
+                    self._running = True
+                    return True
+                stream = sd.OutputStream(
+                    samplerate=self.sample_rate,
+                    channels=1,
+                    dtype="int16",
+                    blocksize=self._blocksize,
+                    callback=self._callback,
+                    latency="low",
+                )
+                stream.start()
+                self._stream = stream
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Не удалось открыть динамики: {exc}")
             return False
@@ -206,11 +222,15 @@ class SpeakerPlayer:
             self._playing = False
 
     def stop(self) -> None:
+        """Останавливает вывод. Идемпотентно и потокобезопасно (см. MicStreamer.stop)."""
         self._running = False
-        if self._stream is not None:
+        with self._lock:
+            stream, self._stream = self._stream, None
+            self._buf.clear()
+            self._playing = False
+        if stream is not None:
             try:
-                self._stream.stop()
-                self._stream.close()
+                stream.stop()
+                stream.close()
             except Exception:  # noqa: BLE001
                 pass
-            self._stream = None

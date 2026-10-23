@@ -21,9 +21,10 @@ from nemus.core.tools.registry import ToolRegistry
 from nemus.utils.logger import logger
 from nemus.voice.audio import AudioConfig, EnergyVAD, Recorder
 from nemus.voice.noise import create_noise_reducer
+from nemus.voice.params import SAMPLE_RATE, VAD_SILENCE_MS, VAD_THRESHOLD
 from nemus.voice.realtime.base import RealtimeCallbacks, RealtimeState
-from nemus.voice.stt import STTEngine
-from nemus.voice.tts import TTSEngine
+from nemus.voice.stt import STTEngine, build_hotwords
+from nemus.voice.tts import TTSEngine, resolve_openai_key
 
 #: порог RMS для перебивания речи ассистента (заметно выше порога VAD)
 _BARGE_RMS = 0.05
@@ -41,7 +42,7 @@ class LocalLiveSession:
     """
 
     provider = "local"
-    sample_rate = 16000
+    sample_rate = SAMPLE_RATE
 
     def __init__(
         self,
@@ -114,12 +115,19 @@ class LocalLiveSession:
             cfg.voice.noise, sample_rate=self.sample_rate, block_ms=audio_cfg.block_ms
         )
         self._tts = TTSEngine(
-            voice=cfg.voice.tts.voice, rate=cfg.voice.tts.rate, volume=cfg.voice.tts.volume
+            voice=cfg.voice.tts.voice,
+            rate=cfg.voice.tts.rate,
+            volume=cfg.voice.tts.volume,
+            engine=cfg.voice.tts.engine,
+            model=cfg.voice.tts.openai_model,
+            api_key=resolve_openai_key(cfg.llm.providers),
         )
         self._stt = STTEngine(
             model=cfg.voice.stt.model,
             language=cfg.voice.stt.language,
             device=cfg.voice.stt.device,
+            beam_size=cfg.voice.stt.beam_size,
+            hotwords=build_hotwords(cfg),
         )
         self._agent = Agent(
             config=cfg,
@@ -141,7 +149,7 @@ class LocalLiveSession:
 
         threading.Thread(target=self._stt.warmup, daemon=True, name="local-stt-warmup").start()
         self._emit_state(RealtimeState.READY)
-        vad = EnergyVAD(threshold=0.012, silence_ms=600)
+        vad = EnergyVAD(threshold=VAD_THRESHOLD, silence_ms=VAD_SILENCE_MS)
 
         try:
             while self._running:

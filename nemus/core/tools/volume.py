@@ -23,6 +23,9 @@ from typing import Any
 
 _SYSTEM = platform.system()
 
+#: таймаут вызовов CLI-утилит громкости (секунды)
+CLI_TIMEOUT = 10
+
 
 class VolumeError(RuntimeError):
     """Не удалось применить операцию с громкостью."""
@@ -194,7 +197,7 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=CLI_TIMEOUT,
     )
 
 

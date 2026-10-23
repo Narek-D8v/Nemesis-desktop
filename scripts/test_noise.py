@@ -124,6 +124,41 @@ def test_krisp_requires_sdk() -> None:
         raise AssertionError("ожидался RuntimeError без SDK")
 
 
+def test_rnnoise_close_idempotent_concurrent() -> None:
+    """Регресс 0xC0000374: stop() (GUI) и finally цикла одновременно зовут
+    close() -> двойной rnnoise_destroy портит кучу нативной DLL."""
+    import threading
+
+    import nemus.voice.rnnoise_native as rn
+
+    if not rn.available():
+        print("skip rnnoise.dll не найден")
+        return
+
+    r = RNNoiseReducer(sample_rate=SR)
+    r.clean(_noise(0.05))
+
+    barrier = threading.Barrier(8)
+    errors: list[Exception] = []
+
+    def _close_once() -> None:
+        try:
+            barrier.wait()
+            r.close()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_close_once) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    assert r._den._state is None, "состояние RNNoise не освобождено"
+    r.close()  # ещё один вызов — no-op
+    print("ok  RNNoise: close() идемпотентен при гонке из 8 потоков")
+
+
 if __name__ == "__main__":
     test_builtin_suppresses_noise()
     test_builtin_preserves_length_and_dtype()
@@ -133,5 +168,6 @@ if __name__ == "__main__":
     test_factory_rnnoise()
     test_rnnoise_preserves_length()
     test_rnnoise_reduces_noise()
+    test_rnnoise_close_idempotent_concurrent()
     test_krisp_requires_sdk()
     print("\nNOISE TESTS PASSED")

@@ -334,6 +334,57 @@ def qss() -> str:
         image: url({check});
     }}
 
+    /* Ползунок */
+    QSlider::groove:horizontal {{
+        height: 6px;
+        background: {BG_ACTIVE};
+        border-radius: 3px;
+    }}
+    QSlider::sub-page:horizontal {{
+        background: {ACCENT_PRIMARY_DIM};
+        border-radius: 3px;
+    }}
+    QSlider::add-page:horizontal {{
+        background: {BG_ELEVATED};
+        border: 1px solid {BORDER};
+        border-radius: 3px;
+    }}
+    QSlider::handle:horizontal {{
+        width: 16px;
+        height: 16px;
+        margin: -6px 0;
+        border-radius: 8px;
+        background: {TEXT};
+        border: none;
+    }}
+    QSlider::handle:horizontal:hover {{ background: {ACCENT_PRIMARY}; }}
+    QSlider:disabled::groove:horizontal {{ background: {BG_SECONDARY}; }}
+    QSlider:disabled::handle:horizontal {{ background: {TEXT_DIMMER}; }}
+
+    /* Карточка MCP-сервера */
+    #MCPCard {{
+        background: {BG_SECONDARY};
+        border: 1px solid {BORDER};
+        border-radius: 14px;
+    }}
+    #MCPCard:hover {{
+        border-color: {BORDER_LIGHT};
+    }}
+    #MCPCard[probe="ok"] {{
+        border-color: rgba(94, 234, 165, 0.45);
+    }}
+    #MCPCard[probe="fail"] {{
+        border-color: rgba(255, 117, 117, 0.45);
+    }}
+    #MCPCard #MCPCardForm {{
+        background: transparent;
+        border: none;
+    }}
+    #MCPCard QLabel#DotLabel {{
+        font-size: 13px;
+        background: transparent;
+    }}
+
     /* Скроллбары */
     QScrollBar:vertical {{
         background: transparent;

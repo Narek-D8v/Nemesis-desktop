@@ -7,6 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import nemus.core.tools.keyboard as keyboard_mod  # noqa: E402
 from nemus.core.tools.all import all_builtin_tools  # noqa: E402
 from nemus.core.tools.base import RiskLevel  # noqa: E402
 from nemus.core.tools.keyboard import (  # noqa: E402
@@ -89,14 +90,34 @@ def main() -> int:
     assert fake.presses[-1] == ("space", 2)
     print("OK press_key: space")
 
-    # 5. press_key: комбинация и текст
+    # 5. press_key: комбинация, ASCII-текст и Unicode-текст
     fake.hotkeys.clear()
     fake.typed.clear()
     r = pk.execute(keys=["Ctrl", "S"])
     assert r.ok and fake.hotkeys[-1] == ("ctrl", "s"), fake.hotkeys
-    r = pk.execute(text="привет")
-    assert r.ok and fake.typed[-1] == "привет", fake.typed
-    print("OK press_key: hotkey/text")
+    r = pk.execute(text="hello")
+    assert r.ok and fake.typed[-1] == "hello", fake.typed
+
+    # кириллица не набирается typewrite — только через буфер обмена
+    calls: list[str] = []
+    original = keyboard_mod.paste_text
+    try:
+        keyboard_mod.paste_text = lambda pg, value: calls.append(value) or True
+        r = pk.execute(text="привет")
+        assert r.ok and calls == ["привет"], (r.content, calls)
+        assert "6 символов" in r.content, r.content
+        assert fake.typed[-1] == "hello", fake.typed
+    finally:
+        keyboard_mod.paste_text = original
+
+    try:
+        keyboard_mod.paste_text = lambda pg, value: False
+        r = pk.execute(text="привет")
+        assert not r.ok and "НЕ введён" in r.content, r.content
+        assert fake.typed[-1] == "hello", fake.typed
+    finally:
+        keyboard_mod.paste_text = original
+    print("OK press_key: hotkey/ASCII/Unicode")
 
     # 6. валидация
     assert not pk.execute(key="несуществующая").ok

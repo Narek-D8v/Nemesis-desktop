@@ -3,22 +3,27 @@ name = "nemus"
 version = "0.1.0"
 description = "Немуся (Nemesis) — голосовой ассистент на Python"
 readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "GPL-3.0-or-later" }
-authors = [{ name = "Narek Haroyan (Narek-D8v)", url = "https://github.com/Narek-D8v" }]
+requires-python = ">=3.13"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Narek Haroyan (Narek-D8v)" }]
 dynamic = ["dependencies"]
 classifiers = [
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3.13",
     "Environment :: Win32 (MS Windows)",
     "Operating System :: Microsoft :: Windows",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Narek-D8v/Nemesis-desktop"
+Repository = "https://github.com/Narek-D8v/Nemesis-desktop"
+Issues = "https://github.com/Narek-D8v/Nemesis-desktop/issues"
+
 [project.scripts]
 nemus = "nemus.app:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
@@ -32,7 +37,7 @@ include = ["nemus*"]
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 exclude = ["venv", ".venv", "data", "build", "dist"]
 
 [tool.ruff.lint]

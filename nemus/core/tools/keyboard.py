@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
+from nemus.core.tools.clipboard import paste_text
 
 #: человекочитаемое действие -> имя клавиши pyautogui
 MEDIA_ACTIONS = {
@@ -94,7 +95,7 @@ class MediaControlTool(Tool):
             pyautogui.press(key, presses=n)
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Не удалось нажать медиа-клавишу: {exc}")
-        return ToolResult.success(f"Медиа-клавиша «{key}» нажата {n} раз.")
+        return ToolResult.success(f"Медиа-клавиша «{key}» нажата {n} раз." + (" (это переключатель play/pause)" if name == "play_pause" else ""))
 
     def _volume_action(self, name: str, level: int | None) -> ToolResult:
         from nemus.core.tools import volume
@@ -184,8 +185,22 @@ class PressKeyTool(Tool):
 
             valid = set(pyautogui.KEYBOARD_KEYS)
             if text:
-                pyautogui.typewrite(str(text), interval=0.02)
-                return ToolResult.success(f"Набран текст: «{text}».")
+                value = str(text)
+                # pyautogui.typewrite теряет кириллицу (нет кодов клавиш) —
+                # нелатинский текст вставляем через буфер обмена.
+                if value.isascii():
+                    pyautogui.typewrite(value, interval=0.02)
+                    return ToolResult.success(
+                        f"Набран текст ({len(value)} символов)."
+                    )
+                if paste_text(pyautogui, value):
+                    return ToolResult.success(
+                        f"Вставлен текст ({len(value)} символов) из буфера обмена."
+                    )
+                return ToolResult.failure(
+                    "Не удалось вставить нелатинский текст: буфер обмена недоступен. "
+                    "Текст НЕ введён — не повторяй ввод, сообщи об ошибке."
+                )
             if keys:
                 combo = [str(k).lower() for k in keys]
                 bad = [k for k in combo if k not in valid]

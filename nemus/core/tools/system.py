@@ -13,6 +13,11 @@ from datetime import datetime
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
 from nemus.core.tools.sandbox import PathGuard, PathNotAllowed
 
+#: таймаут служебных PowerShell-запросов (секунды)
+POWERSHELL_TIMEOUT = 20
+#: флаг Windows — запуск процесса без консольного окна
+CREATE_NO_WINDOW = 0x08000000
+
 
 class GetSystemInfoTool(Tool):
     name = "get_system_info"
@@ -254,8 +259,8 @@ class OpenApplicationTool(Tool):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=20,
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
+                timeout=POWERSHELL_TIMEOUT,
+                creationflags=CREATE_NO_WINDOW,
             )
             apps: list[tuple[str, str]] = []
             for line in (out.stdout or "").splitlines():
