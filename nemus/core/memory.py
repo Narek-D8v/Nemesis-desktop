@@ -1,0 +1,386 @@
+"""Память Немуси на SQLite: история диалогов и долговременные факты."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+#: название нового диалога (пока в нём нет реплик)
+DEFAULT_SESSION_TITLE = "Новый диалог"
+#: ключ текущего диалога во внутренней таблице ``meta``
+_CURRENT_SESSION_KEY = "current_session_id"
+
+
+def _set_current_id(conn: sqlite3.Connection, session_id: int) -> None:
+    """Запоминает текущий диалог в ``meta`` — выбор переживает перезапуск."""
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_CURRENT_SESSION_KEY, str(session_id)),
+    )
+
+
+class Memory:
+    """Потокобезопасное хранилище на SQLite (история + факты)."""
+
+    def __init__(self, db_path: str | Path) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+        self._current_session_id = self._ensure_session()
+
+    def _init_schema(self) -> None:
+        with self._lock, self._conn:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    tool_calls TEXT,
+                    tool_call_id TEXT,
+                    name TEXT,
+                    ts TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS facts (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    ts TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                """
+            )
+            # Миграция старых БД: колонки tool_calls и session_id появились
+            # позже, а CREATE TABLE IF NOT EXISTS существующую таблицу
+            # не дополняет.
+            columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(messages)")
+            }
+            if "tool_calls" not in columns:
+                self._conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
+            if "session_id" not in columns:
+                # старые сообщения достаются диалогу по умолчанию (id = 1)
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN session_id "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+
+    def _ensure_session(self) -> int:
+        """Гарантирует наличие диалога и возвращает текущий его id.
+
+        Существующие (старые) сообщения уже принадлежат сессии 1 — она и
+        создаётся первой. Выбор диалога переживает перезапуск через ``meta``.
+        """
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT id FROM sessions ORDER BY id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                now = _now()
+                sid = int(
+                    self._conn.execute(
+                        "INSERT INTO sessions (title, created_at, updated_at) "
+                        "VALUES (?, ?, ?)",
+                        (DEFAULT_SESSION_TITLE, now, now),
+                    ).lastrowid
+                )
+                _set_current_id(self._conn, sid)
+                return sid
+            stored = self._conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (_CURRENT_SESSION_KEY,)
+            ).fetchone()
+            try:
+                sid = int(stored["value"]) if stored else 0
+            except (TypeError, ValueError):
+                sid = 0
+            exists = self._conn.execute(
+                "SELECT id FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            if exists is None:
+                sid = int(row["id"])
+                _set_current_id(self._conn, sid)
+            return sid
+
+    # ------------------------------------------------------------- sessions
+    @property
+    def current_session_id(self) -> int:
+        """id активного диалога (все записи сообщений идут в него)."""
+        return self._current_session_id
+
+    def current_session_title(self) -> str:
+        return self.session_title(self._current_session_id) or DEFAULT_SESSION_TITLE
+
+    def session_title(self, session_id: int) -> str:
+        """Название диалога (пустая строка, если диалога нет)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT title FROM sessions WHERE id = ?", (int(session_id),)
+            ).fetchone()
+        return str(row["title"]) if row else ""
+
+    def list_sessions(self, limit: int = 50) -> list[dict]:
+        """Диалоги по свежести (последний первый) со счётчиком сообщений."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT s.id, s.title, s.created_at, s.updated_at, "
+                "(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) "
+                "AS messages FROM sessions s "
+                "ORDER BY s.updated_at DESC, s.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_session(self, title: str = "") -> int:
+        """Создаёт диалог и делает его текущим. Возвращает id."""
+        name = (title or "").strip() or DEFAULT_SESSION_TITLE
+        now = _now()
+        with self._lock, self._conn:
+            sid = int(
+                self._conn.execute(
+                    "INSERT INTO sessions (title, created_at, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (name, now, now),
+                ).lastrowid
+            )
+            _set_current_id(self._conn, sid)
+        self._current_session_id = sid
+        return sid
+
+    def switch_session(self, session_id: int) -> int:
+        """Делает диалог ``session_id`` текущим. Несуществующий — ValueError."""
+        sid = int(session_id)
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT id FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Диалог {sid} не найден")
+            _set_current_id(self._conn, sid)
+        self._current_session_id = sid
+        return sid
+
+    def rename_session(self, session_id: int, title: str) -> None:
+        """Переименовывает диалог (пустое имя игнорируется)."""
+        name = (title or "").strip()
+        if not name:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (name, _now(), int(session_id)),
+            )
+
+    def auto_title(self, text: str, max_len: int = 48) -> None:
+        """Называет текущий диалог по первой реплике пользователя.
+
+        Срабатывает только пока у диалога название по умолчанию —
+        вручное переименование и названия от создателя не затираются.
+        """
+        text = " ".join((text or "").split())
+        if not text:
+            return
+        short = text if len(text) <= max_len else text[: max_len - 1] + "…"
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT title FROM sessions WHERE id = ?",
+                (self._current_session_id,),
+            ).fetchone()
+            if row is None or row["title"] != DEFAULT_SESSION_TITLE:
+                return
+            self._conn.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (short, _now(), self._current_session_id),
+            )
+
+    def delete_session(self, session_id: int) -> int:
+        """Удаляет диалог вместе с его сообщениями.
+
+        Если удалён текущий — текущим становится самый свежий из
+        оставшихся (либо создаётся новый). Возвращает id текущего диалога.
+        """
+        sid = int(session_id)
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+            self._conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+            if sid == self._current_session_id:
+                row = self._conn.execute(
+                    "SELECT id FROM sessions ORDER BY updated_at DESC, id DESC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    now = _now()
+                    new_id = int(
+                        self._conn.execute(
+                            "INSERT INTO sessions (title, created_at, updated_at) "
+                            "VALUES (?, ?, ?)",
+                            (DEFAULT_SESSION_TITLE, now, now),
+                        ).lastrowid
+                    )
+                else:
+                    new_id = int(row["id"])
+                _set_current_id(self._conn, new_id)
+                self._current_session_id = new_id
+                return new_id
+        return self._current_session_id
+
+    # ------------------------------------------------------------- messages
+    def add_message(
+        self,
+        role: str,
+        content: str | None = None,
+        tool_call_id: str | None = None,
+        name: str | None = None,
+        tool_calls: Any = None,
+    ) -> None:
+        """Сохраняет сообщение; для ассистента — вместе с его tool-calls.
+
+        Без tool_calls результаты инструментов (role=tool) при следующем
+        старте загрузились бы «осиротевшими», и провайдеры отвергли бы
+        весь запрос — см. ``Agent._load_history`` и ``load_messages_into``.
+        с текущим диалогом (``session_id``), а свежесть диалога обновляется
+        для порядка в списке сессий.
+        """
+        ts = _now()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO messages "
+                "(role, content, tool_calls, tool_call_id, name, session_id, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    role,
+                    content,
+                    _dump_tool_calls(tool_calls),
+                    tool_call_id,
+                    name,
+                    self._current_session_id,
+                    ts,
+                ),
+            )
+            self._conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (ts, self._current_session_id),
+            )
+
+    def recent_messages(self, limit: int = 40) -> list[dict]:
+        """Последние сообщения **текущего** диалога (в хронологии)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT role, content, tool_calls, tool_call_id, name FROM messages "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (self._current_session_id, limit),
+            ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def clear_messages(self) -> None:
+        """Очищает текущий диалог (остальные не трогает)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM messages WHERE session_id = ?",
+                (self._current_session_id,),
+            )
+
+    # ----------------------------------------------------------------- facts
+    def set_fact(self, key: str, value: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO facts (key, value, ts) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, ts=excluded.ts",
+                (key, value, _now()),
+            )
+
+    def get_fact(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM facts WHERE key = ?", (key,)
+            ).fetchone()
+        return row["value"] if row else None
+
+    def all_facts(self) -> dict[str, str]:
+        with self._lock:
+            rows = self._conn.execute("SELECT key, value FROM facts").fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
+def load_messages_into(history: list, rows: list[dict]) -> None:
+    """Преобразует строки БД в объекты Message и добавляет в историю."""
+    from nemus.core.providers import Message
+
+    for row in rows:
+        history.append(
+            Message(
+                role=row["role"],
+                content=row["content"],
+                tool_calls=_load_tool_calls(row.get("tool_calls")),
+                tool_call_id=row["tool_call_id"],
+                name=row["name"],
+            )
+        )
+
+
+def _dump_tool_calls(tool_calls: Any) -> str | None:
+    """Сериализует tool-calls ассистента в JSON для колонки ``tool_calls``."""
+    if not tool_calls:
+        return None
+    out: list[dict[str, Any]] = []
+    for call in tool_calls:
+        if isinstance(call, dict):
+            out.append(
+                {
+                    "id": call.get("id", ""),
+                    "name": call.get("name", ""),
+                    "arguments": call.get("arguments") or {},
+                }
+            )
+        else:
+            out.append(
+                {"id": call.id, "name": call.name, "arguments": call.arguments}
+            )
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _load_tool_calls(raw: Any) -> list | None:
+    """Восстанавливает tool-calls из JSON колонки (или ``None``)."""
+    if not raw:
+        return None
+    from nemus.core.providers import ToolCall
+
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    calls = [
+        ToolCall(
+            id=str(item.get("id") or ""),
+            name=str(item.get("name") or ""),
+            arguments=item.get("arguments") or {},
+        )
+        for item in data
+        if isinstance(item, dict) and item.get("name")
+    ]
+    return calls or None
