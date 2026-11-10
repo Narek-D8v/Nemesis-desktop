@@ -11,7 +11,9 @@ API-ключи могут храниться в OS keyring (см. ``nemus.utils.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -69,10 +71,18 @@ class FallbackEntry(BaseModel):
 
 class LLMConfig(BaseModel):
     default_provider: str = "gemini"
-    default_model: str = "gemini/gemini-2.0-flash"
+    default_model: str = "gemini/gemini-3.5-flash-lite"
     temperature: float = 0.7
     max_tokens: int = 4096
     request_timeout: int = 120
+    #: бюджет рассуждений Gemini 3+: low ощутимо экономит токены и лимиты
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
+    #: модель для коротких светских ответов; пусто — default_model
+    fast_model: str = ""
+    #: потолок ответа быстрого пути: короткая реплика, а не простыня
+    fast_max_tokens: int = 300
+    #: таймаут быстрого пути, сек: лучше быстро уйти в резерв, чем ждать 120 с
+    fast_timeout: int = 20
     fallback: list[FallbackEntry] = Field(default_factory=list)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
@@ -135,8 +145,14 @@ class WakeWordConfig(BaseModel):
 
 
 class STTConfig(BaseModel):
-    engine: str = "faster-whisper"
+    # auto — облако Gemini/OpenAI при наличии ключа, иначе локальный Whisper;
+    # gemini/openai — только выбранное облако; faster-whisper — только локально
+    engine: str = "auto"
     model: str = "small"
+    #: модель OpenAI для облачной расшифровки (быстро и без загрузки модели)
+    cloud_model: str = "gpt-4o-mini-transcribe"
+    #: модель Gemini для облачной расшифровки (ключ Gemini, без ffmpeg)
+    gemini_model: str = "gemini-3.5-transcribe"
     language: str = "ru"
     device: str = "auto"
     #: ширина лучевого поиска: больше — точнее, но медленнее
@@ -201,6 +217,20 @@ class VoiceConfig(BaseModel):
     noise: NoiseConfig = Field(default_factory=NoiseConfig)
 
 
+class ImagesConfig(BaseModel):
+    """Генерация изображений: провайдер и модели.
+
+    ``auto`` выбирает бесплатный Pollinations для текста и платные
+    OpenAI/Gemini/OpenRouter для работы по фото-референсу (если есть кредиты).
+    """
+
+    provider: str = "auto"  # auto | pollinations | gemini | openai | openrouter
+    openai_model: str = "gpt-image-1"
+    gemini_model: str = "gemini-3.1-flash-image"
+    openrouter_model: str = "google/gemini-3.1-flash-image"
+    pollinations_model: str = "flux"
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     permission_mode: PermissionMode = "smart"
@@ -214,6 +244,13 @@ class ToolsConfig(BaseModel):
     max_steps: int = 100
     #: бюджет времени одного запроса, секунд (длинные установки/рендеры)
     run_budget_seconds: int = 600
+    #: сколько символов истории максимум уходит модели за запрос
+    max_history_chars: int = 60000
+    #: сколько символов результата инструмента отдаём модели (остальное — по частям)
+    max_tool_output: int = 12000
+    #: потолок токенов на одну задачу (0 — без потолка). Защита от того, что
+    #: один длинный проход съест дневную квоту провайдера
+    max_run_tokens: int = 500000
 
 
 class ScreenConfig(BaseModel):
@@ -258,6 +295,45 @@ class SpotifyConfig(BaseModel):
     default_device: str = ""
     market: str = "RU"
     cache_path: str = "data/spotify_token.json"
+
+
+class TelegramConfig(BaseModel):
+    """Управление Немучей из Telegram (бот на python-telegram-bot).
+
+    Бот выполняет команды на этом компьютере, поэтому работает только для
+    перечисленных Telegram-ID: случайный пользователь не должен получить
+    доступ к ноутбуку. Пустой список ID — бот не запускается.
+    """
+
+    enabled: bool = False
+    #: токен от @BotFather; при пустом значении подтягивается из keyring
+    token: str = ""
+    #: ID пользователей, которым разрешено писать боту
+    allowed_users: list[int] = Field(default_factory=list)
+    #: отвечать в группах (по умолчанию только личные сообщения)
+    allow_groups: bool = False
+    #: распознавать голосовые сообщения локальным STT
+    transcribe_voice: bool = True
+    #: максимальный размер скачиваемого файла, МБ
+    max_download_mb: int = 100
+
+    @field_validator("allowed_users", mode="before")
+    @classmethod
+    def _parse_allowed_users(cls, value: Any) -> Any:
+        """Принимает список из YAML и строку из env: «123, 456» или «123 456».
+
+        В контейнере конфиг часто передают переменными окружения
+        (``NEMUS_TELEGRAM__ALLOWED_USERS=123,456``), а pydantic ждёт список.
+        """
+        if isinstance(value, int):
+            return [value]
+        if isinstance(value, str):
+            return [
+                int(part)
+                for part in re.split(r"[,;\s]+", value.strip())
+                if part.strip()
+            ]
+        return value
 
 
 class GUIConfig(BaseModel):
@@ -310,16 +386,20 @@ class SkillsConfig(BaseModel):
     dir: str = ".agents/skills"
     #: отключённые скиллы (по имени) — не показываются модели
     disabled: list[str] = Field(default_factory=list)
+    #: скиллы, которые всегда загружены в промпт (например, стиль ответа)
+    always: list[str] = Field(default_factory=list)
 
 
 class Config(BaseModel):
     assistant: AssistantConfig = Field(default_factory=AssistantConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    images: ImagesConfig = Field(default_factory=ImagesConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     screen: ScreenConfig = Field(default_factory=ScreenConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     spotify: SpotifyConfig = Field(default_factory=SpotifyConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     gui: GUIConfig = Field(default_factory=GUIConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
@@ -355,6 +435,12 @@ def _env_overrides(prefix: str = "NEMUS_") -> dict[str, Any]:
 
 def _coerce(value: str) -> Any:
     lowered = value.strip().lower()
+    # списки/словари в env: NEMUS_LLM__FALLBACK='[{"provider": ...}]'
+    if lowered.startswith(("[", "{")):
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
     if lowered in ("true", "yes", "on"):
         return True
     if lowered in ("false", "no", "off"):
@@ -415,6 +501,20 @@ def relativize_paths(cfg: Config) -> None:
         setattr(target, last, to_relative_path(getattr(target, last)))
 
 
+def save_config(cfg: Config) -> Path:
+    """Пишет конфиг в ``config/config.yaml`` и возвращает путь.
+
+    Пути перед записью возвращаются к виду относительно корня проекта, чтобы
+    в файле не появлялось абсолютных ``D:\\Nemesis``.
+    """
+    relativize_paths(cfg)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    path = CONFIG_DIR / "config.yaml"
+    with path.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(cfg.model_dump(), fh, allow_unicode=True, sort_keys=False)
+    return path
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Загружает конфигурацию, объединяя YAML, env и значения по умолчанию."""
     data: dict[str, Any] = {}
@@ -462,6 +562,10 @@ def _inject_keys_from_keyring(cfg: Config) -> None:
         secret = get_secret("spotify/client_secret")
         if secret:
             cfg.spotify.client_secret = secret
+    if cfg.telegram.enabled and not cfg.telegram.token:
+        secret = get_secret("telegram/token")
+        if secret:
+            cfg.telegram.token = secret
     if cfg.voice.noise.provider == "krisp" and not cfg.voice.noise.krisp_api_key:
         secret = get_secret("voice/noise/krisp_api_key")
         if secret:
