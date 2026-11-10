@@ -15,6 +15,7 @@ from nemus.core.reminder import ReminderScheduler
 from nemus.core.tools.all import all_builtin_tools
 from nemus.core.tools.base import Tool
 from nemus.core.tools.generate import generate_tools
+from nemus.core.tools.images import image_tools
 from nemus.core.tools.memory_tools import memory_tools
 from nemus.core.tools.notes_tools import notes_tools
 from nemus.core.tools.registry import ToolRegistry
@@ -22,6 +23,7 @@ from nemus.core.tools.remind import remind_tools
 from nemus.core.tools.sandbox import PathGuard
 from nemus.core.tools.skills_tool import skill_tools
 from nemus.core.tools.spotify import spotify_tools
+from nemus.core.tools.telegram import telegram_tools
 from nemus.utils.logger import logger
 
 PLUGINS_DIR = PROJECT_ROOT / "plugins"
@@ -60,6 +62,8 @@ class Core:
         _apply_memory_tools(self.registry, config)
         _apply_notes(self.registry, config)
         _apply_skills(self.registry, config)
+        _apply_images(self.registry, config)
+        _apply_telegram(self.registry, config)
         _inject_settings(self.registry, config)
         _inject_memory(self.registry, self.memory)
         _inject_reminder(self.registry, self.reminder)
@@ -119,6 +123,35 @@ def _inject_settings(registry: ToolRegistry, config: Config) -> None:
     if run_python is not None:
         run_python.workspace = config.tools.workspace
 
+    # Генерация изображений: ключи провайдеров, модели и рабочая папка
+    image_tool = registry.get("generate_image")
+    if image_tool is not None:
+        openai = config.llm.providers.get("openai")
+        gemini = config.llm.providers.get("gemini")
+        openrouter = config.llm.providers.get("openrouter")
+        image_tool.openai_api_key = (openai.api_key if openai else "") or ""
+        image_tool.openai_api_base = (openai.api_base if openai else "") or ""
+        image_tool.gemini_api_key = (gemini.api_key if gemini else "") or ""
+        image_tool.openrouter_api_key = (openrouter.api_key if openrouter else "") or ""
+        image_tool.openrouter_api_base = (
+            (openrouter.api_base if openrouter else "")
+            or "https://openrouter.ai/api/v1"
+        )
+        images_cfg = getattr(config, "images", None)
+        if images_cfg is not None:
+            image_tool.provider = images_cfg.provider
+            image_tool.openai_model = images_cfg.openai_model
+            image_tool.gemini_model = images_cfg.gemini_model
+            image_tool.openrouter_model = images_cfg.openrouter_model
+            image_tool.pollinations_model = images_cfg.pollinations_model
+        image_tool.workspace = config.tools.workspace
+
+    # Презентации и видео: рабочая папка для готовых файлов
+    for name in ("create_presentation", "create_video"):
+        tool = registry.get(name)
+        if tool is not None and hasattr(tool, "workspace"):
+            tool.workspace = config.tools.workspace
+
     # Скиллы: папка и отключённые в настройках скиллы
     skills_cfg = getattr(config, "skills", None)
     if skills_cfg is not None:
@@ -128,6 +161,26 @@ def _inject_settings(registry: ToolRegistry, config: Config) -> None:
                 tool.skills_dir = skills_cfg.dir
                 if hasattr(tool, "disabled"):
                     tool.disabled = list(skills_cfg.disabled)
+
+
+def _apply_telegram(registry: ToolRegistry, config: Config) -> None:
+    """Включает инструменты Telegram (файлы и реакции), если бот настроен."""
+    tg = getattr(config, "telegram", None)
+    ready = bool(tg and tg.enabled and tg.token and tg.allowed_users)
+    names = ("send_telegram", "react_telegram")
+    if ready:
+        for tool in telegram_tools():
+            if tool.name not in registry:
+                registry.register_many([tool])
+    else:
+        for name in names:
+            registry.unregister(name)
+
+
+def _apply_images(registry: ToolRegistry, config: Config) -> None:
+    """Регистрирует генерацию изображений: бесплатный провайдер не требует ключа."""
+    if "generate_image" not in registry:
+        registry.register_many(image_tools())
 
 
 def _apply_skills(registry: ToolRegistry, config: Config) -> None:
@@ -208,6 +261,8 @@ def build_core(config: Config, confirm: ConfirmCallback | None = None) -> Core:
     _apply_memory_tools(registry, config)
     _apply_notes(registry, config)
     _apply_skills(registry, config)
+    _apply_images(registry, config)
+    _apply_telegram(registry, config)
     if config.spotify.enabled:
         registry.register_many(spotify_tools())
 

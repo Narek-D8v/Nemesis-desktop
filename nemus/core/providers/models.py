@@ -5,7 +5,9 @@
 
 Источники:
 - OpenRouter — публичный API ``/api/v1/models`` (без ключа), цены из ``pricing``;
-- Gemini — список моделей по API-ключу, у всех есть бесплатный tier (с лимитами);
+  бесплатными считаются только модели с нулевой ценой и входа, и выхода;
+- Gemini — список моделей по API-ключу; бесплатный tier есть у Flash и Gemma,
+  Pro-модели платные (поэтому не выдаём их за бесплатные);
 - Ollama — локальный ``localhost:11434/api/tags`` (модели уже скачаны, они бесплатны);
 - Anthropic/OpenAI — публичных списков без ключа нет, всегда статический фолбэк.
 
@@ -29,31 +31,35 @@ if TYPE_CHECKING:
 #: имена пишутся так же, как в ``llm.default_model`` — уже с префиксом LiteLLM.
 STATIC_MODELS: dict[str, list[tuple[str, bool]]] = {
     "gemini": [
-        ("gemini/gemini-2.0-flash", True),
-        ("gemini/gemini-2.5-flash", True),
-        ("gemini/gemini-2.5-pro", True),
-        ("gemini/gemini-3.8-flash", True),
+        ("gemini/gemini-3.5-flash-lite", True),
+        ("gemini/gemini-3.5-flash", True),
+        ("gemini/gemini-3.1-flash-lite", True),
+        ("gemini/gemini-3.1-pro-preview", False),
+        ("gemini/gemini-flash-latest", True),
+        ("gemini/gemini-pro-latest", False),
     ],
     "openrouter": [
-        ("openrouter/google/gemma-3-27b-it:free", True),
-        ("openrouter/deepseek/deepseek-chat-v3-0324:free", True),
-        ("openrouter/meta-llama/llama-3.3-70b-instruct:free", True),
-        ("openrouter/qwen/qwen3-235b-a22b:free", True),
-        ("openrouter/openai/gpt-4o-mini", False),
-        ("openrouter/anthropic/claude-3.5-sonnet", False),
+        ("openrouter/google/gemma-4-31b-it:free", True),
+        ("openrouter/google/gemma-4-26b-a4b-it:free", True),
+        ("openrouter/nvidia/nemotron-3.5-super-vl:free", True),
+        ("openrouter/cohere/north-mini-code:free", True),
+        ("openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", True),
+        ("openrouter/anthropic/claude-sonnet-4.6", False),
+        ("openrouter/openai/gpt-5-mini", False),
         ("openrouter/deepseek/deepseek-chat", False),
+        ("openrouter/qwen/qwen3.7-plus", False),
+        ("openrouter/meta-llama/llama-3.3-70b-instruct", False),
     ],
     "anthropic": [
-        ("anthropic/claude-3-5-haiku-latest", False),
+        ("anthropic/claude-haiku-4-5", False),
         ("anthropic/claude-sonnet-4-5", False),
         ("anthropic/claude-opus-4-1", False),
     ],
     "openai": [
-        ("gpt-4o-mini", False),
-        ("gpt-4o", False),
-        ("gpt-4.1-mini", False),
-        ("gpt-4.1", False),
-        ("o4-mini", False),
+        ("gpt-5-mini", False),
+        ("gpt-5.4-mini", False),
+        ("gpt-5.4", False),
+        ("gpt-5-pro", False),
     ],
     "ollama": [
         ("ollama/llama3.2", True),
@@ -77,35 +83,90 @@ def _http_json(url: str, timeout: float = 6.0) -> Any:
 
 
 # ------------------------------------------------------------------ парсеры
+#: модели Gemini, которые не годятся для чата/агента (картинки, звук, OCR)
+_GEMINI_SKIP = (
+    "image",
+    "tts",
+    "audio",
+    "transcribe",
+    "live",
+    "robotics",
+    "computer-use",
+    "deep-research",
+    "antigravity",
+    "lyria",
+    "nano-banana",
+    "embedding",
+)
+
+
+def _price(pricing: dict[str, Any], key: str) -> float | None:
+    """Цена за токен как число; None — провайдер не сказал."""
+    raw = pricing.get(key)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_openrouter(data: Any) -> list[tuple[str, bool]]:
-    """Модели OpenRouter: бесплатные — ``:free`` в имени или нулевая цена."""
+    """Модели OpenRouter: только текстовые, бесплатные — с нулевой ценой.
+
+    Раньше бесплатными считались любые модели с ``prompt <= 0``, поэтому
+    роутеры вида ``openrouter/auto`` с ценой ``-1`` (цена неизвестна) и
+    музыкальные модели попадали в «бесплатные» и тратили деньги. Теперь
+    нужна нулевая цена и входа, и выхода, плюс текстовый вывод.
+    """
     out: list[tuple[str, bool]] = []
     for item in (data or {}).get("data", []) or []:
         mid = str(item.get("id") or "").strip()
         if not mid:
             continue
+        arch = item.get("architecture") or {}
+        outputs = arch.get("output_modalities") or []
+        if outputs and "text" not in outputs:
+            continue  # картинки/музыка/аудио — не для чата
+        if "audio" in outputs or any(
+            marker in mid.lower() for marker in ("lyria", "music", "tts")
+        ):
+            continue  # музыкальные/озвучивающие модели не умеют быть агентом
+        params = item.get("supported_parameters") or []
+        if params and "tools" not in params:
+            continue  # без tool-calling агент на такой модели не работает
         pricing = item.get("pricing") or {}
-        try:
-            raw_price = pricing.get("prompt")
-            prompt_price = float(raw_price) if raw_price is not None else None
-        except (TypeError, ValueError):
-            prompt_price = None
-        # бесплатная ли: суффикс :free либо явно указанная нулевая цена
-        free = mid.endswith(":free") or (prompt_price is not None and prompt_price <= 0)
-        out.append((f"openrouter/{mid}", free))
+        prompt_price = _price(pricing, "prompt")
+        completion_price = _price(pricing, "completion")
+        free = (
+            prompt_price == 0
+            and completion_price == 0
+            and not mid.startswith("openrouter/")
+        )
+        full = mid if mid.startswith("openrouter/") else f"openrouter/{mid}"
+        out.append((full, free))
     return out
 
 
 def parse_gemini(data: Any) -> list[tuple[str, bool]]:
-    """Модели Gemini: подходят для чата, все с бесплатным tier (с лимитами)."""
+    """Модели Gemini для чата; бесплатными считаем Flash и Gemma.
+
+    Google даёт бесплатный tier не всем моделям: Pro-модели платные, а
+    помечать их «бесплатно» — прямой путь к неожиданным лимитам и счетам.
+    """
     out: list[tuple[str, bool]] = []
     for item in (data or {}).get("models", []) or []:
         methods = item.get("supportedGenerationMethods") or []
         if methods and "generateContent" not in methods:
             continue
         name = str(item.get("name") or "").removeprefix("models/").strip()
-        if name:
-            out.append((f"gemini/{name}", True))
+        if not name or name.startswith("models/"):
+            continue
+        lowered = name.lower()
+        if any(marker in lowered for marker in _GEMINI_SKIP):
+            continue
+        free = "flash" in lowered or lowered.startswith(("gemma", "gemini-flash"))
+        out.append((f"gemini/{name}", free))
     return out
 
 

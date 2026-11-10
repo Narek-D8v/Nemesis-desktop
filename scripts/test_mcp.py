@@ -87,6 +87,49 @@ def test_mcp_tab_gui() -> None:
     assert _fmt_refresh(5).endswith(("с", "s")), _fmt_refresh(5)
     assert _fmt_refresh(86400).endswith(("д", "d")), _fmt_refresh(86400)
 
+    # --- ползунок не сжат по высоте и реально тянется мышью
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    dlg.resize(940, 640)
+    dlg.show()
+    app.processEvents()
+    slider = dlg.slider_mcp_refresh
+    assert slider.height() >= 20, f"ползунок сжат по высоте: {slider.height()}px"
+    slider.setValue(0)
+    click_at = QPoint(int(slider.width() * 0.8), slider.height() // 2)
+    QTest.mouseClick(
+        slider,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        click_at,
+    )
+    app.processEvents()
+    assert slider.value() > 0, "клик по дорожке не двигает ползунок"
+    assert dlg.lbl_mcp_refresh_val.text().strip(), "подпись не обновилась"
+
+    # перетаскивание ручки влево — значение уменьшается
+    before = slider.value()
+    handle_x = int((slider.width() - 18) * before / slider.maximum()) + 9
+    QTest.mousePress(
+        slider,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(handle_x, slider.height() // 2),
+    )
+    QTest.mouseMove(
+        slider, QPoint(max(6, handle_x - slider.width() // 3), slider.height() // 2)
+    )
+    QTest.mouseRelease(
+        slider,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(max(6, handle_x - slider.width() // 3), slider.height() // 2),
+    )
+    app.processEvents()
+    assert slider.value() < before, f"перетаскивание не работает: {before} -> {slider.value()}"
+    slider.setValue(3)
+
     # --- пресеты: добавление сервера с подстановкой рабочей папки
     assert dlg.cb_mcp_presets.count() == len(MCP_PRESETS)
     dlg.cb_mcp_presets.setCurrentIndex(0)  # filesystem

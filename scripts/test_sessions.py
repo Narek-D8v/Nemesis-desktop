@@ -314,6 +314,117 @@ def test_load_messages_keeps_tool_pairs() -> None:
     print("ok  при рендере диалога пары tool_calls сохранены")
 
 
+BRAINSTORM_TEXT = (
+    "Поняла задачу: пишем парсер логов.\n\n"
+    "1. Формат входных данных:\n"
+    "A) Потоковый текст .log (рекомендую)\n"
+    "B) JSON Lines .jsonl\n"
+    "C) Бинарные дампы\n"
+    "D) Свой вариант: _________\n\n"
+    "2. Стратегия при ошибках:\n"
+    "A) Логировать и пропускать (рекомендую)\n"
+    "B) fail-fast\n"
+    "C) dead_letter.log\n"
+    "D) Свой вариант: _________\n"
+)
+
+
+def test_brainstorm_restored_in_session() -> None:
+    """Брейншторм — часть диалога: панель и выбор восстанавливаются с ответом."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from nemus.gui.main_window import MainWindow
+
+    cfg = get_config()
+    mem = Memory(_tmp_db())
+    first = mem.current_session_id
+    mem.add_message("user", "напиши парсер логов")
+    mem.add_message("assistant", BRAINSTORM_TEXT)
+    mem.add_message("user", "1A, 2B")
+    mem.add_message("assistant", "Готово, парсер написан.")
+    second = mem.create_session("Посторонний диалог")
+    mem.add_message("user", "привет")
+    mem.switch_session(first)
+
+    agent = Agent(
+        config=cfg,
+        llm=object(),  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        memory=mem,
+    )
+    core = SimpleNamespace(
+        config=cfg, llm=SimpleNamespace(model="test/model"), memory=mem, agent=agent
+    )
+    _app = QApplication.instance() or QApplication([])
+    window = MainWindow(core)  # type: ignore[arg-type]
+    window.show()
+    try:
+        panel = window.chat._bm[window.chat._bm_seq]
+        assert panel["submitted"], panel
+        assert panel["answer"] == "1A, 2B", panel
+        text = window.chat.toPlainText()
+        assert "1. Формат входных данных" in text, text[-500:]  # вопросы в сессии
+        assert "Выбор отправлен" in text, text[-500:]
+        # продолжить диалог после восстановления можно — он не оборван
+        assert i18n_sent() in text
+
+        # переключение на другой диалог и обратно сохраняет отметки
+        window._switch_session(second)
+        assert "1. Формат входных данных" not in window.chat.toPlainText()
+        window._switch_session(first)
+        panel = window.chat._bm[window.chat._bm_seq]
+        assert panel["submitted"] and panel["answer"] == "1A, 2B", panel
+
+        # незакрытый брейншторм остаётся интерактивным — диалог продолжается
+        from PySide6.QtCore import QUrl
+
+        third = mem.create_session("Новый брейншторм")
+        mem.add_message("user", "напиши скрипт")
+        mem.add_message("assistant", BRAINSTORM_TEXT)
+        window._switch_session(third)
+        panel = window.chat._bm[window.chat._bm_seq]
+        assert not panel["submitted"] and not panel["frozen"], panel
+        started: list[str] = []
+        original_start = window._start_agent
+        window._start_agent = lambda text: started.append(text)  # type: ignore[method-assign]
+        try:
+            bid = window.chat._bm_seq
+            window.chat._on_anchor_clicked(QUrl(f"bm:{bid}:1:B"))
+            window.chat._on_anchor_clicked(QUrl(f"bm:{bid}:send"))
+        finally:
+            window._start_agent = original_start  # type: ignore[method-assign]
+        assert started == ["1A, 2B"], started
+
+        # свободный ответ в истории тоже восстанавливает отметки («давай B»)
+        mem.add_message("assistant", BRAINSTORM_TEXT)
+        mem.add_message("user", "давай B")
+        window._switch_session(third)
+        panel = window.chat._bm[window.chat._bm_seq]
+        assert panel["submitted"], panel
+        assert panel["answer"] == "1B, 2A", panel["answer"]
+
+        # содержательная фраза тоже сопоставляется («пусть будет fail-fast»)
+        mem.add_message("assistant", BRAINSTORM_TEXT)
+        mem.add_message("user", "пусть будет fail-fast")
+        window._switch_session(third)
+        panel = window.chat._bm[window.chat._bm_seq]
+        assert panel["submitted"], panel
+        assert panel["answer"] == "1A, 2B", panel["answer"]
+    finally:
+        window.close()
+        mem.close()
+    print("ok  брейншторм сохраняется в диалоге и восстанавливается при переключении")
+
+
+def i18n_sent() -> str:
+    """Текст подписи отправленного выбора (из i18n, без магии строк)."""
+    from nemus.gui import i18n
+
+    return i18n.tr("bm.sent")
+
+
 def test_sessions_window() -> None:
     """Кнопка в шапке открывает отдельное окно со списком диалогов."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -406,6 +517,7 @@ def main() -> int:
     test_non_current_session_ops()
     test_agent_switches_sessions()
     test_load_messages_keeps_tool_pairs()
+    test_brainstorm_restored_in_session()
     test_sessions_window()
     print("\nВСЕ ТЕСТЫ СЕССИЙ ПРОШЛИ")
     return 0

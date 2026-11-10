@@ -7,10 +7,12 @@ from nemus.core.tools.basic import basic_tools
 from nemus.core.tools.browser import browser_tools
 from nemus.core.tools.files import file_tools
 from nemus.core.tools.keyboard import keyboard_tools
+from nemus.core.tools.presentations import presentation_tools
 from nemus.core.tools.python_exec import python_tools
 from nemus.core.tools.screen import screen_tools
 from nemus.core.tools.shell import shell_tools
 from nemus.core.tools.system import system_tools
+from nemus.core.tools.video import video_tools
 from nemus.core.tools.web import web_tools
 
 
@@ -25,4 +27,6 @@ def all_builtin_tools() -> list[Tool]:
     tools.extend(keyboard_tools())
     tools.extend(browser_tools())
     tools.extend(screen_tools())
+    tools.extend(presentation_tools())
+    tools.extend(video_tools())
     return tools

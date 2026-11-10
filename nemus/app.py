@@ -172,6 +172,10 @@ class NemusApp:
         self.tray: Tray | None = None
         self._setup_tray()
 
+        # --- Telegram-бот (запускается после показа окна) ---
+        self.telegram: Any = None
+        self._setup_telegram()
+
     def _apply_window_flags(self) -> None:
         """Применяет оконные флаги из конфига (окно поверх других)."""
         self.window.setWindowFlag(
@@ -179,6 +183,40 @@ class NemusApp:
         )
         if self.window.isVisible():
             self.window.show()
+
+    def _setup_telegram(self) -> None:
+        """Создаёт бота по конфигу (сам запуск — отдельным шагом в run)."""
+        self.telegram = None
+        if not self.config.telegram.enabled:
+            return
+        try:
+            from nemus.core.telegram_bot import TelegramBot
+
+            self.telegram = TelegramBot(self.config, self.core)
+        except Exception:  # noqa: BLE001
+            logger.exception("Telegram: не удалось создать бота")
+
+    def _start_telegram(self) -> None:
+        """Поднимает бота в фоне, не задерживая старт окна."""
+        if self.telegram is None:
+            self._setup_telegram()
+        bot = self.telegram
+        if bot is not None and not bot.running:
+            try:
+                bot.start(wait=False)
+            except Exception:  # noqa: BLE001
+                logger.exception("Telegram: не удалось запустить бота")
+
+    def _restart_telegram(self) -> None:
+        """Пересоздаёт бота после смены токена/ID в настройках."""
+        if self.telegram is not None:
+            try:
+                self.telegram.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("Telegram: не удалось остановить бота")
+            self.telegram = None
+        self._setup_telegram()
+        self._start_telegram()
 
     def _setup_tts(self) -> None:
         from nemus.voice.tts import TTSEngine, resolve_openai_key
@@ -198,10 +236,16 @@ class NemusApp:
             self.tts.speak(text, block=False)
 
     def _on_reminder_fired(self, text: str) -> None:
-        """Напоминание сработало: реплика в чате и озвучка голосом."""
+        """Напоминание сработало: реплика в чате, озвучка и Telegram."""
         message = i18n.tr("remind.fired", text=text)
         self.window.chat.add_assistant(message, self.config.assistant.name)
         self._handle_speak_request(message)
+        if self.telegram is not None and self.telegram.running:
+            if not self.telegram.send_text(message):
+                logger.warning(
+                    "Напоминание показано в окне, но отправить в Telegram "
+                    "не удалось."
+                )
 
     # --------------------------------------------------------- wake skills
     def _on_voice_text(self, text: str) -> None:
@@ -274,6 +318,12 @@ class NemusApp:
                 self.core.reminder.clear()
             except Exception:  # noqa: BLE001
                 pass
+        if self.telegram is not None:
+            try:
+                self.telegram.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.telegram = None
         if self.realtime is not None:
             try:
                 self.realtime.stop()
@@ -619,6 +669,7 @@ class NemusApp:
         self.window.core = self.core
         self.window.model_label.setText(self.window._model_text())
         self._apply_window_flags()
+        self._restart_telegram()
         if self.realtime is not None:
             self._stop_realtime(rearm=False)
             self._start_realtime()
@@ -638,6 +689,8 @@ class NemusApp:
             self.window.show()
         # запускаем wake-слушателя уже в event loop, чтобы не блокировать старт
         QTimer.singleShot(0, self._start_wake_only)
+        # Telegram-бот стартует после окна: сеть не должна задерживать запуск
+        QTimer.singleShot(300, self._start_telegram)
         logger.info(f"Немуся v{__version__} запущена.")
         return self.qapp.exec()
 
@@ -647,6 +700,13 @@ def main() -> int:
     setup_logging(config.logging.level, config.logging.file)
     _install_excepthook()
     gc.disable()
+
+    # Тяжёлый импорт LiteLLM (~10 с на Windows) греем параллельно со сборкой
+    # окна: иначе первый запрос пользователя ждёт его целиком.
+    from nemus.core.llm import warm_up
+
+    threading.Thread(target=warm_up, name="llm-warmup", daemon=True).start()
+
     try:
         app = NemusApp()
     except Exception as exc:  # pragma: no cover

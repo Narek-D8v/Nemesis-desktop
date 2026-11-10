@@ -93,6 +93,80 @@ def test_midstream_error_falls_back() -> None:
     print(f"ok  обрыв стрима до дельт → {MAX_ATTEMPTS} ретраев, затем fallback")
 
 
+def test_rate_limit_with_retry_hint_retries() -> None:
+    """429 с «повторить через N с» — минутная квота: ждём и пробуем снова.
+
+    Регресс к жалобе «попытки не идут»: Gemini free tier отвечал 429 с
+    retryDelay, а клиент сразу уходил на резервную модель (или падал, если
+    её нет), хотя повтор через 37 с срабатывал.
+    """
+    calls: list[str] = []
+    sleeps: list[float] = []
+    original = litellm.completion
+    quota = (
+        '429 RESOURCE_EXHAUSTED: You exceeded your current quota, please retry '
+        'in 37.4s. "retryDelay": "37s"'
+    )
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) < 3:
+            raise RuntimeError(quota)
+        return iter([_chunk("ответ после паузы", finish="stop")])
+
+    litellm.completion = fake_completion
+    try:
+        with mock.patch(
+            "nemus.core.llm.time.sleep", side_effect=lambda s: sleeps.append(s)
+        ):
+            events = list(_client().stream(_messages()))
+    finally:
+        litellm.completion = original
+
+    assert calls == ["gemini/primary"] * 3, calls
+    assert sleeps and all(36 <= s <= 38 for s in sleeps), sleeps
+    final = [e for e in events if e.kind == "final"]
+    assert final and final[-1].response.content == "ответ после паузы", events
+    print("ok  429 с retryDelay → пауза 37 с и повтор, без лишнего фолбэка")
+
+
+def test_midstream_after_thoughts_retries() -> None:
+    """Стрим упал после «мыслей», но до видимого текста — можно повторять."""
+    calls: list[str] = []
+    original = litellm.completion
+
+    class _ThoughtThenBreak:
+        def __iter__(self):
+            delta = SimpleNamespace(
+                content="рассуждаю",
+                tool_calls=None,
+                reasoning="рассуждаю",
+                reasoning_content=None,
+            )
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=delta, finish_reason=None)]
+            )
+            raise RuntimeError('429 Too Many Requests: "retryDelay": "2s"')
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) == 1:
+            return _ThoughtThenBreak()
+        return iter([_chunk("готовый ответ", finish="stop")])
+
+    litellm.completion = fake_completion
+    try:
+        with mock.patch("nemus.core.llm.time.sleep"):
+            events = list(_client().stream(_messages()))
+    finally:
+        litellm.completion = original
+
+    assert calls == ["gemini/primary", "gemini/primary"], calls
+    finals = [e for e in events if e.kind == "final"]
+    assert finals and finals[-1].response.content == "готовый ответ", events
+    print("ok  обрыв после мыслей (без видимого текста) → повтор, а не падение")
+
+
 def test_rate_limit_falls_back_immediately() -> None:
     """Исчерпанные лимиты (429) — фолбэк сразу, без единого повтора."""
     calls: list[str] = []
@@ -238,6 +312,7 @@ def test_gemini_3_detection() -> None:
     cases = [
         ("gemini/gemini-3.8-flash", True),
         ("gemini-3.0-pro-preview", True),
+        ("gemini/gemini-flash-latest", True),  # алиас актуального поколения
         ("gemini/gemini-2.0-flash", False),
         ("gemini/gemini-1.5-pro", False),
         ("gemini/gemini-pro", False),
@@ -289,7 +364,11 @@ def test_error_classification() -> None:
         (RuntimeError("You exceeded your current quota"), "limit"),
         (RuntimeError("RESOURCE_EXHAUSTED: Quota exceeded"), "limit"),
         (RuntimeError("rate_limit_error"), "limit"),
+        (RuntimeError('429 quota exceeded: "retryDelay": "37s"'), "transient"),
+        (RuntimeError("429 insufficient_quota: You have no credits remaining"), "limit"),
         (RuntimeError("401 Unauthorized"), "fatal"),
+        (RuntimeError("402 Payment Required: insufficient credits"), "limit"),
+        (RuntimeError("419 Page Expired"), "fatal"),  # повторять бессмысленно
         (RuntimeError("model not found: gpt-x"), "fatal"),
         (RuntimeError("Missing credentials. Please pass an `api_key`."), "fatal"),
         (RuntimeError("This model's maximum context length is 8192 tokens"), "fatal"),
@@ -397,7 +476,12 @@ def test_redact_headers() -> None:
 
     bearer = redact_secrets("Authorization: Bearer sk-VERYSECRETVALUE")
     assert "sk-VERYSECRETVALUE" not in bearer, bearer
-    print("ok  ключи в заголовках маскируются")
+
+    token = "123456789:AAFakeTokenValueThatIsLongEnough123"
+    telegram = redact_secrets(f"POST https://api.telegram.org/bot{token}/getMe")
+    assert token not in telegram, telegram
+    assert "bot***" in telegram, telegram
+    print("ok  ключи в заголовках и Telegram-токен маскируются")
 
 
 def test_logger_redacts_traceback() -> None:
@@ -431,6 +515,8 @@ def main() -> int:
     test_time_budget_stops_hung_provider()
     test_slow_first_attempt_still_retries()
     test_midstream_error_falls_back()
+    test_rate_limit_with_retry_hint_retries()
+    test_midstream_after_thoughts_retries()
     test_rate_limit_falls_back_immediately()
     test_fatal_error_falls_back_immediately()
     test_midstream_error_after_text_raises()

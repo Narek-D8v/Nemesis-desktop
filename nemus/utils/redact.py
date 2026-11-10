@@ -28,6 +28,9 @@ _PROVIDER_KEY = re.compile(
     r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{12,})"
 )
 
+#: Telegram Bot API передаёт токен прямо в пути URL: /bot<id>:<secret>/...
+_TELEGRAM_TOKEN = re.compile(r"\b(bot)?\d{5,}:[A-Za-z0-9_-]{20,}\b")
+
 _MASK = "***"
 
 
@@ -38,6 +41,9 @@ def redact_secrets(text: str) -> str:
     text = _QUERY_SECRET.sub(r"\1" + _MASK, text)
     text = _HEADER_SECRET.sub(r"\1" + _MASK, text)
     text = _PROVIDER_KEY.sub(_MASK, text)
+    text = _TELEGRAM_TOKEN.sub(
+        lambda match: ("bot" if match.group(1) else "") + _MASK, text
+    )
     return text
 
 

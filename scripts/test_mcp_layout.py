@@ -21,6 +21,9 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication([])  # noqa: F841
     dlg = SettingsDialog(None, core=None)
+    # тест не зависит от конфига пользователя: начинаем с пустого списка
+    dlg._mcp_rebuild_cards([])
+    dlg.resize(940, 640)
     dlg.show()
     app.processEvents()
 
@@ -56,7 +59,10 @@ def main() -> int:
 
     # добавление: карточка появляется и влезает по ширине в страницу
     check(dlg.lbl_mcp_empty.isHidden() is False, "пустой список показывает подсказку")
-    dlg.cb_mcp_presets.setCurrentIndex(0)
+    from nemus.core.mcp import MCP_PRESETS
+
+    fs_index = next(i for i, p in enumerate(MCP_PRESETS) if p[0] == "filesystem")
+    dlg.cb_mcp_presets.setCurrentIndex(fs_index)
     dlg._mcp_add_preset()
     check(len(dlg.mcp_cards) == 1, "карточка создана")
     check(dlg.lbl_mcp_empty.isHidden(), "подсказка пустоты спрятана")

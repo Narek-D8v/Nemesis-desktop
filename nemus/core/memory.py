@@ -5,9 +5,18 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from nemus.utils.logger import logger
+
+#: Сколько ждать освобождения базы при параллельной записи (GUI + демон).
+#: Дефолтные 5 секунд мало: тяжёлая история или checkpoint WAL легко
+#: превышают их, и второй процесс получает ``database is locked``.
+SQLITE_TIMEOUT = 30.0
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
 def _now() -> str:
@@ -36,10 +45,49 @@ class Memory:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=SQLITE_TIMEOUT,
+            check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
+        self._configure()
         self._init_schema()
         self._current_session_id = self._ensure_session()
+
+    def _configure(self) -> None:
+        """WAL + busy_timeout: читатели не блокируют писателя, писатели ждут.
+
+        WAL не отменяет конфликты записи (писатель в SQLite всегда один), но
+        позволяет GUI читать историю, пока демон дописывает сообщение, и
+        даёт обоим процессам 30 секунд на ожидание вместо мгновенной ошибки.
+        """
+        self._conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        mode = ""
+        for _ in range(10):
+            try:
+                row = self._conn.execute("PRAGMA journal_mode = WAL").fetchone()
+                mode = str(row[0]).lower() if row else "unknown"
+            except sqlite3.DatabaseError:
+                # Другой процесс в этот момент дописывает схему. Режим WAL
+                # хранится в заголовке БД, поэтому сначала смотрим, не
+                # включил ли его сосед, и только потом пробуем снова.
+                try:
+                    row = self._conn.execute("PRAGMA journal_mode").fetchone()
+                    mode = str(row[0]).lower() if row else "unknown"
+                except sqlite3.DatabaseError:
+                    mode = ""
+            if mode == "wal":
+                break
+            time.sleep(0.1)
+        if mode != "wal":
+            # Сетевые/FAT-разделы WAL не поддерживают — не падаем, но
+            # предупреждаем: на них параллельная запись будет блокироваться.
+            logger.warning(
+                f"SQLite: WAL недоступен для {self.db_path} (режим {mode or 'unknown'}); "
+                "параллельная запись может ждать дольше."
+            )
+        self._conn.execute("PRAGMA synchronous = NORMAL")
 
     def _init_schema(self) -> None:
         with self._lock, self._conn:
@@ -77,14 +125,24 @@ class Memory:
             columns = {
                 row[1] for row in self._conn.execute("PRAGMA table_info(messages)")
             }
+            # Два процесса (GUI и демон) могут стартовать одновременно и
+            # увидеть старую схему оба. Второй ALTER получит duplicate column —
+            # это не ошибка: колонку уже добавил первый.
             if "tool_calls" not in columns:
-                self._conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
+                self._add_column("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
             if "session_id" not in columns:
                 # старые сообщения достаются диалогу по умолчанию (id = 1)
-                self._conn.execute(
+                self._add_column(
                     "ALTER TABLE messages ADD COLUMN session_id "
                     "INTEGER NOT NULL DEFAULT 1"
                 )
+
+    def _add_column(self, sql: str) -> None:
+        try:
+            self._conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     def _ensure_session(self) -> int:
         """Гарантирует наличие диалога и возвращает текущий его id.
@@ -92,35 +150,44 @@ class Memory:
         Существующие (старые) сообщения уже принадлежат сессии 1 — она и
         создаётся первой. Выбор диалога переживает перезапуск через ``meta``.
         """
-        with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT id FROM sessions ORDER BY id LIMIT 1"
-            ).fetchone()
-            if row is None:
-                now = _now()
-                sid = int(
-                    self._conn.execute(
-                        "INSERT INTO sessions (title, created_at, updated_at) "
-                        "VALUES (?, ?, ?)",
-                        (DEFAULT_SESSION_TITLE, now, now),
-                    ).lastrowid
-                )
-                _set_current_id(self._conn, sid)
-                return sid
-            stored = self._conn.execute(
-                "SELECT value FROM meta WHERE key = ?", (_CURRENT_SESSION_KEY,)
-            ).fetchone()
+        with self._lock:
+            # BEGIN IMMEDIATE сериализует инициализацию двух процессов: без
+            # него оба могут увидеть пустую таблицу и создать две сессии.
+            self._conn.execute("BEGIN IMMEDIATE")
             try:
-                sid = int(stored["value"]) if stored else 0
-            except (TypeError, ValueError):
-                sid = 0
-            exists = self._conn.execute(
-                "SELECT id FROM sessions WHERE id = ?", (sid,)
-            ).fetchone()
-            if exists is None:
-                sid = int(row["id"])
-                _set_current_id(self._conn, sid)
-            return sid
+                row = self._conn.execute(
+                    "SELECT id FROM sessions ORDER BY id LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    now = _now()
+                    sid = int(
+                        self._conn.execute(
+                            "INSERT INTO sessions (title, created_at, updated_at) "
+                            "VALUES (?, ?, ?)",
+                            (DEFAULT_SESSION_TITLE, now, now),
+                        ).lastrowid
+                    )
+                    _set_current_id(self._conn, sid)
+                    self._conn.commit()
+                    return sid
+                stored = self._conn.execute(
+                    "SELECT value FROM meta WHERE key = ?", (_CURRENT_SESSION_KEY,)
+                ).fetchone()
+                try:
+                    sid = int(stored["value"]) if stored else 0
+                except (TypeError, ValueError):
+                    sid = 0
+                exists = self._conn.execute(
+                    "SELECT id FROM sessions WHERE id = ?", (sid,)
+                ).fetchone()
+                if exists is None:
+                    sid = int(row["id"])
+                    _set_current_id(self._conn, sid)
+                self._conn.commit()
+                return sid
+            except Exception:
+                self._conn.rollback()
+                raise
 
     # ------------------------------------------------------------- sessions
     @property

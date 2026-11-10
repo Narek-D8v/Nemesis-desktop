@@ -27,7 +27,7 @@ from nemus.core.agent import Agent  # noqa: E402
 from nemus.core.factory import Core  # noqa: E402
 from nemus.core.llm import LLMClient, StreamEvent  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
-from nemus.core.providers import LLMResponse, ToolCall  # noqa: E402
+from nemus.core.providers import LLMResponse, ProviderError, ToolCall  # noqa: E402
 from nemus.core.tools.basic import basic_tools  # noqa: E402
 from nemus.core.tools.registry import ToolRegistry  # noqa: E402
 from nemus.gui.main_window import MainWindow  # noqa: E402
@@ -61,6 +61,14 @@ class FakeLLM(LLMClient):
                 kind="final", response=LLMResponse(content="Получается 42.")
             )
 
+    def complete(self, messages, tools=None, **overrides):
+        """Быстрый путь недоступен: агент обязан откатиться к обычному циклу.
+
+        Без этого переопределения смоук-тест ходил бы в настоящий API
+        с ключами из config.yaml и вис в retry-цикле провайдеров.
+        """
+        raise ProviderError("smoke: быстрый путь отключён — проверяем откат")
+
 
 def build_fake_core():
     cfg = get_config()
@@ -79,7 +87,7 @@ def build_fake_core():
 
 
 def main() -> int:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QScrollArea
 
     app = QApplication.instance() or QApplication([])
     core = build_fake_core()
@@ -136,6 +144,233 @@ def main() -> int:
         window.state_label.text()
     )
     print("ok  статус после ответа: Готова")
+
+    # брейншторм: варианты A/B/C/D кликабельны и собираются в ответ
+    from nemus.gui.widgets.chat import ChatView, parse_brainstorm
+
+    sample = (
+        "Поняла задачу: пишем асинхронный пайплайн обработки логов.\n\n"
+        "**1. Формат входных данных:**\n"
+        "A) Потоковый текст .log — построчно (рекомендую)\n"
+        "B) JSON Lines .jsonl\n"
+        "C) Бинарные дампы\n"
+        "D) Свой вариант: _________\n\n"
+        "**2. Стратегия при ошибках:**\n"
+        "A) Логировать и пропускать\n"
+        "B) fail-fast\n"
+        "C) dead_letter.log\n"
+        "D) Свой вариант: _________\n\n"
+        "Ответь коротко: «1A, 2B, остальное A»."
+    )
+    questions, body = parse_brainstorm(sample)
+    assert len(questions) == 2, questions
+    assert body.startswith("Поняла задачу") and "A) Потоковый" not in body, body
+    assert questions[0].options[0].recommended, "рекомендованный вариант не найден"
+
+    panel = ChatView()
+    picked: list[str] = []
+    panel.choice_submitted.connect(picked.append)
+    panel.add_assistant(sample)
+    assert i18n.tr("bm.title") in panel.toPlainText(), panel.toPlainText()
+    bm_id = panel._bm_seq
+    panel._on_anchor_clicked(QUrl(f"bm:{bm_id}:1:B"))
+    assert panel._bm[bm_id]["selected"] == {1: "B"}, panel._bm[bm_id]["selected"]
+    panel._on_anchor_clicked(QUrl(f"bm:{bm_id}:send"))
+    assert picked == ["1A, 2B"], picked  # 1 — рекомендованное A, 2 — выбранное B
+    # после отправки варианты неактивны и повторный клик ничего не меняет
+    panel._on_anchor_clicked(QUrl(f"bm:{bm_id}:1:C"))
+    assert picked == ["1A, 2B"], picked
+    print("ok  брейншторм: кликабельные A/B/C/D и отправка выбора")
+
+    # один и тот же ответ, пришедший дважды (стрим + final), не дублируется
+    dup = ChatView()
+    dup.stream_start("Немуся")
+    dup.stream_delta(sample)
+    dup.stream_end(sample)
+    blocks = len(dup._blocks)
+    dup.stream_end(sample)
+    assert len(dup._blocks) == blocks, (blocks, len(dup._blocks))
+    assert dup._bm_seq == 1, dup._bm_seq
+    print("ok  повторный final не дублирует ответ и панель")
+
+    # свободный ответ («второй вариант», «давай B») тоже сопоставляется с вариантами
+    from nemus.gui.widgets.chat import parse_freeform_answer
+
+    assert parse_freeform_answer("второй вариант", questions) == {0: ("B", "")}
+    assert parse_freeform_answer("давай B", questions) == {0: ("B", "")}
+    assert parse_freeform_answer("1 — второй, 2 — B", questions) == {
+        0: ("B", ""),
+        1: ("B", ""),
+    }
+    assert parse_freeform_answer(
+        "по умолчанию", questions
+    ) == {0: ("A", ""), 1: ("A", "")}
+    for noise in ("А как насчёт этого?", "спасибо", "давай подумаем ещё"):
+        assert parse_freeform_answer(noise, questions) == {}, noise
+
+    free = ChatView()
+    free.add_assistant(sample)
+    free_bm = free._bm_seq
+    free.add_user("второй вариант")
+    assert free._bm[free_bm]["submitted"], free._bm[free_bm]
+    assert free._bm[free_bm]["answer"] == "1B, 2A", free._bm[free_bm]["answer"]
+    print("ok  свободный ответ сопоставляется с вариантами брейншторма")
+
+    # содержательные фразы тоже попадают в конкретный вариант
+    from nemus.gui.widgets.chat import parse_semantic_answer
+
+    assert parse_semantic_answer("лучше через json", questions) == {0: ("B", "")}
+    assert parse_semantic_answer("пусть будет fail-fast", questions) == {1: ("B", "")}
+    assert parse_semantic_answer(
+        "мне не нравится json, давай текст", questions
+    ) == {0: ("A", "")}
+    for noise in ("спасибо", "что-то не то", "как думаешь?"):
+        assert parse_semantic_answer(noise, questions) == {}, noise
+
+    sem = ChatView()
+    sem.add_assistant(sample)
+    sem_bm = sem._bm_seq
+    sem.add_user("пусть будет fail-fast")
+    assert sem._bm[sem_bm]["answer"] == "1A, 2B", sem._bm[sem_bm]["answer"]
+    print("ok  содержательный ответ («через json», «fail-fast») выбран верно")
+
+    # ответ текстом (в т.ч. при восстановлении сессии из истории) отмечает выбор
+    typed = ChatView()
+    typed.add_assistant(sample)
+    typed_bm = typed._bm_seq
+    typed.add_user("1A, 2B")
+    assert typed._bm[typed_bm]["submitted"], typed._bm[typed_bm]
+    assert typed._bm[typed_bm]["answer"] == "1A, 2B", typed._bm[typed_bm]
+    assert i18n.tr("bm.sent") in typed.toPlainText(), typed.toPlainText()
+    print("ok  ответ текстом восстанавливает выбор в панели")
+
+    # клик в окне доходит до отправки сообщения агенту
+    started: list[str] = []
+    original_start = window._start_agent
+    window._start_agent = lambda text: started.append(text)  # type: ignore[method-assign]
+    try:
+        window.chat.add_assistant(sample)
+        bid = window.chat._bm_seq
+        window.chat._on_anchor_clicked(QUrl(f"bm:{bid}:0:C"))
+        window.chat._on_anchor_clicked(QUrl(f"bm:{bid}:send"))
+    finally:
+        window._start_agent = original_start  # type: ignore[method-assign]
+    assert started == ["1C, 2A"], started
+    print("ok  выбор из чата отправляется агенту как сообщение")
+
+    # команды «/имя-скилла» подсказываются прямо при наборе промпта
+    from nemus.core.skill_commands import SkillCommand
+
+    suggester = window.suggest
+    suggester.set_commands(
+        [
+            SkillCommand(
+                text="/code-craft ",
+                title="/code-craft",
+                description="Написание кода",
+                skill="code-craft",
+            ),
+            SkillCommand(
+                text="/hyperframes ",
+                title="/hyperframes",
+                description="Рендер видео",
+                skill="hyperframes",
+            ),
+        ]
+    )
+    assert [c.title for c in suggester.matches("/")] == ["/code-craft", "/hyperframes"]
+    assert [c.title for c in suggester.matches("/code")] == ["/code-craft"]
+    assert [c.title for c in suggester.matches("оба /cod")] == ["/code-craft"]
+    assert suggester.matches("code") == [], "без слэша команд нет"
+    assert suggester.matches("/нет-такого") == [], "нет совпадений — нет подсказок"
+    assert suggester.matches("надо /hyp")[0].title == "/hyperframes"
+    assert suggester.matches("сделай ") == [], "после пробела не подсказываем"
+
+    # подстановка заменяет только недописанное слово
+    window.input.setText("сделай отчёт /cod")
+    window.input.setCursorPosition(len(window.input.text()))
+    suggester.apply(suggester.matches()[0])
+    assert window.input.text() == "сделай отчёт /code-craft ", window.input.text()
+    assert window.input.cursorPosition() == len(window.input.text())
+
+    # хвост фразы после курсора сохраняется
+    window.input.setText("сначала /hyp потом сцены")
+    window.input.setCursorPosition(len("сначала /hyp"))
+    suggester.apply(suggester.matches()[0])
+    assert window.input.text() == "сначала /hyperframes потом сцены", (
+        window.input.text()
+    )
+    assert window.input.cursorPosition() == len("сначала /hyperframes ")
+
+    # попап открывается по слэшу, а без него — молчит
+    window.input.setText("запусти /")
+    suggester._on_typed("запусти /")
+    assert suggester.popup_visible(), "подсказки не появились по слэшу"
+    window.input.setText("запусти /zzz")
+    suggester._on_typed("запусти /zzz")
+    assert not suggester.popup_visible(), "попап висит без совпадений"
+    window.input.setText("запусти hyperframes")
+    suggester._on_typed("запусти hyperframes")
+    assert not suggester.popup_visible(), "без слэша команд не подсказываем"
+
+    # Enter при открытом списке команд не отправляет промпт
+    window.input.setText("/hyp")
+    suggester._on_typed("/hyp")
+    before = len(window.chat._blocks)
+    window._on_submit()
+    assert len(window.chat._blocks) == before, "Enter отправил промпт вместо выбора"
+    print("ok  команды «/» скиллов подсказываются и заменяют только слово")
+
+    # «/имя» без задачи — справка по скиллу, без запроса к модели
+    window.input.clear()  # закрываем попап после предыдущей проверки
+    suggester._hide_popup()
+    window.input.setText("/code-craft")
+    window._on_submit()
+    assert window._worker is None, "справка не должна запускать агента"
+    assert window.input.text() == "", "после справки поле очищается"
+    help_text = window.chat.toPlainText()
+    assert "СПРАВКА" in help_text and "/code-craft" in help_text, help_text[-600:]
+    assert "брейншторм" in help_text.lower(), "в справке нет разделов инструкции"
+    assert "/code-craft <задача>" in help_text, help_text[-300:]
+
+    # неизвестная команда — не выдумка, а список доступных
+    window.input.setText("/нет-такого")
+    window._on_submit()
+    unknown_text = window.chat.toPlainText()
+    assert "Скилла /нет-такого нет." in unknown_text, unknown_text[-300:]
+    assert "Доступные команды: " in unknown_text, unknown_text[-300:]
+    assert "/code-craft" in unknown_text, unknown_text[-300:]
+    print("ok  «/имя» без задачи показывает справку по скиллу")
+
+    # длинное имя модели в сайдбаре сокращается многоточием, а не вылезает за край
+    long_model = "openrouter/qwen/qwen3-235b-a22b-thinking-2507-extended-preview"
+    window.model_label.setText(long_model)
+    app.processEvents()
+    label = window.model_label
+    assert label.text().endswith("…"), label.text()
+    assert label.text() != long_model, label.text()
+    assert label.toolTip() == long_model, label.toolTip()
+    assert label.minimumSizeHint().width() == 0, label.minimumSizeHint().width()
+    print("ok  длинное имя модели в сайдбаре элидится, полное — в тултипе")
+
+    # диалог подтверждения с неразрывными длинными значениями не растягивается
+    from nemus.gui.dialogs import ConfirmDialog
+
+    bulky = {
+        "path": "D:/Nemesis/" + "очень/длинный/путь/" * 12 + "file.txt",
+        "content": "A" * 20000,
+        "cmd": "python -c " + "print('x');" * 40,
+    }
+    confirm = ConfirmDialog("write_file", bulky)
+    confirm.show()
+    app.processEvents()
+    assert confirm.width() <= 900, confirm.width()
+    assert confirm.height() <= 700, confirm.height()
+    scrolls = confirm.findChildren(QScrollArea)
+    assert scrolls and scrolls[0].verticalScrollBar().maximum() > 0, "нет прокрутки"
+    confirm.close()
+    print("ok  длинные параметры в ConfirmDialog переносятся и прокручиваются")
+
     print("\nGUI SMOKE TEST PASSED")
     return 0
 

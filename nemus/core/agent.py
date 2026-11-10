@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Callable, Generator, Iterator, Literal
 
 from nemus.config import PROJECT_ROOT, Config
 from nemus.core.language import (
@@ -37,9 +38,13 @@ ConfirmCallback = Callable[[Tool, dict[str, Any]], bool]
 
 #: подряд идущих пустых ответов (ни текста, ни вызова), после которых
 #: агент сдаётся — защита от вечного «Думаю…» при сломанном провайдере.
-#: Пустые повторы НЕ засчитываются в max_steps: работа продолжается,
-#: сколько нужно, просто модель «долбится» заново.
-EMPTY_ANSWER_RETRIES = 20
+#: Пустые повторы НЕ засчитываются в max_steps, поэтому их число держим
+#: небольшим: каждый повтор — это ещё один полный промпт на 10–20k токенов.
+EMPTY_ANSWER_RETRIES = 5
+
+#: сколько раз можно потребовать от модели не ограничиваться обещанием
+#: («сейчас сделаю»), а вызвать инструменты и довести работу до результата
+PROMISE_RETRIES = 2
 
 #: неудач подряд на один инструмент, после которых модели предлагается
 #: сменить способ (а не долбить одно и то же)
@@ -76,9 +81,105 @@ RUN_BUDGET_SECONDS = 600
 RUN_BUDGET_STREAK = 3
 #: один и тот же вызов (инструмент + аргументы) подряд — признак тупика
 LOOP_REPEAT_LIMIT = 3
+#: сколько символов контекста «стоит» одно изображение при обрезке истории
+VISION_IMAGE_CHARS = 8000
+#: бюджет символов истории, которая уходит модели за один запрос. Без него
+#: каждый шаг тащил всю переписку и полные выводы инструментов — один запрос
+#: на 100 шагов мог съесть месячную квоту.
+HISTORY_CHAR_BUDGET = 60000
+#: сколько символов результата инструмента отдаём модели. Полный вывод
+#: остаётся на диске — модель может прочитать его частями.
+TOOL_OUTPUT_LIMIT = 12000
 
 #: названия ОС из настроек → как писать в системном промпте
 _OS_NAMES = {"windows": "Windows", "linux": "Linux", "macos": "macOS", "mac": "macOS"}
+
+#: совсем короткие реплики, на которые можно ответить без модели
+_QUICK_REPLIES = {
+    "немуся": "Да, я здесь. Чем помочь?",
+    "немо": "Да, я здесь. Чем помочь?",
+    "немесис": "Да, я здесь. Чем помочь?",
+    "немуся привет": "Привет! Я здесь. Чем помочь?",
+    "привет немуся": "Привет! Я здесь. Чем помочь?",
+    "привет": "Привет! Чем помочь?",
+    "здравствуй": "Здравствуй! Чем помочь?",
+    "ты тут": "Да, я здесь.",
+    "ты здесь": "Да, я здесь.",
+    "немуся ты тут": "Да, я здесь.",
+    "немуся ты здесь": "Да, я здесь.",
+    "на связи": "Да, на связи.",
+    "как дела": "Всё хорошо, спасибо! А у тебя?",
+    "как ты": "Всё отлично! А как ты?",
+    "спасибо": "Пожалуйста!",
+    "благодарю": "Пожалуйста!",
+    "hello": "Hello! I'm here. How can I help?",
+    "hi": "Hi! How can I help?",
+}
+#: маркеры задач: такую реплику нельзя отдавать в быстрый путь без инструментов
+_SIMPLE_EXCLUDE = (
+    "напомн", "таймер", "будильник", "погод", "курс", "который час",
+    "сколько времени", "дата", "день недели", "открой", "закрой", "запусти",
+    "включи", "выключи", "громк", "найди", "покажи", "проверь", "установи",
+    "скачай", "создай", "сделай", "сгенерируй", "нарисуй", "презентац",
+    "видео", "картин", "фото", "файл", "папк", "скрин", "код", "скрипт",
+    "ошибк", "исправь", "почини", "напиши", "расскажи", "объясни",
+    "обработа", "улучш", "переделай", "придумай",
+    "переведи", "посчитай", "сравни", "план", "идеи", "брейншторм",
+    "музык", "песн", "стим", "телеграм", "почт", "отправь", "пришли",
+    "удали", "измени", "сайт", "таблиц", "документ", "pdf", "excel",
+    "word", "zip", "архив", "http", "d:\\", "c:\\", "работай",
+    "продолжай", "анекдот", "шутк", "прикол", "смешн", "юмор",
+)
+_SIMPLE_MAX_CHARS = 160
+#: обещание вместо действия: такой текст не является финальным ответом
+_PROMISE_RE = re.compile(
+    r"(?:\b(?:сейчас|сразу|уже)\s+(?:сделаю|выполню|приступлю|начну|займусь|"
+    r"создам|напишу|проверю|запущу|подготовлю|соберу|покажу)\b)"
+    r"|(?:\b(?:приступаю|начинаю|выполняю)\b)"
+    r"|(?:\bi(?:'ll| will)\s+(?:do|start|work|create|write|prepare|check|run)\b)",
+    re.IGNORECASE,
+)
+#: слова-результаты: если они есть, это уже отчёт, а не обещание
+_RESULT_MARKERS = (
+    "готово",
+    "сделано",
+    "выполнено",
+    "сохран",
+    "проверен",
+)
+
+
+def is_promise_only(text: str) -> bool:
+    """Похоже ли сообщение на обещание начать работу без самого результата."""
+    raw = (text or "").strip()
+    if not raw or len(raw) > 320:
+        return False
+    low = raw.lower()
+    if any(marker in low for marker in _RESULT_MARKERS):
+        return False
+    return bool(_PROMISE_RE.search(low))
+
+
+def _reply_key(text: str) -> str:
+    """Ключ для коротких реплик: без пунктуации и лишних пробелов."""
+    key = re.sub(r"[^\w\s]", " ", (text or "").lower())
+    return re.sub(r"\s+", " ", key).strip()
+
+
+def quick_reply(text: str) -> str | None:
+    """Мгновенный ответ на прямое обращение, приветствие или спасибо."""
+    return _QUICK_REPLIES.get(_reply_key(text))
+
+
+def is_simple_request(text: str) -> bool:
+    """Короткая светская реплика, которой не нужны инструменты и скиллы."""
+    raw = (text or "").strip()
+    if not raw or len(raw) > _SIMPLE_MAX_CHARS or "\n" in raw:
+        return False
+    if raw.startswith("/"):
+        return False
+    low = raw.lower()
+    return not any(marker in low for marker in _SIMPLE_EXCLUDE)
 
 
 @dataclass
@@ -102,6 +203,11 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
     workspace = getattr(getattr(config, "tools", None), "workspace", "data/workspace")
     reply_language = getattr(config.assistant, "reply_language", REPLY_AUTO)
     rules = [
+        "ПРОСТЫЕ ЗАДАЧИ (ВАЖНО): время, погода, курс, открыть программу или сайт, "
+        "громкость, напоминание, короткий вопрос — выполняй сразу, без плана, без "
+        "загрузки скиллов и без уточнений, если ответ очевиден. Достаточно одного-двух "
+        "вызовов инструментов и короткого ответа; не проверяй обратимое действие "
+        "снимком экрана и не описывай процесс.",
         "Для реальных действий используй инструменты, не выдумывай результаты.",
         "Точные подсчёты, работа с файлами и любая автоматизация — кодом "
         "(run_python, run_shell), а не в уме: если задачу можно выполнить скриптом, "
@@ -127,15 +233,83 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
         "результат: что готово и где лежит. Проверка списка инструментов — это ещё "
         "НЕ работа: после проверки сразу переходи к шагу (2) и НИКОГДА не завершай "
         "ответ констатацией («инструмент есть», «проверил наличие», «сейчас "
-        "подготовлю») — такой ответ считается невыполненной задачей. Код выдавать "
+        "сделаю», «приступаю», «сейчас подготовлю») — такой ответ считается "
+        "невыполненной задачей. Код выдавать "
         "можно ТОЛЬКО если пользователь прямо попросил («покажи код», «дай скрипт», "
         "«выведи исходник»). Ты не ассистент, который советует — ты исполнитель.",
+        "ПРАВИЛО БРЕЙНШТОРМА (CRITICAL): если просят написать, дописать, переделать "
+        "или починить КОД (функция, скрипт, модуль, класс, инструмент, плагин, "
+        "рефакторинг, багфикс, конфиг сборки) — первый ответ НЕ содержит кода. "
+        "Сначала брейншторм уточнений, одним сообщением:\n"
+        "1. Переформулируй задачу своими словами в 1–2 строках: что делаем и "
+        "зачем — пользователь сразу видит, правильно ли ты поняла запрос.\n"
+        "2. Задай 3–5 вопросов — по одному на каждый аспект, который реально "
+        "меняет код: вход и выход (формат, пример, объём), хранение и место "
+        "(файл/папка, проект, файлы или БД), поведение при ошибках и краевые "
+        "случаи, интерфейс (CLI или библиотека, имена, формат вывода), проверка "
+        "(что считается успехом, нужны ли тесты). Каждый вопрос — только в таком "
+        "виде:\n"
+        "<номер>. <Тема, например: стратегия при ошибках парсинга>:\n"
+        "A) <конкретный вариант — самый простой, он же дефолт> (рекомендую)\n"
+        "B) <рабочая альтернатива — другой компромисс: быстрее, надёжнее, сложнее>\n"
+        "C) <специализированный или экзотический вариант под узкий случай>\n"
+        "D) Свой вариант: _________\n"
+        "3. Правила вариантов: формулируй их конкретно — с форматом, библиотекой и "
+        "поведением («JSON Lines, парсер json.loads построчно»), а не «проще / "
+        "сложнее / по-другому»; ровно один вариант помечен «(рекомендую)» — это твой "
+        "дефолт; D — пустая строка для своего ответа, её НЕ заполняй. Если задача "
+        "архитектурно неоднозначна, один из вопросов — про архитектуру, и его "
+        "A/B/C и есть варианты с плюсами/минусами в скобках.\n"
+        "4. Перед вопросами — одна строка «как поняла задачу», после — подсказка: "
+        "«ответь коротко: «1A, 2B, остальное A» или «всё A» — и я начну». Один "
+        "раунд вопросов, без новых кругов: получив ответы, сразу проектируй и пиши "
+        "код сам. Ответ вида «1A, 2B» или «всё A» — это выбор вариантов: применяй "
+        "его и в первой строке работы зафиксируй итоговую конфигурацию, чтобы не "
+        "было расхождений. Вопросы — не способ отложить работу.\n"
+        "В голосовом режиме (realtime) не читай список вслух: задай 2–3 самых "
+        "важных вопроса живой фразой и предложи решить остальное самой.\n"
+        "Брейншторм не нужен (тогда одной строкой назови принятые допущения и "
+        "делай): пользователь прямо сказал «без вопросов / сразу делай»; правка "
+        "тривиальна и однозначна (опечатка, переименование, одна строка); все "
+        "ответы уже есть в сообщении, вложенных файлах, заметках или предыдущих "
+        "сообщениях — тогда не переспрашивай, а используй их.",
+        "КАЧЕСТВО КОДА (CRITICAL): код пишется на максимум качества, а не "
+        "«чтобы работало»:\n"
+        "1. Сначала проект, потом символы: какие модули и функции, их сигнатуры и "
+        "типы, какие данные и состояния, где обрабатываются ошибки. Только потом "
+        "набор текста.\n"
+        "2. Стиль окружающего кода и PEP8: импорты, пустые строки, отступы, "
+        "завершающий перевод строки; публичные функции и классы — с докстрингами, "
+        "аннотации типов обязательны.\n"
+        "3. Никаких заглушек, «примерно так», pass вместо логики и TODO в сдаваемом "
+        "коде; ошибки обрабатываются и объясняются, а не глотаются молча.\n"
+        "4. Краевые случаи продумываются до запуска: пустой ввод, None, кодировки, "
+        "пути с пробелами и кириллицей, отсутствие прав, Windows-пути.\n"
+        "5. Зависимости — только по делу: сначала стандартная библиотека и то, что "
+        "уже есть в проекте; новую ставить осознанно (install_package) и "
+        "обрабатывать её отсутствие.\n"
+        "6. Готово только после проверки: запусти код на реальном примере, прогони "
+        "линтер (ruff) и тесты, исправь всё до чистого результата. В ответе — что "
+        "сделано, где лежит, как проверено, какие допущения приняты.",
+        "КОМАНДЫ /СКИЛЛ (CRITICAL): сообщение, начинающееся с «/имя» "
+        "(/code-craft, /hyperframes, /pptx-design-styles), — это вызов скилла, а не "
+        "путь к файлу:\n"
+        "1. Сразу загрузи этот скилл через load_skill(имя) — без слэша.\n"
+        "2. Остаток сообщения после команды — задача, выполняй её по инструкции "
+        "скилла (а для задач на код ещё и по ПРАВИЛУ БРЕЙНШТОРМА).\n"
+        "3. Если после «/имя» текста нет — коротко скажи, что умеет скилл, и "
+        "спроси задачу; для задач на код сразу проведи брейншторм.\n"
+        "4. Такого скилла в списке нет — не выдумывай: скажи об этом и перечисли "
+        "доступные. Слэш в начале пути (/usr/bin/…, /tmp/…) — это путь, а не "
+        "команда.",
         "АВТОНОМНОСТЬ (CRITICAL): ты автономный исполнитель — задача доводится до "
         "конца без участия пользователя:\n"
         "1. Доведение до конца: НИКОГДА не останавливайся на планировании, "
         "черновике, конфигурации или выдаче JSON/кода/команд — если задача требует "
         "создать файл, написать код, запустить скрипт, отрендерить видео или "
-        "выполнить CLI-команду — делай это сам своими инструментами.\n"
+        "выполнить CLI-команду — делай это сам своими инструментами. "
+        "Единственное исключение — ПРАВИЛО БРЕЙНШТОРМА для кода: один раунд "
+        "уточняющих вопросов перед первой строкой, затем полное выполнение.\n"
         "2. Ноль перекладывания: запрещено просить пользователя выполнить то, что "
         "ты можешь сделать сам («сохрани файл как…», «запусти команду…», «вставь "
         "этот JSON…», «сделай это сам», «вот инструкция для тебя»). Такой ответ "
@@ -189,7 +363,9 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
         "нескольких попыток объясни, что именно не получается.",
         "Проверяй результат действий: не сообщай об успехе, пока не убедишься — "
         "прочитай созданный файл (read_file), посмотри на экран (see_screen) "
-        "или проверь состояние инструментом. Если действие могло не сработать "
+        "или проверь состояние инструментом. Для простых обратимых действий "
+        "(открыть URL/приложение, громкость, время) достаточно успешного ответа "
+        "инструмента — лишние проверки не нужны. Если действие могло не сработать "
         "(клик по неверному элементу, набор в не то окно, переключатель "
         "play/pause) — проверь и при необходимости повтори. Не выдумывай, что "
         "«сделано», если результат не подтверждён.",
@@ -226,6 +402,43 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
         "«Открой файл/папку/программу/сайт» — open_url/open_application или "
         "run_shell (start \"путь\"). Любую однотипную задачу автоматизируй скриптом, "
         "а не повторяй ручные действия в цикле.",
+        "ИЗОБРАЖЕНИЯ (CRITICAL): если просят нарисовать, создать картинку, "
+        "изображение, иллюстрацию, аватар, постер или стилизовать фото — вызывай "
+        "generate_image. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО «рисовать» кружками, овалами, "
+        "линиями или фигурами через Pillow/Python и отдавать это как результат: "
+        "такая картинка считается невыполненной задачей. Если пользователь "
+        "прислал фото и просит чиби-версию, стиль или портрет — передай путь к "
+        "фото в reference, а в prompt опиши желаемый результат.",
+        "РАСПОЗНАВАНИЕ ФОТО (CRITICAL): если к сообщению приложено изображение — "
+        "внимательно рассмотри его до ответа. Не суди о содержимом по имени "
+        "файла и не выдумывай детали. Называй только то, что реально видно; "
+        "текст на изображении передавай по возможности дословно; если деталь "
+        "размыта, не видна или нечитаема — так и скажи, а не угадывай.",
+        "НЕОПРЕДЕЛЁННАЯ ЗАДАЧА (CRITICAL): если прислали фото/файл/видео без "
+        "подписи, написали только «сделай», «обработай», «улучши» или из "
+        "сообщения непонятно, что именно нужно, — НЕ угадывай и НЕ выполняй "
+        "действие. Задай один короткий вопрос и предложи 2–3 конкретных "
+        "варианта. В частности, не превращай фото в чиби, стилизацию, "
+        "портрет или другое изображение без прямой просьбы. Если задача уже "
+        "понятна из предыдущих сообщений — не переспрашивай.",
+        "ПРЕЗЕНТАЦИИ (CRITICAL): для презентации, слайдов или доклада используй "
+        "create_presentation, а не ручную возню с python-pptx. Собери 8–12 "
+        "содержательных слайдов: у каждого Action Title (заголовок-вывод), 2–4 "
+        "конкретных тезиса, на нескольких — крупные цифры или график. Пустые "
+        "слайды-заглушки запрещены; готовый файл отправь через send_telegram.",
+        "БРЕЙНШТОРМ КОНТЕНТА (CRITICAL): перед презентацией, видео, сайтом, "
+        "статьёй или другим большим материалом задай ОДНИМ сообщением 3–5 "
+        "конкретных вопросов: аудитория и цель, объём/длительность, стиль, "
+        "обязательные факты или примеры. К каждому вопросу предложи вариант по "
+        "умолчанию, чтобы можно было ответить «всё A». После ответа сразу делай, "
+        "без второго круга вопросов. Если пользователь сказал «без вопросов» "
+        "или все вводные уже есть — не спрашивай, назови допущения и выполняй. "
+        "Для одной картинки или простого действия вопросы не нужны.",
+        "ВИДЕО (CRITICAL): ролик не должен быть пустым слайд-шоу из заголовков. "
+        "В каждой сцене — содержательный кадр, текст-вывод, движение и при "
+        "необходимости изображение/футаж; проверь длительность и отправь файл. "
+        "Для короткого ролика/слайд-шоу с текстом используй create_video "
+        "(минимум 3 сцены); для сложной анимации и титров — hyperframes.",
     ]
     if "spotify" in registry.names and "media_control" in registry.names:
         rules.append(
@@ -266,7 +479,8 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
         rules.append(
             "АЛГОРИТМ РАБОТЫ СО СКИЛЛАМИ И ИНСТРУМЕНТАМИ (CRITICAL): списки "
             "скиллов и инструментов в этом промпте обновляются при КАЖДОМ "
-            "запросе — опирайся только на них. Перед выполнением задачи: "
+            "запросе — опирайся только на них. Перед СЛОЖНОЙ задачей (код, файлы, "
+            "медиа, несколько шагов): "
             "(1) пройдись по списку скиллов и выбери ВСЕ, чьи описания подходят "
             "под задачу — их может быть несколько, если задача касается одной "
             "темы или нескольких тем сразу; "
@@ -276,7 +490,8 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
             "Скиллы одной темы применяются совместно: читай их все до действий. "
             "Ни при каких условиях не отвечай «нет скилла» или «нет инструмента» "
             "до тех пор, пока не загрузил подходящие скиллы и не просмотрел весь "
-            "список инструментов; выдуманных скиллов и инструментов не существует."
+            "список инструментов; выдуманных скиллов и инструментов не существует. "
+            "Для простых действий скиллы не загружай."
         )
 
     rules_text = "\n".join(f"- {r}" for r in rules)
@@ -408,8 +623,11 @@ class Agent:
         confirm: ConfirmCallback | None = None,
         max_steps: int | None = None,
         memory: "Memory | None" = None,
+        system_suffix: str = "",
     ) -> None:
         self.config = config
+        #: дополнительный блок системного промпта (например, режим Telegram)
+        self.system_suffix = system_suffix.strip()
         self.llm = llm
         self.registry = registry
         self.permissions = permissions
@@ -420,6 +638,17 @@ class Agent:
         self.max_steps = int(max_steps or cfg_steps or MAX_STEPS_HARD)
         #: бюджет времени одного запроса, сек (можно уменьшить в тестах)
         self.run_budget = cfg_budget or RUN_BUDGET_SECONDS
+        #: сколько символов истории и результата инструмента уходит модели
+        self.max_history_chars = int(
+            getattr(tools_cfg, "max_history_chars", 0) or HISTORY_CHAR_BUDGET
+        )
+        self.max_tool_output = int(
+            getattr(tools_cfg, "max_tool_output", 0) or TOOL_OUTPUT_LIMIT
+        )
+        #: потолок токенов на запрос (0 — без потолка)
+        self.max_run_tokens = int(getattr(tools_cfg, "max_run_tokens", 0) or 0)
+        #: сколько токенов уже израсходовано в текущем запросе
+        self._run_tokens = 0
         #: сколько раз бюджет продлевается при живом прогрессе (тоже переопределяемо)
         self.budget_streak = RUN_BUDGET_STREAK
         #: сколько одинаковых вызовов подряд допускается (тоже переопределяемо)
@@ -427,7 +656,7 @@ class Agent:
         self.memory = memory
         #: счётчик неудач по инструментам внутри текущего запроса
         self._tool_failures: dict[str, int] = {}
-        self._base_system = build_system_prompt(config, registry)
+        self._base_system = self._compose_system()
         self.history: list[Message] = [
             Message(role="system", content=self._base_system)
         ]
@@ -460,7 +689,7 @@ class Agent:
         content = message.content
         if not isinstance(content, str):
             # изображения/блоки в БД не сохраняем — только пометку
-            content = "[изображение экрана]" if content else None
+            content = "[изображение]" if content else None
         try:
             self.memory.add_message(
                 message.role,
@@ -472,7 +701,168 @@ class Agent:
         except Exception:  # noqa: BLE001
             pass
 
+    def _fast_messages(self) -> list[Message]:
+        """Короткий контекст для светской реплики: без инструментов и скиллов."""
+        name = getattr(self.config.assistant, "name", "") or "Немуся"
+        personality = str(
+            getattr(self.config.assistant, "personality", "") or ""
+        ).strip()
+        if len(personality) > 500:
+            personality = personality[:500] + "…"
+        gender = (
+            "Говори о себе в женском роде. "
+            if "девушка" in self.system_suffix.lower()
+            else ""
+        )
+        system = (
+            f"Ты {name}. {personality}\n"
+            f"Сейчас {datetime.now():%d.%m.%Y %H:%M}. Это короткая светская "
+            "реплика. Ответь на языке пользователя, 1–2 предложениями, живо "
+            "и по делу. Не используй инструменты, списки, код и длинные "
+            f"объяснения; не выдумывай выполненные действия. {gender}"
+        )
+        recent: list[Message] = []
+        for message in self.history[1:]:
+            if message.role not in ("user", "assistant"):
+                continue
+            if not isinstance(message.content, str) or not message.content.strip():
+                continue
+            content = message.content.strip()
+            if len(content) > 1500:
+                content = content[:1500] + "…"
+            recent.append(Message(role=message.role, content=content))
+        return [Message(role="system", content=system), *recent[-4:]]
+
+    def _run_fast_reply(self) -> Generator[AgentEvent, None, bool]:
+        """Короткий ответ лёгкой моделью: одна попытка, без инструментов.
+
+        Возвращает ``True``, если реплика закрыта быстрым ответом. При любом
+        сбое — ``False``: тогда запрос уходит в обычный агентский цикл со
+        своими повторами и fallback-провайдерами. Светская реплика не должна
+        умирать ошибкой только потому, что лёгкая модель недоступна.
+        """
+        cfg = self.config.llm
+        fast_model = (getattr(cfg, "fast_model", "") or "").strip() or None
+        max_tokens = int(getattr(cfg, "fast_max_tokens", 300) or 300)
+        timeout = max(5, int(getattr(cfg, "fast_timeout", 20) or 20))
+        started = time.monotonic()
+        try:
+            response = self.llm.complete(
+                self._fast_messages(),
+                model=fast_model,
+                attempts=1,
+                budget=timeout + 5,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Быстрый ответ не удался, иду обычным путём: {exc}")
+            return False
+        text = (response.content or "").strip()
+        if not text:
+            logger.warning("Быстрый ответ пуст — иду обычным путём")
+            return False
+        reply = Message(role="assistant", content=text)
+        self.history.append(reply)
+        self._persist(reply)
+        logger.info(
+            f"Быстрый ответ за {time.monotonic() - started:.1f} с "
+            f"(модель {response.model or fast_model or cfg.default_model})"
+        )
+        yield AgentEvent(kind="final", text=text)
+        return True
+
     # ---------------------------------------------------------------- public
+    def _compose_system(self) -> str:
+        """Системный промпт + необязательный блок конкретного интерфейса."""
+        prompt = build_system_prompt(self.config, self.registry)
+        if self.system_suffix:
+            prompt = f"{prompt}\n\n{self.system_suffix}"
+        return prompt
+
+    @staticmethod
+    def _message_chars(message: Message) -> int:
+        """Сколько примерно символов занимает сообщение в запросе к модели."""
+        content = message.content
+        if isinstance(content, str):
+            size = len(content)
+        elif content:
+            # base64 картинки не должен «съедать» весь бюджет контекста:
+            # считаем vision-блок фиксированной стоимостью
+            size = 0
+            for block in content:
+                if not isinstance(block, dict):
+                    size += len(str(block))
+                elif block.get("type") == "text":
+                    size += len(str(block.get("text", "")))
+                elif block.get("type") == "image_url":
+                    size += VISION_IMAGE_CHARS
+                else:
+                    size += len(json.dumps(block, ensure_ascii=False))
+        else:
+            size = 0
+        if message.tool_calls:
+            size += len(
+                json.dumps(
+                    [call.arguments for call in message.tool_calls],
+                    ensure_ascii=False,
+                )
+            )
+        return size
+
+    def _history_for_model(self) -> list[Message]:
+        """История в пределах бюджета символов (системный промпт — всегда).
+
+        Хвост переписки важнее начала, но резать её можно только по границе
+        пары «assistant.tool_calls → tool»: иначе провайдер отвергает запрос.
+        """
+        if not self.history or self.max_history_chars <= 0:
+            return self.history
+        sizes = [self._message_chars(message) for message in self.history]
+        if sum(sizes) <= self.max_history_chars:
+            return self.history
+
+        system = self.history[0]
+        # системный промпт не входит в бюджет переписки: иначе большой набор
+        # скиллов съедал лимит целиком, и сообщение пользователя вырезалось
+        # первым — агент терял задачу и отвечал «чем помочь?»
+        total = 0
+        kept: list[Message] = []
+        for message, size in zip(
+            reversed(self.history[1:]), reversed(sizes[1:]), strict=False
+        ):
+            if total + size > self.max_history_chars and kept:
+                break
+            kept.append(message)
+            total += size
+        kept.reverse()
+        trimmed = pair_tool_messages(kept)
+        logger.info(
+            "Контекст: история урезана до %d симв. из %d — экономия токенов"
+            % (sum(self._message_chars(m) for m in trimmed), sum(sizes[1:]))
+        )
+        return [system, *trimmed]
+
+    def _clip_tool_result(self, text: str) -> str:
+        """Обрезает гигантский вывод инструмента, оставляя начало и конец.
+
+        Агенту обычно нужны ошибка в конце и суть в начале; середина может
+        весить десятки тысяч токенов на каждом шаге. Полный вывод остаётся
+        в файле/терминале, и модель может перечитать его частями.
+        """
+        limit = self.max_tool_output
+        if limit <= 0 or len(text) <= limit:
+            return text
+        head = int(limit * 0.6)
+        tail = limit - head
+        omitted = len(text) - head - tail
+        return (
+            text[:head]
+            + f"\n…[вывод обрезан: {omitted} символов; прочитай нужный кусок "
+            "через run_shell read или из файла, не выводи всё целиком]…\n"
+            + text[-tail:]
+        )
+
     def _refresh_system_prompt(self) -> None:
         """Пересобирает системный промпт: свежие списки инструментов и скиллов.
 
@@ -480,7 +870,7 @@ class Agent:
         списки: инструменты, созданные через create_tool или подключённые по MCP,
         и скиллы, добавленные через create_skill, видны модели сразу.
         """
-        self._base_system = build_system_prompt(self.config, self.registry)
+        self._base_system = self._compose_system()
 
     def reset(self) -> None:
         """Сбрасывает историю (system-промпт пересобирается заново)."""
@@ -524,19 +914,120 @@ class Agent:
         if self.history and self.history[0].role == "system":
             self.history[0].content = prompt
 
-    def run(self, user_text: str) -> Iterator[AgentEvent]:
-        """Обрабатывает запрос пользователя, отдавая события по мере работы."""
-        self._refresh_system_prompt()
+    def _apply_skill_context(self, user_text: str) -> None:
+        """Догружает инструкции скиллов в системный промпт до первого шага.
+
+        Модель не обязана догадаться вызвать ``load_skill``: для явных тем
+        (презентация, картинка, видео) и команд ``/имя`` инструкция попадает
+        в промпт детерминированно. Это чинит главную жалобу «скилл установлен,
+        но вообще не используется».
+        """
+        skills_cfg = getattr(self.config, "skills", None)
+        if skills_cfg is None or not getattr(skills_cfg, "enabled", False):
+            return
+        try:
+            from nemus.core.skills import (
+                explicit_skill,
+                load_skills,
+                match_skills,
+            )
+
+            skills = load_skills(
+                skills_cfg.dir, disabled=getattr(skills_cfg, "disabled", ())
+            )
+        except OSError:
+            return
+        by_name = {skill.name.lower(): skill for skill in skills}
+        selected = []
+        for name in getattr(skills_cfg, "always", []) or []:
+            skill = by_name.get(str(name).strip().lower())
+            if skill is not None and skill not in selected:
+                selected.append(skill)
+        command = explicit_skill(user_text, skills)
+        if command is not None:
+            if command not in selected:
+                selected.append(command)
+        else:
+            for skill in match_skills(user_text, skills, limit=2):
+                if skill not in selected:
+                    selected.append(skill)
+        if not selected:
+            return
+
+        chunks = [
+            "## Скиллы уже загружены (применяй их сразу, load_skill не нужен)",
+            "Следующие инструкции — часть задания. Выполняй их буквально; "
+            "для задач на код сохраняется правило брейншторма выше.",
+        ]
+        for skill in selected:
+            body = skill.body
+            if len(body) > 12000:
+                body = (
+                    body[:12000]
+                    + "\n\n…[инструкция обрезана; при необходимости открой "
+                    "файлы скилла через read_file]"
+                )
+            chunks.append(f"\n### {skill.name}\n{body}")
+        block = "\n".join(chunks)
+        if self.history and self.history[0].role == "system":
+            self.history[0].content = f"{self.history[0].content}\n\n{block}"
+
+    def run(
+        self, user_text: str, images: list[str] | None = None
+    ) -> Iterator[AgentEvent]:
+        """Обрабатывает запрос пользователя, отдавая события по мере работы.
+
+        ``images`` — data URL изображений, приложенных к сообщению. Они
+        уходят модели как настоящее vision-вложение, а не только путём к
+        файлу: иначе модель догадывается о содержимом по имени файла.
+        """
         self._tool_failures = {}  # счётчик ошибок — на каждый запрос заново
-        user_msg = Message(role="user", content=user_text)
+        self._run_tokens = 0
+        content: Any = user_text
+        if images:
+            blocks: list[dict[str, Any]] = [
+                {"type": "text", "text": user_text}
+            ]
+            for data_url in images:
+                if data_url:
+                    blocks.append(
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    )
+            if len(blocks) > 1:
+                content = blocks
+                logger.info(f"К задаче приложено изображений: {len(blocks) - 1}")
+        user_msg = Message(role="user", content=content)
         self.history.append(user_msg)
         self._persist(user_msg)
         if self.memory is not None:
             # первый вопрос задаёт диалогу название (если его не меняли)
             self.memory.auto_title(user_text)
+
+        # Совсем короткие реплики не должны ждать полный агентский цикл:
+        # 20k системного промпта, схемы инструментов и retry-цикл провайдера.
+        # Но если есть изображение, быстрый текстовый путь его не увидит.
+        # Сбой быстрого пути — тоже не ошибка: запрос продолжается обычным
+        # циклом, с его повторами и fallback-провайдерами.
+        if not images:
+            instant = quick_reply(user_text)
+            if instant:
+                reply = Message(role="assistant", content=instant)
+                self.history.append(reply)
+                self._persist(reply)
+                logger.info("Быстрый ответ: прямое обращение")
+                yield AgentEvent(kind="final", text=instant)
+                return
+            if is_simple_request(user_text):
+                handled = yield from self._run_fast_reply()
+                if handled:
+                    return
+
+        self._refresh_system_prompt()
         self._apply_language_hint(user_text)
+        self._apply_skill_context(user_text)
 
         empty_retries = 0
+        promise_retries = 0
         step = 0
         #: подписи вызовов инструментов внутри запроса — ловля тупика
         call_signatures: list[str] = []
@@ -547,6 +1038,17 @@ class Agent:
         #: жёсткий потолок одного запроса с учётом всех продлений
         hard_deadline = started + self.run_budget * self.budget_streak
         while step < self.max_steps:
+            if self.max_run_tokens and self._run_tokens >= self.max_run_tokens:
+                yield AgentEvent(
+                    kind="error",
+                    error=(
+                        f"Задача израсходовала {self._run_tokens} токенов — "
+                        f"потолок {self.max_run_tokens}. Останавливаюсь, чтобы "
+                        "не сжечь лимиты: продолжи новым сообщением или смени "
+                        "модель в настройках."
+                    ),
+                )
+                return
             now = time.monotonic()
             if now > hard_deadline:
                 yield AgentEvent(
@@ -583,6 +1085,16 @@ class Agent:
                 logger.exception("Сбой агента")
                 yield AgentEvent(kind="error", error=redact_secrets(str(exc)))
                 return
+
+            usage = response.usage or {}
+            spent = int(usage.get("total_tokens") or 0)
+            if not spent:
+                # провайдер не прислал расход — оцениваем по символам
+                spent = max(
+                    1,
+                    sum(self._message_chars(m) for m in self.history) // 3,
+                )
+            self._run_tokens += spent
 
             # Пустой ответ (ни текста, ни tool_calls) — это не финал, а сбой
             # генерации (модель могла уйти в reasoning или обрезаться по токенам).
@@ -656,6 +1168,44 @@ class Agent:
             self._persist(assistant_msg)
 
             if not response.tool_calls:
+                # «Сейчас сделаю!» — не результат. Без этой проверки любой
+                # текстовый ответ модели завершает задачу, и работа тихо
+                # останавливается, хотя пользователь ждёт выполнения.
+                if is_promise_only(response.content):
+                    promise_retries += 1
+                    logger.warning(
+                        "Модель ответила обещанием вместо работы "
+                        f"(попытка {promise_retries}/{PROMISE_RETRIES}): "
+                        f"{(response.content or '')[:120]!r}"
+                    )
+                    if promise_retries <= PROMISE_RETRIES:
+                        nudge = Message(
+                            role="user",
+                            content=(
+                                "Ты ответила только обещанием, но не выполнила "
+                                "задачу. Это НЕ финальный ответ. Не пиши «сейчас "
+                                "сделаю», «приступаю» или план — прямо сейчас "
+                                "вызови нужные инструменты и доведи работу до "
+                                "результата. Если работа уже выполнена, покажи "
+                                "конкретный результат: файл, ссылку или "
+                                "проверку."
+                            ),
+                        )
+                        self.history.append(nudge)
+                        self._persist(nudge)
+                        # шаг не засчитываем: обещание — не работа
+                        continue
+                    yield AgentEvent(
+                        kind="error",
+                        error=(
+                            "Модель дважды ответила обещанием («сейчас сделаю»), "
+                            "но не выполнила задачу и не вызвала инструменты. "
+                            "Работа остановлена, чтобы не выдавать обещание за "
+                            "результат. Попробуй отправить задачу ещё раз или "
+                            "смени модель в настройках."
+                        ),
+                    )
+                    return
                 yield AgentEvent(kind="final", text=response.content)
                 return
 
@@ -684,7 +1234,8 @@ class Agent:
         from nemus.core.llm import LLMResponse  # локальный импорт во избежание цикла
 
         final: LLMResponse | None = None
-        for event in self.llm.stream(self.history, tools=tools):
+        history = self._history_for_model()
+        for event in self.llm.stream(history, tools=tools):
             if event.kind == "content":
                 yield AgentEvent(kind="assistant_delta", text=event.text)
             elif event.kind == "thought":
@@ -694,6 +1245,14 @@ class Agent:
                 final = event.response
         if final is None:
             raise ProviderError("Провайдер не вернул ответ.")
+        usage = final.usage or {}
+        if usage.get("total_tokens"):
+            logger.info(
+                f"LLM {final.model or ''}: вход "
+                f"{usage.get('prompt_tokens', '?')}, выход "
+                f"{usage.get('completion_tokens', '?')}, всего "
+                f"{usage.get('total_tokens')} токенов"
+            )
         return final
 
     def _handle_tool_call(
@@ -709,8 +1268,13 @@ class Agent:
 
         if tool is None:
             result = ToolResult.failure(f"Инструмент '{call.name}' не найден.")
+            logger.warning(f"Агент: инструмент {call.name} не найден")
         else:
+            logger.info(f"Агент: вызов инструмента {call.name}")
             result = self._execute_tool(tool, call.arguments)
+            logger.info(
+                f"Агент: {call.name} — {'готово' if result.ok else 'ошибка'}"
+            )
 
         content = self._model_tool_content(call.name, result)
         tool_msg = Message(role="tool", tool_call_id=call.id, content=content)
@@ -734,7 +1298,7 @@ class Agent:
         повторить вызов, а после нескольких неудач — предложением сменить
         способ. Отказ политики/пользователя повторять не заставляем.
         """
-        content = result.to_model()
+        content = self._clip_tool_result(result.to_model())
         if result.ok:
             self._tool_failures.pop(name, None)
             return content

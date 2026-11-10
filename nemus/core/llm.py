@@ -64,6 +64,25 @@ _LIMIT_MARKERS = (
 #: 429 — слишком много запросов (число ищем как отдельное слово,
 #: иначе «4030 токенов» совпало бы с кодом 403)
 _LIMIT_CODE = re.compile(r"\b429\b")
+#: лимиты, которые повтором не лечатся: кончились кредиты/деньги
+_PERMANENT_LIMIT_MARKERS = (
+    "no credits",
+    "credit balance",
+    "credit_balance_exhausted",
+    "insufficient credits",
+    "not enough credits",
+    "out of credits",
+    "insufficient_quota",
+    "insufficient quota",
+    "billing",
+    "payment required",
+)
+#: подсказка «повторите через N с» (Gemini retryDelay, Retry-After)
+_RETRY_AFTER = re.compile(
+    r"(?:retry(?:delay|after)?)[^0-9]{0,24}?(\d+(?:\.\d+)?)\s*s", re.IGNORECASE
+)
+#: потолок паузы из подсказки провайдера, сек
+MAX_RETRY_HINT = 90.0
 #: признаки неповторяемых ошибок: ключ, прав, модель, окно контекста
 _FATAL_MARKERS = (
     "unauthorized",
@@ -81,8 +100,10 @@ _FATAL_MARKERS = (
     "context length",
     "prompt is too long",
 )
-#: 401/403 — неавторизован/доступ запрещён
-_FATAL_CODE = re.compile(r"\b(?:401|403)\b")
+#: 401/403 — неавторизован/доступ запрещён; 402 — нет денег;
+#: 419 — протухшая сессия/запрос, повторять бессмысленно (иначе 11 попыток
+#: впустую жгут лимиты)
+_FATAL_CODE = re.compile(r"\b(?:401|402|403|419)\b")
 #: классы исключений litellm, которых повтор не поможет
 _FATAL_CLASSES = (
     "authentication",
@@ -140,6 +161,28 @@ def _import_litellm():
     return litellm
 
 
+def warm_up() -> float:
+    """Заранее импортирует LiteLLM в фоне: первый запрос не ждёт 10 секунд.
+
+    Импорт litellm на Windows занимает ~10 с (тяжёлые зависимости и
+    инициализация провайдеров), а раньше он происходил прямо внутри первого
+    обращения к модели. Пользователь видел «Немуся думает» на простейшей
+    задаче. Прогрев запускается при старте приложения и headless-бота.
+
+    Возвращает время прогрева в секундах (0 — уже был прогрет).
+    """
+    started = time.perf_counter()
+    try:
+        _import_litellm()
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось прогреть LiteLLM")
+        return 0.0
+    elapsed = time.perf_counter() - started
+    if elapsed >= 0.5:
+        logger.info(f"LiteLLM прогрет за {elapsed:.1f} с — первый запрос без задержки")
+    return elapsed
+
+
 def _is_gemini_3_plus(model: str) -> bool:
     """Модель семейства Gemini 3 и новее (там сэмплинг deprecated).
 
@@ -163,6 +206,9 @@ def _is_gemini_3_plus(model: str) -> bool:
     except Exception:  # noqa: BLE001
         if not name.startswith("gemini-"):
             return False
+        # алиасы Google указывают на актуальное поколение (3.x)
+        if name in ("gemini-flash-latest", "gemini-pro-latest"):
+            return True
         major = name[len("gemini-") :].split(".", 1)[0]
         return major.isdigit() and int(major) >= 3
 
@@ -187,21 +233,39 @@ def _strip_sampling(model: str, kwargs: dict[str, Any]) -> None:
         )
 
 
+def retry_after_seconds(text: str) -> float:
+    """Сколько секунд провайдер просит подождать перед повтором (0 — не сказал)."""
+    match = _RETRY_AFTER.search(text or "")
+    if match is None:
+        return 0.0
+    try:
+        return max(0.0, min(float(match.group(1)), MAX_RETRY_HINT))
+    except ValueError:
+        return 0.0
+
+
 def error_kind(exc: Exception) -> ErrorKind:
     """К какому типу относится ошибка провайдера.
 
     Класс исключения проверяется первым (litellm кидает ``RateLimitError``,
     ``AuthenticationError`` и т.п.), текст — запасной вариант для ошибок,
     пришедших обычным ``RuntimeError``/httpx.
+
+    429/квота — это не всегда «навсегда»: Gemini free tier упирается в
+    поминутный лимит и сам пишет ``retryDelay: 37s``. Такой лимит повторяем
+    (``transient``): ждём указанное время и пробуем снова, а не уходим сразу
+    в фолбэк. ``limit`` — только когда деньги/кредиты действительно кончились.
     """
     name = type(exc).__name__.lower()
-    if "ratelimit" in name:
+    text = redact_secrets(str(exc)).lower()
+    if any(m in text for m in _PERMANENT_LIMIT_MARKERS):
         return "limit"
+    if "ratelimit" in name or _LIMIT_CODE.search(text) or any(
+        m in text for m in _LIMIT_MARKERS
+    ):
+        return "transient" if retry_after_seconds(text) else "limit"
     if name.startswith(_FATAL_CLASSES):
         return "fatal"
-    text = redact_secrets(str(exc)).lower()
-    if _LIMIT_CODE.search(text) or any(m in text for m in _LIMIT_MARKERS):
-        return "limit"
     if _FATAL_CODE.search(text) or any(m in text for m in _FATAL_MARKERS):
         return "fatal"
     return "transient"
@@ -212,29 +276,43 @@ def retry_delay(attempt: int) -> float:
     return min(RETRY_BACKOFF * (BACKOFF_GROWTH ** (attempt - 1)), MAX_BACKOFF)
 
 
-def should_retry(kind: ErrorKind, attempt: int) -> bool:
+def should_retry(
+    kind: ErrorKind, attempt: int, max_attempts: int = MAX_ATTEMPTS
+) -> bool:
     """Повторять ли запрос на том же провайдере после ошибки ``kind``.
 
     Лимиты и неповторяемые ошибки уходят в фолбэк сразу; всё остальное
-    повторяем до ``MAX_ATTEMPTS`` раз включительно.
+    повторяем до ``max_attempts`` раз включительно.
     """
     if kind in ("limit", "fatal"):
         return False
-    return attempt < MAX_ATTEMPTS
+    return attempt < max(1, max_attempts)
 
 
-def next_delay(kind: ErrorKind, attempt: int, deadline: float, model: str) -> float | None:
+def next_delay(
+    kind: ErrorKind,
+    attempt: int,
+    deadline: float,
+    model: str,
+    retry_after: float = 0.0,
+    max_attempts: int = MAX_ATTEMPTS,
+    total_budget: float = TARGET_BUDGET,
+) -> float | None:
     """Пауза перед следующей попыткой, либо ``None`` — пора в фолбэк.
 
     ``deadline`` — момент (``time.monotonic``), после которого провайдер
     считается исчерпанным по времени, независимо от оставшихся попыток.
+    ``retry_after`` — пауза, которую просит сам провайдер (например, Gemini
+    при поминутном лимите); она важнее нашего бэкоффа.
     """
-    if not should_retry(kind, attempt):
+    if not should_retry(kind, attempt, max_attempts):
         return None
     delay = retry_delay(attempt)
+    if retry_after > delay:
+        delay = retry_after
     if time.monotonic() + delay > deadline:
         logger.warning(
-            f"{model}: бюджет {TARGET_BUDGET:.0f} с на провайдер исчерпан — фолбэк"
+            f"{model}: бюджет {total_budget:.0f} с на провайдер исчерпан — фолбэк"
         )
         return None
     return delay
@@ -410,6 +488,13 @@ class LLMClient:
             "timeout": self.config.llm.request_timeout,
         }
         kwargs.update(provider_kwargs(target.provider, self.config))
+        # Gemini 3+ по умолчанию «думает» на полную и съедает max_tokens даже
+        # на односложный ответ. Просим экономный режим: это в разы меньше
+        # выходных токенов и расход лимитов.
+        if _is_gemini_3_plus(target.model):
+            effort = getattr(self.config.llm, "reasoning_effort", "")
+            if effort:
+                kwargs["reasoning_effort"] = effort
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -424,35 +509,76 @@ class LLMClient:
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        *,
+        model: str | None = None,
+        attempts: int | None = None,
+        budget: float | None = None,
         **overrides: Any,
     ) -> LLMResponse:
-        """Синхронный запрос: повторы на провайдере, затем fallback."""
+        """Синхронный запрос: повторы на провайдере, затем fallback.
+
+        ``model`` — отдельная модель для этого запроса (быстрый путь).
+        ``attempts``/``budget`` ограничивают повторы: короткая реплика не
+        должна ждать многоминутный retry-цикл провайдера.
+        """
         litellm = _import_litellm()
 
         payload = self._messages_payload(messages)
         failures: dict[str, str] = {}
+        max_attempts = max(1, int(attempts or MAX_ATTEMPTS))
+        total_budget = float(budget or TARGET_BUDGET)
+        targets = self._targets()
+        if model:
+            provider = (
+                model.split("/", 1)[0]
+                if "/" in model
+                else self.config.llm.default_provider
+            )
+            targets = [ChatTarget(provider, model)] + [
+                t for t in targets if t.model != model
+            ]
 
-        for target in self._targets():
+        for target in targets:
             kwargs = self._build_kwargs(target, tools)
             kwargs.update(overrides)
             _strip_sampling(target.model, kwargs)
-            deadline = time.monotonic() + TARGET_BUDGET
-            for attempt in range(1, MAX_ATTEMPTS + 1):
-                logger.debug(f"LLM → {target.model} (попытка {attempt}/{MAX_ATTEMPTS})")
+            deadline = time.monotonic() + total_budget
+            for attempt in range(1, max_attempts + 1):
+                logger.debug(
+                    f"LLM → {target.model} (попытка {attempt}/{max_attempts})"
+                )
                 try:
                     resp = litellm.completion(messages=payload, **kwargs)
-                    return self._parse_response(resp)
+                    parsed = self._parse_response(resp)
+                    usage = parsed.usage or {}
+                    if usage.get("total_tokens"):
+                        logger.info(
+                            f"LLM {target.model}: вход "
+                            f"{usage.get('prompt_tokens', '?')}, выход "
+                            f"{usage.get('completion_tokens', '?')}, всего "
+                            f"{usage.get('total_tokens')} токенов"
+                        )
+                    return parsed
                 except Exception as exc:  # noqa: BLE001
                     message = redact_secrets(str(exc))
                     failures[target.model] = (
-                        f"{target.model}: {message} (попытка {attempt}/{MAX_ATTEMPTS})"
+                        f"{target.model}: {message[:600]} "
+                        f"(попытка {attempt}/{max_attempts})"
                     )
                     kind = error_kind(exc)
                     logger.warning(
-                        f"Провайдер {target.model}, попытка {attempt}/{MAX_ATTEMPTS} "
-                        f"({kind}): {message}"
+                        f"Провайдер {target.model}, попытка "
+                        f"{attempt}/{max_attempts} ({kind}): {message}"
                     )
-                    delay = next_delay(kind, attempt, deadline, target.model)
+                    delay = next_delay(
+                        kind,
+                        attempt,
+                        deadline,
+                        target.model,
+                        retry_after=retry_after_seconds(message),
+                        max_attempts=max_attempts,
+                        total_budget=total_budget,
+                    )
                     if delay is None:
                         break
                     time.sleep(delay)
@@ -486,6 +612,10 @@ class LLMClient:
             kwargs = self._build_kwargs(target, tools)
             kwargs.update(overrides)
             kwargs["stream"] = True
+            # просим провайдера прислать расход токенов последним чанком —
+            # без этого в логе не видно, сколько съел каждый запрос
+            if target.provider in ("gemini", "openai"):
+                kwargs["stream_options"] = {"include_usage": True}
             _strip_sampling(target.model, kwargs)
             deadline = time.monotonic() + TARGET_BUDGET
 
@@ -499,14 +629,21 @@ class LLMClient:
                 except Exception as exc:  # noqa: BLE001
                     message = redact_secrets(str(exc))
                     failures[target.model] = (
-                        f"{target.model}: {message} (попытка {attempt}/{MAX_ATTEMPTS})"
+                        f"{target.model}: {message[:600]} "
+                        f"(попытка {attempt}/{MAX_ATTEMPTS})"
                     )
                     kind = error_kind(exc)
                     logger.warning(
                         f"Стрим {target.model}, попытка {attempt}/{MAX_ATTEMPTS} "
                         f"({kind}): {message}"
                     )
-                    delay = next_delay(kind, attempt, deadline, target.model)
+                    delay = next_delay(
+                        kind,
+                        attempt,
+                        deadline,
+                        target.model,
+                        retry_after=retry_after_seconds(message),
+                    )
                     if delay is None:
                         break
                     time.sleep(delay)
@@ -515,7 +652,10 @@ class LLMClient:
                 emitted = False
                 try:
                     for event in self._iter_stream(stream, target.model):
-                        emitted = True
+                        # повторять можно только пока пользователю не ушёл
+                        # видимый текст; «мысли» модели дублировать не страшно
+                        if event.kind == "content":
+                            emitted = True
                         yield event
                     return
                 except Exception as exc:  # noqa: BLE001
@@ -526,11 +666,17 @@ class LLMClient:
                     message = f"{target.model}: стрим прерван: {redact_secrets(str(exc))}"
                     logger.warning(message)
                     failures[target.model] = (
-                        f"{message} (попытка {attempt}/{MAX_ATTEMPTS})"
+                        f"{message[:600]} (попытка {attempt}/{MAX_ATTEMPTS})"
                     )
                     if emitted:
                         raise ProviderError(message) from None
-                    delay = next_delay(error_kind(exc), attempt, deadline, target.model)
+                    delay = next_delay(
+                        error_kind(exc),
+                        attempt,
+                        deadline,
+                        target.model,
+                        retry_after=retry_after_seconds(message),
+                    )
                     if delay is None:
                         break
                     time.sleep(delay)
@@ -550,8 +696,16 @@ class LLMClient:
         content_parts: list[str] = []
         finish_reason = "stop"
         reasoning = _ReasoningFilter()
+        usage: dict[str, Any] = {}
 
         for chunk in stream:
+            raw_usage = getattr(chunk, "usage", None)
+            if raw_usage is not None:
+                usage = {
+                    "prompt_tokens": getattr(raw_usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(raw_usage, "completion_tokens", 0),
+                    "total_tokens": getattr(raw_usage, "total_tokens", 0),
+                }
             choice = chunk.choices[0] if chunk.choices else None
             if choice is None:
                 continue
@@ -590,6 +744,7 @@ class LLMClient:
             tool_calls=accumulator.result(),
             finish_reason=finish_reason,
             model=model,
+            usage=usage,
         )
         yield StreamEvent(kind="final", response=response)
 

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import traceback
 from pathlib import Path
@@ -19,6 +20,49 @@ from loguru import logger
 from nemus.utils.redact import redact_secrets
 
 _configured = False
+
+
+class _InterceptHandler(logging.Handler):
+    """Переводит логи сторонних библиотек (telegram, httpx) в loguru.
+
+    Без этого в ``pythonw`` у python-telegram-bot нет консоли, и ошибки
+    polling'а/обработчиков уходили в никуда: в файл попадали только наши
+    сообщения.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level: str | int = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        try:
+            # Без depth: неверная глубина стека уронила бы сам обработчик,
+            # и сообщение снова потерялось бы — важнее доставить его.
+            logger.opt(exception=record.exc_info).log(level, record.getMessage())
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _bridge_stdlib(level: str) -> None:
+    handler = _InterceptHandler()
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(level.upper())
+    # HTTP-клиенты на INFO пишут каждый запрос (в URL Telegram — токен),
+    # поэтому им достаточно предупреждений и ошибок.
+    levels = {
+        "telegram": level.upper(),
+        "httpx": "WARNING",
+        "httpcore": "WARNING",
+        "urllib3": "WARNING",
+        "asyncio": "WARNING",
+    }
+    for name, lib_level in levels.items():
+        lib = logging.getLogger(name)
+        lib.handlers = [handler]
+        lib.propagate = False
+        lib.setLevel(lib_level)
+
 
 _CONSOLE_FORMAT = (
     "<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | "
@@ -81,6 +125,7 @@ def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
             diagnose=False,
         )
 
+    _bridge_stdlib(level)
     _configured = True
 
 

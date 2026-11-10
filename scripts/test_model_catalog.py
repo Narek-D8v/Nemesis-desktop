@@ -43,9 +43,20 @@ def test_parsers() -> None:
     openrouter = parse_openrouter(
         {
             "data": [
-                {"id": "google/gemma:free", "pricing": {"prompt": "0"}},
+                {
+                    "id": "google/gemma:free",
+                    "pricing": {"prompt": "0", "completion": "0"},
+                },
                 {"id": "openai/gpt-4o-mini", "pricing": {"prompt": "0.00015"}},
                 {"id": "meta/llama", "pricing": {}},  # без цены — платная
+                # цена -1 значит «неизвестна» (роутер), а не «бесплатно»
+                {"id": "openrouter/auto", "pricing": {"prompt": "-1"}},
+                # музыкальная модель: вывод не текст, в чате бесполезна
+                {
+                    "id": "google/lyria",
+                    "pricing": {"prompt": "0", "completion": "0"},
+                    "architecture": {"output_modalities": ["audio"]},
+                },
                 {"id": ""},  # мусор пропускается
             ]
         }
@@ -54,27 +65,29 @@ def test_parsers() -> None:
         ("openrouter/google/gemma:free", True),
         ("openrouter/openai/gpt-4o-mini", False),
         ("openrouter/meta/llama", False),
+        ("openrouter/auto", False),
     ], openrouter
 
     gemini = parse_gemini(
         {
             "models": [
-                {"name": "models/gemini-2.0-flash",
+                {"name": "models/gemini-3.5-flash-lite",
                  "supportedGenerationMethods": ["generateContent", "countTokens"]},
                 {"name": "models/embedding-001",
                  "supportedGenerationMethods": ["embedContent"]},
-                {"name": "models/gemini-2.5-pro"},  # без списка методов — годится
+                {"name": "models/gemini-3.1-pro-preview"},  # Pro — платная
+                {"name": "models/gemini-3-pro-image"},  # картинки — не для чата
             ]
         }
     )
     assert gemini == [
-        ("gemini/gemini-2.0-flash", True),
-        ("gemini/gemini-2.5-pro", True),
+        ("gemini/gemini-3.5-flash-lite", True),
+        ("gemini/gemini-3.1-pro-preview", False),
     ], gemini
 
     ollama = parse_ollama({"models": [{"name": "llama3.2:latest"}, {"name": ""}]})
     assert ollama == [("ollama/llama3.2:latest", True)], ollama
-    print("ok  парсеры: openrouter (free/цена), gemini (методы), ollama (имена)")
+    print("ok  парсеры: OpenRouter без «-1»-цен и музыки, Gemini flash/Pro")
 
 
 def test_fallback_without_network() -> None:
