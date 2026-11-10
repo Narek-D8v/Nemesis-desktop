@@ -15,12 +15,15 @@ import mimetypes
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
-import numpy as np
 
 from nemus.utils.logger import logger
+
+if TYPE_CHECKING:  # numpy нужен только локальному Whisper: импорт ленивый,
+    # чтобы облачная расшифровка работала в контейнере без numpy (Telegram).
+    import numpy as np
 
 #: таймаут одной расшифровки, сек: голосовое в Telegram редко длиннее минуты
 CLOUD_TIMEOUT = 120.0
@@ -264,6 +267,8 @@ class STTEngine:
 
     def transcribe(self, audio: np.ndarray | bytes) -> str:
         """Распознаёт PCM-аудио (int16 @16кГц или float32) в текст."""
+        import numpy as np  # ленивый импорт: облачному STT numpy не нужен
+
         if isinstance(audio, bytes):
             audio = np.frombuffer(audio, dtype=np.int16)
         if audio.size == 0:
