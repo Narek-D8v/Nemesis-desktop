@@ -1030,6 +1030,10 @@ def test_gui(tmp: Path) -> None:
         _wait(app, lambda: "gui-local" in dlg.status.text())
         assert dlg.plugin_tabs.currentIndex() == dlg.plugin_installed_tab
         # скилл из плагина — во второй группе «Скачанных», без своих «⟳»/«×»
+        # (ждём сам заголовок, а не побочные признаки: список пересобирается
+        # в _on_plugin_local_installed уже после статуса — на ровной гонке
+        # ассерт видел ещё пустую группу)
+        _wait(app, lambda: _headers(dlg._installed_box) == ["В составе плагинов (1)"])
         assert _headers(dlg._installed_box) == ["В составе плагинов (1)"], _headers(
             dlg._installed_box
         )
