@@ -183,30 +183,40 @@ venv\Scripts\python.exe -m compileall -q nemus scripts
 ```bat
 venv\Scripts\python.exe scripts\test_language.py      # язык, фильтр рассуждений, i18n
 venv\Scripts\python.exe scripts\test_tools.py         # инструменты и sandbox
-venv\Scripts\python.exe scripts\test_content_tools.py # STT, изображения, презентации, видео, скиллы
+venv\Scripts\python.exe scripts\test_shell.py         # run_shell: таймауты, фон, кодировка
+venv\Scripts\python.exe scripts\test_process.py      # запуск процессов и приложений
+venv\Scripts\python.exe scripts\test_content_tools.py # изображения, презентации, видео, скиллы
 venv\Scripts\python.exe scripts\test_notes.py         # заметки о пользователе (NoteBook)
 venv\Scripts\python.exe scripts\test_realtime.py     # протоколы Gemini/OpenAI Realtime
 venv\Scripts\python.exe scripts\test_history.py       # история: пары tool-calls ↔ результаты
+venv\Scripts\python.exe scripts\test_sessions.py     # сессии диалогов и переключение агента
 venv\Scripts\python.exe scripts\test_llm_fallback.py  # обрыв стрима LLM и маскировка ключей
 venv\Scripts\python.exe scripts\test_model_catalog.py # каталог моделей: бесплатно/платно, поиск и фильтр в настройках
 venv\Scripts\python.exe scripts\test_reminders.py    # отложенные напоминания (remind)
 venv\Scripts\python.exe scripts\test_skills.py       # скиллы Claude Agent Skills (SKILL.md)
+venv\Scripts\python.exe scripts\test_skill_store.py  # магазин скиллов: каталог, установка, обновление
+venv\Scripts\python.exe scripts\test_context_budget.py # бюджеты контекста и быстрый путь реплик
 venv\Scripts\python.exe scripts\test_spotify.py       # Spotify Web API
 venv\Scripts\python.exe scripts\test_browser.py       # browser_open и fallback на системный браузер
+venv\Scripts\python.exe scripts\test_telegram.py       # Telegram-бот: доступ, файлы, кружки, инструмент (без сети)
 venv\Scripts\python.exe scripts\test_wake_skills.py   # навыки wake word
+venv\Scripts\python.exe scripts\smoke_agent.py        # агентный цикл с фиктивным LLM
 venv\Scripts\python.exe scripts\smoke_gui.py          # сборка окна без показа
 venv\Scripts\python.exe scripts\smoke_realtime_app.py # интеграция realtime и GUI
 ```
 
 Для GUI-скриптов в headless-среде задайте `QT_QPA_PLATFORM=offscreen`.
-Часть скриптов (`test_voice.py`, `test_wake_*.py`, `test_local_live.py`)
-требует микрофон, модель wake word или API-ключ. Офлайн-скрипты
-(`test_language.py`, `test_tools.py`, `test_realtime.py`,
-`test_history.py`, `test_llm_fallback.py`, `test_model_catalog.py`,
-`test_reminders.py`,
-`test_skills.py`,
-`smoke_gui.py`, `smoke_realtime_app.py`) запускаются автоматически в CI
-(`.github/workflows/tests.yml`).
+Часть скриптов (`test_voice.py`, `test_wake_*.py`, `test_local_live.py`,
+`test_spotify.py`) требует микрофон, модель wake word или API-ключ.
+Офлайн-скрипты запускаются автоматически в CI
+(`.github/workflows/tests.yml`): `test_language.py`, `test_tools.py`,
+`test_shell.py`, `test_process.py`, `test_mcp.py`, `test_mcp_layout.py`,
+`test_browser.py`, `test_realtime.py`, `test_history.py`,
+`test_sessions.py`, `test_memory_concurrency.py`, `test_headless.py`,
+`test_llm_fallback.py`, `test_model_catalog.py`, `test_reminders.py`,
+`test_notes.py`, `test_skills.py`, `test_skill_store.py`,
+`test_content_tools.py`, `test_context_budget.py`, `test_telegram.py`,
+`smoke_agent.py`, `smoke_gui.py`, `smoke_realtime_app.py`.
 
 ## MCP-серверы
 
