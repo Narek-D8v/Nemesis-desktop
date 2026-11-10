@@ -28,6 +28,19 @@ from nemus.utils.logger import logger
 
 PLUGINS_DIR = PROJECT_ROOT / "plugins"
 
+#: суффикс системного промпта агента, живущего в GUI-приложении.
+#: Каждое финальное сообщение окна автоматически прогоняется через TTS
+#: (main_window: speak_request), поэтому модель обязана знать: чтобы
+#: «сказать вслух», достаточно написать текст — скрипты и библиотеки
+#: воспроизведения звука не нужны и являются галлюцинацией.
+GUI_AGENT_SUFFIX = (
+    "СЕЙЧАС ТЫ РАБОТАЕШЬ В ОКОННОМ ПРИЛОЖЕНИИ НА КОМПЬЮТЕРЕ ПОЛЬЗОВАТЕЛЯ.\n"
+    "Каждый твой финальный ответ автоматически озвучивается голосом. На "
+    "просьбы «скажи / произнеси / прочитай вслух» просто пиши нужный "
+    "текст ответом — он будет произнесён. Никаких скриптов, библиотек и "
+    "инструментов для воспроизведения звука не нужно и не предлагай их."
+)
+
 
 @dataclass
 class Core:
@@ -52,6 +65,7 @@ class Core:
             permissions=self.permissions,
             confirm=confirm,
             memory=self.memory,
+            system_suffix=GUI_AGENT_SUFFIX,
         )
 
     def reload(self, config: Config, confirm: ConfirmCallback | None = None) -> None:
@@ -251,8 +265,17 @@ def _inject_llm(registry: ToolRegistry, llm: LLMClient) -> None:
             tool.llm = llm
 
 
-def build_core(config: Config, confirm: ConfirmCallback | None = None) -> Core:
-    """Создаёт и связывает подсистемы ядра."""
+def build_core(
+    config: Config,
+    confirm: ConfirmCallback | None = None,
+    system_suffix: str = GUI_AGENT_SUFFIX,
+) -> Core:
+    """Создаёт и связывает подсистемы ядра.
+
+    ``system_suffix`` — блок промпта конкретного интерфейса. По умолчанию
+    GUI-приложение (озвучка финалов); headless-режим передаёт пустую строку
+    и строит своего агента со своим суффиксом (см. TelegramBot).
+    """
     registry = ToolRegistry()
     registry.register_many(all_builtin_tools())
     registry.register_many(generate_tools())
@@ -294,6 +317,7 @@ def build_core(config: Config, confirm: ConfirmCallback | None = None) -> Core:
         permissions=permissions,
         confirm=confirm,
         memory=memory,
+        system_suffix=system_suffix,
     )
 
     return Core(

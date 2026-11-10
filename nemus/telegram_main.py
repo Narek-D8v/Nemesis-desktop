@@ -156,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     stop = threading.Event()
     _install_signals(stop)
     try:
-        core = build_core(config)
+        core = build_core(config, system_suffix="")
         bot = TelegramBot(config, core)
         if not bot.start(wait=True):
             logger.error("Telegram-бот не запустился — смотри лог выше.")
