@@ -113,6 +113,11 @@ def test_system_prompt_language() -> None:
         assert "ПРАВИЛО РАСШИРЕНИЯ" in prompt, prompt
         assert "ПРАВИЛО ВЫВОДА" in prompt, prompt
         assert "НИКОГДА не отдавай пользователю код" in prompt, prompt
+        # брейншторм: не только правило формата, но и готовый образец —
+        # слабая модель держит формат, копируя пример
+        assert "ПРАВИЛО БРЕЙНШТОРМА" in prompt, prompt
+        assert "D) Свой вариант: _________" in prompt, prompt
+        assert "1. Вход:" in prompt, prompt
 
         cfg.assistant.reply_language = "en"
         prompt_en = build_system_prompt(cfg, registry)
@@ -443,7 +448,58 @@ def test_quick_replies_and_simple_requests() -> None:
     assert not is_simple_request("Write a sorting function")
     assert not is_simple_request("Tell me a joke")
     assert not is_simple_request("Make a presentation about cats")
+    # репродукция речи и правки — задачи, а не светская реплика
+    assert not is_simple_request("Скажи «привет» вслух")
+    assert not is_simple_request("Произнеси эту фразу через динамик")
+    assert not is_simple_request("Прочитай вслух последний абзац")
+    assert not is_simple_request("Повтори то, что ты сказала")
+    assert not is_simple_request("Доработай функцию парсинга")
+    assert not is_simple_request("Поправь тесты в проекте")
+    assert not is_simple_request("Обнови зависимости")
+    assert not is_simple_request("Рефакторни модуль auth")
+    assert not is_simple_request("Say this phrase out loud")
+    assert not is_simple_request("Read it aloud")
+    assert not is_simple_request("Polish the intro")
+    assert not is_simple_request("Tweak the parser")
     print("ok  короткие реплики и простые запросы: ru + en")
+
+
+def test_promise_and_deferral() -> None:
+    """Обещание и отсрочка вместо действия (цитаты из реального лога)."""
+    from nemus.core.agent import is_promise_only
+    from nemus.core.language import looks_like_deferral
+
+    # лёгкая модель отвечала так на «произнеси фразу» без инструментов
+    assert is_promise_only("Секунду, сейчас запустим!")
+    assert is_promise_only("Секунду!")
+    assert is_promise_only("Сейчас сделаем и проверим.")
+    assert is_promise_only("Приступаем!")
+    assert is_promise_only("Погоди, сейчас начну.")
+    assert is_promise_only("I'll start right now.")
+    # отчёт с результатом — уже не обещание
+    assert not is_promise_only("Готово: файл сохранён в data/out.txt")
+    assert not is_promise_only("Ответ: 42.")
+    assert not is_promise_only("Сделано, тесты зелёные.")
+    # брейншторм — не обещание: иначе nudge зациклится на уточнениях
+    board = (
+        "Поняла задачу: скрипт парсит лог. Уточню:\n"
+        "1. Вход:\nA) файл из аргумента (рекомендую)\nB) папка\n"
+        "D) Свой вариант: _________\n"
+        "2. Вывод:\nA) консоль (рекомендую)\nB) CSV\nD) Свой вариант: ___\n"
+        "Ответь коротко: 1A, 2B"
+    )
+    assert not is_promise_only(board), board
+
+    # быстрый путь: задача с обещанием/разрешением не должна стать финалом
+    assert looks_like_deferral(
+        "Ой, для этого мне понадобится запустить скрипт на твоём компьютере! "
+        "Сначала проверю доступ к библиотеке для воспроизведения звука. Делаем?"
+    )
+    assert looks_like_deferral("Запустить?")
+    assert looks_like_deferral("Should I run the script?")
+    assert not looks_like_deferral("Конечно, спрашивай!")
+    assert not looks_like_deferral("Как здорово! Обожаю такие вещи.")
+    print("ok  обещания и отсрочки: we-формы, «секунду», защита быстрого пути")
 
 
 def _permissions():
@@ -468,6 +524,7 @@ def main() -> int:
         test_i18n,
         test_gui_language_switch,
         test_quick_replies_and_simple_requests,
+        test_promise_and_deferral,
     )
     failures = 0
     for test in tests:

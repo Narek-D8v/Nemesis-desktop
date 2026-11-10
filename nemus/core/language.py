@@ -237,6 +237,10 @@ SIMPLE_EXCLUDE: tuple[str, ...] = (
     "удали", "измени", "сайт", "таблиц", "документ", "pdf", "excel",
     "word", "zip", "архив", "http", "d:\\", "c:\\", "работай",
     "продолжай", "анекдот", "шутк", "прикол", "смешн", "юмор",
+    # репродукция речи и правки: «скажи вслух», «прочитай», «доработай» —
+    # это задачи, а не светская реплика
+    "произнес", "скаж", "озвуч", "прочит", "повтор", "зачит", "продикт",
+    "спой", "вслух", "доработ", "поправ", "обнов", "рефактор", "перепиш",
     # en
     "remind", "timer", "alarm", "weather", "forecast", "currency",
     "exchange rate", "what time", "clock", "date", "day of the week",
@@ -255,6 +259,8 @@ SIMPLE_EXCLUDE: tuple[str, ...] = (
     "table", "spreadsheet", "document", "pdf", "excel", "word", "zip",
     "archive", "http", "d:\\", "c:\\", "work on", "continue", "joke",
     "funny", "humor",
+    "say", "speak", "aloud", "read aloud", "read out", "repeat",
+    "dictate", "sing", "polish", "tweak",
 )
 
 #: предел длины простой реплики
@@ -269,6 +275,19 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "policy prohibits",
     "rejected by the user",
     "user declined",
+)
+
+#: откладывание работы или просьба разрешения: быстрый путь лёгкой модели
+#: идёт без инструментов, поэтому такой «ответ» нельзя отдавать как финал —
+#: запрос обязан уйти в основной цикл (ru + en, подстрока в нижнем регистре)
+DEFERRAL_MARKERS: tuple[str, ...] = (
+    # ru
+    "делаем", "давай", "хочешь", "запустить", "запускать", "запущу",
+    "скрипт", "код на", "библиотек", "понадобится", "подтверд",
+    "разрешени", "сделать это", "начать",
+    # en
+    "do we", "should i", "shall i", "shall we", "want me", "let me",
+    "run the", "script", "library", "confirm", "permission",
 )
 
 
@@ -294,6 +313,20 @@ def is_simple_request(text: str) -> bool:
     return not any(marker in low for marker in SIMPLE_EXCLUDE)
 
 
+def looks_like_deferral(text: str) -> bool:
+    """Похоже ли сообщение на откладывание работы или просьбу разрешения.
+
+    Быстрый путь лёгкой модели выполняется без инструментов: если реплика
+    всё же вышла «запущу скрипт, делаем?» или «сначала проверю доступ к
+    библиотеке», её нельзя отдавать пользователю как финал — задача
+    тихо умрёт без единого вызова инструмента.
+    """
+    low = (text or "").strip().lower()
+    if not low or len(low) > 400:
+        return False
+    return any(marker in low for marker in DEFERRAL_MARKERS)
+
+
 __all__ = [
     "REPLY_AUTO",
     "REPLY_CHOICES",
@@ -302,6 +335,7 @@ __all__ = [
     "SIMPLE_EXCLUDE",
     "SIMPLE_MAX_CHARS",
     "DENIAL_MARKERS",
+    "DEFERRAL_MARKERS",
     "normalize",
     "detect_language",
     "language_name",
@@ -312,4 +346,5 @@ __all__ = [
     "reply_key",
     "quick_reply",
     "is_simple_request",
+    "looks_like_deferral",
 ]
