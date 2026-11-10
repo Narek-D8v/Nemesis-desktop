@@ -1193,6 +1193,7 @@ class ChatView(QTextBrowser):
         if self._thought_idx is None:
             self.thought_start()
         assert self._thought_idx is not None
+        assert self._thought_id is not None
         self._thought_buf += text
         now = time.monotonic()
         if now - self._last_thought_render < self.STREAM_INTERVAL:
@@ -1213,7 +1214,11 @@ class ChatView(QTextBrowser):
 
     def _flush_thought(self) -> None:
         """Дорисовывает накопленный буфер мыслей (таймер после паузы)."""
-        if self._thought_idx is None or not self._thought_dirty:
+        if (
+            self._thought_idx is None
+            or self._thought_id is None
+            or not self._thought_dirty
+        ):
             return
         self._thought_dirty = False
         self._last_thought_render = time.monotonic()
@@ -1230,6 +1235,7 @@ class ChatView(QTextBrowser):
             return
         idx = self._thought_idx
         tid = self._thought_id
+        assert tid is not None  # id ставится и снимается вместе с idx
         self._thought_dirty = False
         if not self._thought_buf.strip():
             self._blocks.pop(idx)

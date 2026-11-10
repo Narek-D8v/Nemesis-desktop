@@ -43,7 +43,7 @@ class EnergyVAD:
     def speaking(self) -> bool:
         return self._speaking
 
-    def feed(self, block: np.ndarray, block_ms: int) -> str:
+    def feed(self, block: np.ndarray, block_ms: int) -> str | None:
         """Обрабатывает блок, возвращает событие: 'start'|'end'|None."""
         energy = float(np.sqrt(np.mean(block.astype(np.float32) ** 2)))
         is_speech = energy >= self.threshold

@@ -340,7 +340,7 @@ class GitHubClient:
         self._repos: dict[str, dict[str, Any]] = {}
         self._trees: dict[tuple[str, str], list[dict[str, Any]]] = {}
         #: разобранные скиллы репозитория: повторное открытие витрины — мгновенно
-        self._skills: dict[tuple[str, str], list[StoreSkill]] = {}
+        self._skills: dict[tuple[str, str], tuple[int, list[StoreSkill]]] = {}
         #: разобранные плагины репозитория (кэш тот же, ключ другой)
         self._plugins: dict[tuple[str, str], tuple[int, list[StorePlugin]]] = {}
         self._cache: dict[str, Any] | None = None

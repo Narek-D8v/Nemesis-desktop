@@ -1152,11 +1152,11 @@ class Agent:
             if response.content:
                 yield AgentEvent(kind="assistant_text", text=response.content)
 
-            images: list[str] = []
+            tool_images: list[str] = []
             for call in response.tool_calls:
-                yield from self._handle_tool_call(call, images)
-            if images:
-                self._add_vision_message(images)
+                yield from self._handle_tool_call(call, tool_images)
+            if tool_images:
+                self._add_vision_message(tool_images)
             step += 1  # содержательный ответ засчитан — идём дальше
             # «сердцебиение»: шаг завершён — дедлайн простоя сдвигается от
             # текущего момента (иначе опрос фоновой команды каждые 10 с
