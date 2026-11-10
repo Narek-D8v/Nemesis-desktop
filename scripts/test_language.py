@@ -410,6 +410,42 @@ def _registry():
     return registry
 
 
+def test_quick_replies_and_simple_requests() -> None:
+    """Двуязычные короткие реплики и классификация простых запросов."""
+    from nemus.core.language import is_simple_request, quick_reply
+
+    # мгновенные ответы без модели: прямое обращение, приветствие, спасибо
+    assert quick_reply("Немуся?!") == "Да, я здесь. Чем помочь?"
+    assert quick_reply("Немуся, привет!") == "Привет! Я здесь. Чем помочь?"
+    assert quick_reply("Как дела?") == "Всё хорошо, спасибо! А у тебя?"
+    assert quick_reply("Спасибо.") == "Пожалуйста!"
+    assert quick_reply("Hello!") == "Hello! I'm here. How can I help?"
+    assert quick_reply("Nemesis?!") == "Yes, I'm here. How can I help?"
+    assert quick_reply("Hey, Nemesis!") == "Hi! I'm here. How can I help?"
+    assert quick_reply("Are you there?") == "Yes, I'm here."
+    assert quick_reply("How are you?") == "I'm doing great! And you?"
+    assert quick_reply("Thanks!") == "You're welcome!"
+    # не прямое обращение — мгновенного ответа нет
+    assert quick_reply("Расскажи про квантовую физику") is None
+    assert quick_reply("Tell me about quantum physics") is None
+
+    # простая светская реплика идёт по быстрому пути, задача — нет
+    assert is_simple_request("Что ты умеешь?")
+    assert is_simple_request("Lovely evening, isn't it?")
+    assert not is_simple_request("Который час?")
+    assert not is_simple_request("Открой блокнот")
+    assert not is_simple_request("Напиши функцию сортировки")
+    assert not is_simple_request("Слушай анекдот: Oct 31 == Dec 25")
+    assert not is_simple_request("Remind me in five minutes")
+    assert not is_simple_request("What's the weather today?")
+    assert not is_simple_request("What time is it?")
+    assert not is_simple_request("Open notepad please")
+    assert not is_simple_request("Write a sorting function")
+    assert not is_simple_request("Tell me a joke")
+    assert not is_simple_request("Make a presentation about cats")
+    print("ok  короткие реплики и простые запросы: ru + en")
+
+
 def _permissions():
     from nemus.core.permissions import PermissionManager
 
@@ -431,6 +467,7 @@ def main() -> int:
         test_stream_hides_reasoning,
         test_i18n,
         test_gui_language_switch,
+        test_quick_replies_and_simple_requests,
     )
     failures = 0
     for test in tests:

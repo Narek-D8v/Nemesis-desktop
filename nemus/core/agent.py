@@ -12,10 +12,13 @@ from typing import TYPE_CHECKING, Any, Callable, Generator, Iterator, Literal
 
 from nemus.config import PROJECT_ROOT, Config
 from nemus.core.language import (
+    DENIAL_MARKERS,
     REPLY_AUTO,
     anti_reasoning_directive,
     detect_language,
+    is_simple_request,
     normalize,
+    quick_reply,
     reply_language_directive,
 )
 from nemus.core.llm import LLMClient
@@ -49,10 +52,6 @@ PROMISE_RETRIES = 2
 #: неудач подряд на один инструмент, после которых модели предлагается
 #: сменить способ (а не долбить одно и то же)
 FAIL_ATTEMPTS = 3
-
-#: маркеры отказа, после которых повторный вызов бессмыслен
-#: (политика или пользователь решили — не настаиваем)
-_DENIAL_MARKERS = ("запрещён политикой", "отклонил")
 
 #: приписка к неудачному результату — модель обязана переделать, а не
 #: отдавать ошибку пользователю
@@ -94,43 +93,6 @@ TOOL_OUTPUT_LIMIT = 12000
 #: названия ОС из настроек → как писать в системном промпте
 _OS_NAMES = {"windows": "Windows", "linux": "Linux", "macos": "macOS", "mac": "macOS"}
 
-#: совсем короткие реплики, на которые можно ответить без модели
-_QUICK_REPLIES = {
-    "немуся": "Да, я здесь. Чем помочь?",
-    "немо": "Да, я здесь. Чем помочь?",
-    "немесис": "Да, я здесь. Чем помочь?",
-    "немуся привет": "Привет! Я здесь. Чем помочь?",
-    "привет немуся": "Привет! Я здесь. Чем помочь?",
-    "привет": "Привет! Чем помочь?",
-    "здравствуй": "Здравствуй! Чем помочь?",
-    "ты тут": "Да, я здесь.",
-    "ты здесь": "Да, я здесь.",
-    "немуся ты тут": "Да, я здесь.",
-    "немуся ты здесь": "Да, я здесь.",
-    "на связи": "Да, на связи.",
-    "как дела": "Всё хорошо, спасибо! А у тебя?",
-    "как ты": "Всё отлично! А как ты?",
-    "спасибо": "Пожалуйста!",
-    "благодарю": "Пожалуйста!",
-    "hello": "Hello! I'm here. How can I help?",
-    "hi": "Hi! How can I help?",
-}
-#: маркеры задач: такую реплику нельзя отдавать в быстрый путь без инструментов
-_SIMPLE_EXCLUDE = (
-    "напомн", "таймер", "будильник", "погод", "курс", "который час",
-    "сколько времени", "дата", "день недели", "открой", "закрой", "запусти",
-    "включи", "выключи", "громк", "найди", "покажи", "проверь", "установи",
-    "скачай", "создай", "сделай", "сгенерируй", "нарисуй", "презентац",
-    "видео", "картин", "фото", "файл", "папк", "скрин", "код", "скрипт",
-    "ошибк", "исправь", "почини", "напиши", "расскажи", "объясни",
-    "обработа", "улучш", "переделай", "придумай",
-    "переведи", "посчитай", "сравни", "план", "идеи", "брейншторм",
-    "музык", "песн", "стим", "телеграм", "почт", "отправь", "пришли",
-    "удали", "измени", "сайт", "таблиц", "документ", "pdf", "excel",
-    "word", "zip", "архив", "http", "d:\\", "c:\\", "работай",
-    "продолжай", "анекдот", "шутк", "прикол", "смешн", "юмор",
-)
-_SIMPLE_MAX_CHARS = 160
 #: обещание вместо действия: такой текст не является финальным ответом
 _PROMISE_RE = re.compile(
     r"(?:\b(?:сейчас|сразу|уже)\s+(?:сделаю|выполню|приступлю|начну|займусь|"
@@ -158,28 +120,6 @@ def is_promise_only(text: str) -> bool:
     if any(marker in low for marker in _RESULT_MARKERS):
         return False
     return bool(_PROMISE_RE.search(low))
-
-
-def _reply_key(text: str) -> str:
-    """Ключ для коротких реплик: без пунктуации и лишних пробелов."""
-    key = re.sub(r"[^\w\s]", " ", (text or "").lower())
-    return re.sub(r"\s+", " ", key).strip()
-
-
-def quick_reply(text: str) -> str | None:
-    """Мгновенный ответ на прямое обращение, приветствие или спасибо."""
-    return _QUICK_REPLIES.get(_reply_key(text))
-
-
-def is_simple_request(text: str) -> bool:
-    """Короткая светская реплика, которой не нужны инструменты и скиллы."""
-    raw = (text or "").strip()
-    if not raw or len(raw) > _SIMPLE_MAX_CHARS or "\n" in raw:
-        return False
-    if raw.startswith("/"):
-        return False
-    low = raw.lower()
-    return not any(marker in low for marker in _SIMPLE_EXCLUDE)
 
 
 @dataclass
@@ -1302,7 +1242,7 @@ class Agent:
         if result.ok:
             self._tool_failures.pop(name, None)
             return content
-        if any(marker in content for marker in _DENIAL_MARKERS):
+        if any(marker in content for marker in DENIAL_MARKERS):
             return content
         attempts = self._tool_failures.get(name, 0) + 1
         self._tool_failures[name] = attempts

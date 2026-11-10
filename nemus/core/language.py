@@ -179,10 +179,129 @@ def hallucination_guard_directive() -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+#  Короткие реплики, простые запросы и маркеры отказа (ru + en)
+# ---------------------------------------------------------------------------
+
+#: мгновенные ответы без модели: прямое обращение, приветствие, спасибо.
+#: Ключ — нормализованная реплика (нижний регистр, без пунктуации).
+QUICK_REPLIES: dict[str, str] = {
+    # русский
+    "немуся": "Да, я здесь. Чем помочь?",
+    "немо": "Да, я здесь. Чем помочь?",
+    "немесис": "Да, я здесь. Чем помочь?",
+    "немуся привет": "Привет! Я здесь. Чем помочь?",
+    "привет немуся": "Привет! Я здесь. Чем помочь?",
+    "привет": "Привет! Чем помочь?",
+    "здравствуй": "Здравствуй! Чем помочь?",
+    "ты тут": "Да, я здесь.",
+    "ты здесь": "Да, я здесь.",
+    "немуся ты тут": "Да, я здесь.",
+    "немуся ты здесь": "Да, я здесь.",
+    "на связи": "Да, на связи.",
+    "как дела": "Всё хорошо, спасибо! А у тебя?",
+    "как ты": "Всё отлично! А как ты?",
+    "спасибо": "Пожалуйста!",
+    "благодарю": "Пожалуйста!",
+    # english
+    "hello": "Hello! I'm here. How can I help?",
+    "hi": "Hi! How can I help?",
+    "nemesis": "Yes, I'm here. How can I help?",
+    "nemo": "Yes, I'm here. How can I help?",
+    "nemesis hello": "Hi! I'm here. How can I help?",
+    "hello nemesis": "Hi! I'm here. How can I help?",
+    "hey nemesis": "Hi! I'm here. How can I help?",
+    "hi nemesis": "Hi! I'm here. How can I help?",
+    "nemesis are you there": "Yes, I'm here.",
+    "are you there": "Yes, I'm here.",
+    "are you here": "Yes, I'm here.",
+    "you there": "Yes, I'm here.",
+    "how are you": "I'm doing great! And you?",
+    "thanks": "You're welcome!",
+    "thank you": "You're welcome!",
+}
+
+#: маркеры задач: такая реплика не может уйти в быстрый путь без
+#: инструментов (подстрока в нижнем регистре; ru + en)
+SIMPLE_EXCLUDE: tuple[str, ...] = (
+    # ru
+    "напомн", "таймер", "будильник", "погод", "курс", "который час",
+    "сколько времени", "дата", "день недели", "открой", "закрой", "запусти",
+    "включи", "выключи", "громк", "найди", "покажи", "проверь", "установи",
+    "скачай", "создай", "сделай", "сгенерируй", "нарисуй", "презентац",
+    "видео", "картин", "фото", "файл", "папк", "скрин", "код", "скрипт",
+    "ошибк", "исправь", "почини", "напиши", "расскажи", "объясни",
+    "обработа", "улучш", "переделай", "придумай",
+    "переведи", "посчитай", "сравни", "план", "идеи", "брейншторм",
+    "музык", "песн", "стим", "телеграм", "почт", "отправь", "пришли",
+    "удали", "измени", "сайт", "таблиц", "документ", "pdf", "excel",
+    "word", "zip", "архив", "http", "d:\\", "c:\\", "работай",
+    "продолжай", "анекдот", "шутк", "прикол", "смешн", "юмор",
+    # en
+    "remind", "timer", "alarm", "weather", "forecast", "currency",
+    "exchange rate", "what time", "clock", "date", "day of the week",
+    "weekday", "open", "close", "launch", "start", "run", "turn on",
+    "turn off", "switch on", "switch off", "volume", "mute", "find",
+    "search", "look up", "show", "display", "check", "verify", "install",
+    "download", "upload", "create", "build", "generate", "draw", "paint",
+    "design", "presentation", "slides", "video", "image", "picture",
+    "photo", "file", "folder", "directory", "screenshot", "screen",
+    "code", "script", "error", "bug", "fix", "repair", "debug", "write",
+    "tell me", "explain", "process", "improve", "redo", "rewrite",
+    "refactor", "translate", "calculate", "compute", "count", "compare",
+    "plan", "idea", "brainstorm", "music", "song", "playlist", "spotify",
+    "steam", "telegram", "email", "mail", "send", "share", "delete",
+    "remove", "change", "modify", "edit", "update", "website", "site",
+    "table", "spreadsheet", "document", "pdf", "excel", "word", "zip",
+    "archive", "http", "d:\\", "c:\\", "work on", "continue", "joke",
+    "funny", "humor",
+)
+
+#: предел длины простой реплики
+SIMPLE_MAX_CHARS = 160
+
+#: маркеры отказа, после которых повторный вызов бессмыслен
+#: (политика или пользователь решили — не настаиваем; ru + en)
+DENIAL_MARKERS: tuple[str, ...] = (
+    "запрещён политикой",
+    "отклонил",
+    "denied by policy",
+    "policy prohibits",
+    "rejected by the user",
+    "user declined",
+)
+
+
+def reply_key(text: str) -> str:
+    """Ключ для коротких реплик: без пунктуации и лишних пробелов."""
+    key = re.sub(r"[^\w\s]", " ", (text or "").lower())
+    return re.sub(r"\s+", " ", key).strip()
+
+
+def quick_reply(text: str) -> str | None:
+    """Мгновенный ответ на прямое обращение, приветствие или спасибо."""
+    return QUICK_REPLIES.get(reply_key(text))
+
+
+def is_simple_request(text: str) -> bool:
+    """Короткая светская реплика, которой не нужны инструменты и скиллы."""
+    raw = (text or "").strip()
+    if not raw or len(raw) > SIMPLE_MAX_CHARS or "\n" in raw:
+        return False
+    if raw.startswith("/"):
+        return False
+    low = raw.lower()
+    return not any(marker in low for marker in SIMPLE_EXCLUDE)
+
+
 __all__ = [
     "REPLY_AUTO",
     "REPLY_CHOICES",
     "LANGUAGE_NAMES",
+    "QUICK_REPLIES",
+    "SIMPLE_EXCLUDE",
+    "SIMPLE_MAX_CHARS",
+    "DENIAL_MARKERS",
     "normalize",
     "detect_language",
     "language_name",
@@ -190,4 +309,7 @@ __all__ = [
     "reply_language_directive",
     "anti_reasoning_directive",
     "hallucination_guard_directive",
+    "reply_key",
+    "quick_reply",
+    "is_simple_request",
 ]

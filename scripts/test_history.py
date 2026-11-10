@@ -308,7 +308,13 @@ def test_error_directives_sequence() -> None:
     out = agent._model_tool_content("run_shell", denied)
     assert "ЗАДАНИЕ НЕ ВЫПОЛНЕНО" not in out, out
     assert agent._tool_failures.get("run_shell") is None, agent._tool_failures
-    print("ok  последовательность директив: 1-2 повтор, 3-я смена способа, отказы молча")
+
+    # отказ на английском — тоже не дёргаем повторами
+    denied_en = ToolResult.failure("Tool 'run_shell' was denied by policy.")
+    out_en = agent._model_tool_content("run_shell", denied_en)
+    assert "ЗАДАНИЕ НЕ ВЫПОЛНЕНО" not in out_en, out_en
+    assert agent._tool_failures.get("run_shell") is None, agent._tool_failures
+    print("ok  последовательность директив: 1-2 повтор, 3-я смена способа, отказы (ru/en) молча")
 
 
 def test_loop_and_budget_stops() -> None:
