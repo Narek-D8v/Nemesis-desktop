@@ -1,0 +1,24 @@
+# Постоянный Telegram-бот Немуси на любом хосте с Docker.
+# 1) cp .env.telegram.example .env.telegram и заполни
+# 2) docker compose -f docker-compose.telegram.yml up -d --build
+# 3) docker compose -f docker-compose.telegram.yml logs -f
+
+services:
+  nemus-telegram:
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram
+    image: nemus-telegram:latest
+    container_name: nemus-telegram
+    restart: unless-stopped
+    env_file:
+      - .env.telegram
+    volumes:
+      - ./data:/app/data
+    # Long polling не требует открытых портов — только исходящий HTTPS.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

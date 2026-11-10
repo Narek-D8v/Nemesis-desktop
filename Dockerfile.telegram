@@ -1,0 +1,33 @@
+# Немуся в режиме «только Telegram-бот» — для постоянного хоста без ноутбука.
+# Сборка:  docker build -f Dockerfile.telegram -t nemus-telegram .
+# Запуск:  docker compose -f docker-compose.telegram.yml up -d --build
+
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ffmpeg нужен для голосовых/видео-кружков, ca-certificates — для HTTPS.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements-telegram.txt ./
+RUN python -m pip install --no-cache-dir -r requirements-telegram.txt
+
+COPY . .
+
+# Рабочая папка, история и логи должны переживать пересборку контейнера.
+VOLUME ["/app/data"]
+
+# Heartbeat обновляет живой polling; одного --check мало — он не заметит
+# умерший процесс. При потере heartbeat контейнер станет unhealthy.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=3 \
+    CMD python -m nemus --telegram --health || exit 1
+
+STOPSIGNAL SIGTERM
+CMD ["python", "-m", "nemus", "--telegram"]
