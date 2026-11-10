@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from nemus import __version__
 from nemus.config import get_config
 from nemus.core.agent import build_system_prompt
-from nemus.core.factory import Core, build_core
+from nemus.core.factory import GUI_AGENT_SUFFIX, Core, build_core
 from nemus.core.state import AssistState
 from nemus.core.tools.base import Tool
 from nemus.gui import i18n
@@ -467,7 +467,10 @@ class NemusApp:
                 permissions=self.core.permissions,
                 callbacks=self._realtime_callbacks(),
                 confirm=self.rt_bridge.confirm,
-                system_prompt=build_system_prompt(self.config, self.core.registry),
+                system_prompt=(
+                    f"{build_system_prompt(self.config, self.core.registry)}"
+                    f"\n\n{GUI_AGENT_SUFFIX}"
+                ),
             )
             self.window.set_realtime(True)
             started = self.realtime.start()
@@ -500,7 +503,10 @@ class NemusApp:
                 registry=self.core.registry,
                 permissions=self.core.permissions,
                 confirm=self.rt_bridge.confirm,
-                system_prompt=build_system_prompt(self.config, self.core.registry),
+                system_prompt=(
+                    f"{build_system_prompt(self.config, self.core.registry)}"
+                    f"\n\n{GUI_AGENT_SUFFIX}"
+                ),
                 barge_in=self.config.voice.barge_in,
                 llm=self.core.llm,
                 memory=self.core.memory,
