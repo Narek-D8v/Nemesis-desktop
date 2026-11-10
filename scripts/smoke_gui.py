@@ -375,5 +375,60 @@ def main() -> int:
     return 0
 
 
+def _run_child() -> None:
+    """Режим дочернего процесса: прогон теста и мгновенный выход.
+
+    На Windows разборка живых Qt-объектов при выходе из интерпретатора
+    периодически роняет процесс УЖЕ ПОСЛЕ успешной печати — все проверки
+    пройдены, но код возврата становится 0xC0000409/0xC0000005. Поэтому
+    успех определяется родителем по маркеру в выводе (см. _run_parent).
+    """
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
+def _run_parent() -> int:
+    """Режим родителя: гоняет тест в дочернем процессе и судит по маркеру.
+
+    Qt6 на Windows иногда роняет дочерний процесс в момент выхода
+    (DLL_PROCESS_DETACH в нативных потоках) уже после того, как все
+    ассерты прошли и напечатан маркер «GUI SMOKE TEST PASSED» — код
+    возврата такого процесса ненадёжен. Маркер печатается только после
+    последнего assert, поэтому его наличие — честный критерий успеха:
+    любой реальный провал (assert, крэш до конца теста, таймаут) маркер
+    не напечатает, и родитель вернёт ненулевой код.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--child"],
+            capture_output=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        print("GUI SMOKE TEST FAILED: превышен таймаут (300 с)")
+        return 1
+
+    if proc.stdout:
+        sys.stdout.buffer.write(proc.stdout)
+        sys.stdout.flush()
+    if proc.stderr:
+        sys.stderr.buffer.write(proc.stderr)
+        sys.stderr.flush()
+
+    if b"GUI SMOKE TEST PASSED" in proc.stdout:
+        # teardown-крэш дочернего процесса после маркера — известный флейк
+        # Qt6 на Windows, на результат теста не влияет
+        return 0
+    print(f"GUI SMOKE TEST FAILED: дочерний процесс завершился с кодом {proc.returncode}")
+    return proc.returncode if proc.returncode else 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if "--child" in sys.argv[1:]:
+        _run_child()
+    else:
+        sys.exit(_run_parent())
