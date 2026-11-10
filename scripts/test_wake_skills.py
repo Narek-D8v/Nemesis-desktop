@@ -20,7 +20,12 @@ from nemus.voice.wake_skills import (  # noqa: E402
     match_skill,
     normalize_phrase,
 )
-from nemus.voice.wakeword import DEFAULT_WAKE_WORDS, normalize_words  # noqa: E402
+from nemus.voice.wakeword import (  # noqa: E402
+    DEFAULT_WAKE_WORDS,
+    build_wake_phrases,
+    normalize_words,
+    phonetic_key,
+)
 
 
 def test_normalize_phrase() -> None:
@@ -74,10 +79,29 @@ def test_default_skills_from_config() -> None:
 def test_normalize_wake_words() -> None:
     assert normalize_words(["Немуся", "немесис", "НЕМУСЯ"]) == ["немуся", "немесис"]
     assert normalize_words(["ёлка"]) == ["елка"]
+    assert normalize_words(["nemusya"]) == ["немуся"], "латиница должна стать кириллицей"
     broken = normalize_words(["������", "", "   "])
     assert broken == list(DEFAULT_WAKE_WORDS)
     assert normalize_words([]) == list(DEFAULT_WAKE_WORDS)
     print("ok  normalize_words")
+
+
+def test_wake_word_grammar() -> None:
+    """OOV-имена должны раскладываться в фразы, которые понимает Vosk."""
+    vocab = {"не", "муся", "мисис", "немо"}
+
+    def lookup(word: str) -> int:
+        return 0 if word in vocab else -1
+
+    assert build_wake_phrases("немуся", lookup) == ["не муся"]
+    assert build_wake_phrases("немесис", lookup) == ["не мисис"]
+    assert build_wake_phrases("немо", lookup) == ["немо"]
+    assert build_wake_phrases("абракадабра", lookup) == []
+
+    assert phonetic_key("Немуся") == phonetic_key("не муся")
+    assert phonetic_key("Немесис") == phonetic_key("не миссис")
+    assert phonetic_key("Немо") != phonetic_key("небо"), "«небо» не должно быть «немо»"
+    print("ok  wake word: фразы для Vosk и фонетическое сравнение")
 
 
 def _fake_app(*, wake_only: bool, wake_activates: bool = True):
@@ -142,6 +166,7 @@ def main() -> int:
     test_build_and_match()
     test_default_skills_from_config()
     test_normalize_wake_words()
+    test_wake_word_grammar()
     test_wake_from_wake_only_starts_dialog()
     test_wake_while_already_listening_is_noop()
     test_wake_without_dialog_starts_listening()
