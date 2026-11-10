@@ -12,6 +12,7 @@ env/
 config/config.yaml
 .env
 .env.*
+!.env.telegram.example
 
 # Логи и временные файлы
 *.log

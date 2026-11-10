@@ -50,10 +50,15 @@ jobs:
           python scripts/test_realtime.py
           python scripts/test_history.py
           python scripts/test_sessions.py
+          python scripts/test_memory_concurrency.py
+          python scripts/test_headless.py
           python scripts/test_llm_fallback.py
           python scripts/test_model_catalog.py
           python scripts/test_reminders.py
           python scripts/test_skills.py
+          python scripts/test_skill_store.py
+          python scripts/test_content_tools.py
+          python scripts/test_context_budget.py
           python scripts/smoke_agent.py
           python scripts/smoke_gui.py
           python scripts/smoke_realtime_app.py

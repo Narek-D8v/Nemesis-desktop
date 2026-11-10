@@ -2,7 +2,8 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('nemus/voice/_rnnoise/rnnoise.dll', 'nemus/voice/_rnnoise')]
+datas = [('nemus/voice/_rnnoise/rnnoise.dll', 'nemus/voice/_rnnoise'),
+         ('nemus/skills', 'nemus/skills')]
 binaries = []
 hiddenimports = []
 hiddenimports += collect_submodules('keyring.backends')

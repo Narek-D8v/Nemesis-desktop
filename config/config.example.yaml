@@ -27,15 +27,23 @@ llm:
   # Провайдер по умолчанию: openrouter | gemini | anthropic | openai | ollama
   default_provider: "gemini"
   # Модель по умолчанию (формат зависит от провайдера)
-  default_model: "gemini/gemini-2.0-flash"
+  default_model: "gemini/gemini-3.5-flash-lite"
   temperature: 0.7
   max_tokens: 4096
+  # Бюджет рассуждений Gemini 3+: none|minimal|low|medium|high
+  reasoning_effort: "low"
+  # Быстрый путь для коротких светских реплик: пусто — default_model
+  fast_model: ""
+  fast_max_tokens: 300
+  fast_timeout: 20
   # Автоматически переключаться на резервного провайдера при ошибке
   fallback:
+    - provider: "gemini"
+      model: "gemini/gemini-3.5-flash"
     - provider: "openrouter"
-      model: "openrouter/anthropic/claude-3.5-sonnet"
-    - provider: "openai"
-      model: "gpt-4o-mini"
+      model: "openrouter/google/gemma-4-31b-it:free"
+    - provider: "openrouter"
+      model: "openrouter/anthropic/claude-sonnet-4.6"
   providers:
     openrouter:
       api_base: "https://openrouter.ai/api/v1"
@@ -49,6 +57,16 @@ llm:
       api_base: "https://api.openai.com/v1"
     ollama:
       api_base: "http://localhost:11434"
+
+# --- Изображения ---
+images:
+  # auto — бесплатный Pollinations для текста, платные Gemini/OpenAI/OpenRouter
+  # для фото-референса (если есть кредиты); можно выбрать провайдера явно
+  provider: "auto"  # auto | pollinations | gemini | openai | openrouter
+  openai_model: "gpt-image-1"
+  gemini_model: "gemini-3.1-flash-image"
+  openrouter_model: "google/gemini-3.1-flash-image"
+  pollinations_model: "flux"
 
 # --- Голос ---
 voice:
@@ -85,8 +103,10 @@ voice:
         arguments: {action: "pause"}
   # Распознавание речи
   stt:
-    engine: "faster-whisper"  # faster-whisper | openai
+    engine: "auto"            # auto | gemini | openai | faster-whisper
     model: "small"            # tiny | base | small | medium | large-v3
+    cloud_model: "gpt-4o-mini-transcribe"  # модель OpenAI при engine=auto/openai
+    gemini_model: "gemini-3.5-transcribe"  # модель Gemini при engine=auto/gemini
     language: "ru"
     device: "auto"            # auto | cpu | cuda
     beam_size: 5              # шире луч = точнее, но медленнее (1-10)
@@ -148,6 +168,8 @@ tools:
   allow_outside_workspace: false
   # Лимиты одного запроса агента (настраиваются и в GUI, вкладка «Инструменты»)
   max_steps: 100            # максимум шагов (вызовов инструментов) за запрос
+  # Потолок токенов на одну задачу (0 — без потолка)
+  max_run_tokens: 500000
   run_budget_seconds: 600   # бюджет времени запроса, секунд (10 минут)
   # Чтобы ассистент свободно видел экран и управлял им в режиме smart,
   # добавьте сюда (иначе каждое действие потребует подтверждения):
@@ -250,6 +272,26 @@ skills:
   # Отключённые скиллы (по имени) — не видны модели. Галочки во вкладке
   # «Скиллы» настроек пишут сюда.
   disabled: []
+  # Скиллы, которые всегда загружены в промпт (например, i-have-adhd:
+  # стиль ответа для чтения с СДВГ).
+  always: []
+
+# --- Telegram-бот ---
+# Работает и в GUI, и без окна: python -m nemus --telegram
+# Подробности: docs/telegram-24-7.md
+telegram:
+  # Включать бота при запуске (в GUI — сразу, в headless — обязательно)
+  enabled: false
+  # Токен от @BotFather; можно не хранить здесь, а задать в keyring/GUI
+  token: ""
+  # Кому разрешено писать боту. Пустой список — бот не запускается.
+  allowed_users: []
+  # Отвечать в группах (по умолчанию только личные сообщения)
+  allow_groups: false
+  # Распознавать голосовые (Gemini/OpenAI, при сбое — локальный faster-whisper)
+  transcribe_voice: true
+  # Максимальный размер скачиваемого файла, МБ
+  max_download_mb: 100
 
 # --- GUI ---
 gui:

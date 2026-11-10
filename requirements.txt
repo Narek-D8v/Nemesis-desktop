@@ -36,6 +36,8 @@ playwright>=1.44
 psutil>=5.9
 pyautogui>=0.9.54
 Pillow>=10.0
+# --- Презентации: pptx ---
+python-pptx>=1.0
 
 # --- Инструменты: музыка (Spotify Web API) ---
 spotipy>=2.23
@@ -43,6 +45,9 @@ spotipy>=2.23
 # --- MCP (Model Context Protocol): опционально, при отсутствии пакета
 #     интеграция полностью отключается ---
 mcp>=2.0
+
+# --- Telegram-бот: управление Немучей из чата ---
+python-telegram-bot>=21.0
 
 # --- Экран: cv2 + локальный OCR для текстовых моделей ---
 opencv-python-headless>=4.9
