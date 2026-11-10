@@ -356,6 +356,30 @@ def qss() -> str:
         text-transform: uppercase;
     }}
 
+    /* Вкладки: компактные пилюли в цветах темы вместо светлых системных */
+    QTabWidget::pane {{
+        border: 1px solid {BORDER};
+        border-radius: 14px;
+        top: -1px;
+    }}
+    QTabBar::tab {{
+        background: transparent;
+        color: {TEXT_DIM};
+        border: 1px solid transparent;
+        border-radius: 9px;
+        padding: 6px 11px;
+        margin: 0 4px 6px 0;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    QTabBar::tab:hover {{ color: {TEXT}; background: {BG_ELEVATED}; }}
+    QTabBar::tab:selected {{
+        color: {TEXT};
+        background: {BG_SECONDARY};
+        border-color: {BORDER_LIGHT};
+    }}
+    QTabBar::scroller {{ width: 32px; }}
+
     /* CheckBox */
     QCheckBox {{ spacing: 10px; background: transparent; color: {TEXT}; font-size: 13px; }}
     QCheckBox::indicator {{
@@ -372,7 +396,8 @@ def qss() -> str:
         image: url({check});
     }}
 
-    /* Ползунок */
+    /* Ползунок: ручка больше дорожки, иначе её срезает по высоте */
+    QSlider {{ min-height: 24px; }}
     QSlider::groove:horizontal {{
         height: 6px;
         background: {BG_ACTIVE};
@@ -388,16 +413,132 @@ def qss() -> str:
         border-radius: 3px;
     }}
     QSlider::handle:horizontal {{
-        width: 16px;
-        height: 16px;
+        width: 18px;
+        height: 18px;
         margin: -6px 0;
-        border-radius: 8px;
+        border-radius: 9px;
         background: {TEXT};
-        border: none;
+        border: 1px solid {BG};
     }}
     QSlider::handle:horizontal:hover {{ background: {ACCENT_PRIMARY}; }}
+    QSlider::handle:horizontal:pressed {{
+        background: {ACCENT_PRIMARY};
+        border-color: {ACCENT_PRIMARY};
+    }}
     QSlider:disabled::groove:horizontal {{ background: {BG_SECONDARY}; }}
     QSlider:disabled::handle:horizontal {{ background: {TEXT_DIMMER}; }}
+
+    /* Строка скилла в настройках */
+    #SkillRow {{
+        background: {BG_SECONDARY};
+        border: 1px solid {BORDER};
+        border-radius: 12px;
+    }}
+    #SkillRow:hover {{ border-color: {BORDER_LIGHT}; }}
+    #SkillRow[state="off"] {{ background: {BG}; }}
+
+    /* Магазин скиллов: карточки и кнопка установки */
+    QDialog#SkillStore {{ background: {BG}; }}
+    #StoreTitle {{ font-size: 18px; font-weight: 700; }}
+    /* «Скиллы»/«Плагины» — разделы магазина; у вложенных вкладок нет второй рамки */
+    #StoreSections::pane {{ border: 1px solid {BORDER}; border-radius: 14px; }}
+    #StoreSections QTabWidget::pane {{ border: none; border-radius: 0; top: 0; }}
+    #StoreHint, #StoreStatus {{ color: {TEXT_DIM}; font-size: 12px; }}
+    /* заголовки групп в «Скачанных»: самостоятельные скиллы и скиллы плагинов */
+    #StoreGroup {{
+        color: {TEXT_DIM};
+        font-size: 12px;
+        font-weight: 600;
+        padding: 8px 2px 0 2px;
+    }}
+    #StoreCard {{
+        background: {BG_SECONDARY};
+        border: 1px solid {BORDER};
+        border-radius: 14px;
+    }}
+    #StoreCard:hover {{ border-color: {BORDER_LIGHT}; background: {BG_ELEVATED}; }}
+    #StoreCardTitle {{ font-size: 14px; font-weight: 600; }}
+    #StoreCardMeta {{ color: {TEXT_DIM}; font-size: 11px; }}
+    #StoreCardDesc {{ color: {TEXT}; font-size: 12px; }}
+    #StoreCardFiles {{ color: {TEXT_DIMMER}; font-size: 11px; }}
+    #StoreCardBadge {{
+        color: {ACCENT_SUCCESS};
+        font-size: 11px;
+        border: 1px solid rgba(94, 234, 165, 0.35);
+        border-radius: 8px;
+        padding: 1px 7px;
+    }}
+    #StoreInstalledMark {{ color: {ACCENT_SUCCESS}; font-size: 18px; font-weight: 700; }}
+    /* «⟳» на карточке скачанного скилла: тихая, синеет при наведении */
+    QPushButton#StoreUpdate {{
+        background: transparent;
+        color: {TEXT_DIM};
+        border: 1px solid transparent;
+        border-radius: 17px;
+        font-size: 16px;
+        padding: 0;
+    }}
+    QPushButton#StoreUpdate:hover {{
+        background: rgba(124, 182, 255, 0.14);
+        color: {ACCENT_PRIMARY};
+        border-color: rgba(124, 182, 255, 0.45);
+    }}
+
+    /* «×» на карточке скачанного скилла: тихая, краснеет при наведении */
+    QPushButton#StoreRemove {{
+        background: transparent;
+        color: {TEXT_DIM};
+        border: 1px solid transparent;
+        border-radius: 17px;
+        font-size: 17px;
+        font-weight: 600;
+        padding: 0;
+    }}
+    QPushButton#StoreRemove:hover {{
+        background: rgba(255, 117, 117, 0.14);
+        color: {ACCENT_DANGER};
+        border-color: rgba(255, 117, 117, 0.45);
+    }}
+    QPushButton#StoreInstall {{
+        background: {BG_ELEVATED};
+        color: {ACCENT_PRIMARY};
+        border: 1px solid {BORDER_LIGHT};
+        border-radius: 17px;
+        font-size: 18px;
+        font-weight: 600;
+        padding: 0;
+    }}
+    QPushButton#StoreInstall:hover {{
+        background: {ACCENT_PRIMARY};
+        color: #0a0d14;
+        border-color: {ACCENT_PRIMARY};
+    }}
+    /* фильтр по репозиторию и порядок витрины */
+    QComboBox#StoreFilter {{
+        background: {BG_ELEVATED};
+        border: 1px solid {BORDER};
+        border-radius: 10px;
+        padding: 7px 10px;
+        font-size: 13px;
+        min-height: 20px;
+    }}
+    QComboBox#StoreFilter:hover {{ border-color: {BORDER_LIGHT}; }}
+    QComboBox#StoreFilter:focus {{ border-color: {ACCENT_PRIMARY}; }}
+    QPushButton#StoreInstall:disabled {{ color: {TEXT_DIMMER}; background: {BG_ELEVATED}; }}
+    /* галочка важнее серого «выключено»: установленный скилл зелёный */
+    QPushButton#StoreInstall[installed="true"],
+    QPushButton#StoreInstall[installed="true"]:disabled {{
+        color: {ACCENT_SUCCESS};
+        border-color: rgba(94, 234, 165, 0.45);
+    }}
+
+    /* Подробности скилла: раскрываются по клику на описание, в ширину строки */
+    #SkillDetail {{
+        background: {BG};
+        border: 1px solid {BORDER};
+        border-left: 2px solid {ACCENT_SECONDARY};
+        border-radius: 8px;
+    }}
 
     /* Карточка MCP-сервера */
     #MCPCard {{
@@ -426,15 +567,15 @@ def qss() -> str:
     /* Скроллбары */
     QScrollBar:vertical {{
         background: transparent;
-        width: 10px;
-        margin: 6px 3px 6px 0;
+        width: 12px;
+        margin: 6px 2px 6px 0;
     }}
     QScrollBar::handle:vertical {{
-        background: {BORDER_LIGHT};
-        border-radius: 4px;
-        min-height: 36px;
+        background: {BORDER_STRONG};
+        border-radius: 5px;
+        min-height: 40px;
     }}
-    QScrollBar::handle:vertical:hover {{ background: {BORDER_STRONG}; }}
+    QScrollBar::handle:vertical:hover {{ background: {TEXT_DIM}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
         background: transparent;
@@ -442,15 +583,15 @@ def qss() -> str:
 
     QScrollBar:horizontal {{
         background: transparent;
-        height: 10px;
+        height: 12px;
         margin: 0 6px 3px 6px;
     }}
     QScrollBar::handle:horizontal {{
-        background: {BORDER_LIGHT};
-        border-radius: 4px;
-        min-width: 36px;
+        background: {BORDER_STRONG};
+        border-radius: 5px;
+        min-width: 40px;
     }}
-    QScrollBar::handle:horizontal:hover {{ background: {BORDER_STRONG}; }}
+    QScrollBar::handle:horizontal:hover {{ background: {TEXT_DIM}; }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
     /* Диалоги */

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -32,7 +33,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nemus.config import save_config
 from nemus.core.agent import AgentEvent
+from nemus.core.skill_commands import parse_skill_commands
+from nemus.core.skills import load_skills, skill_highlights
 from nemus.core.state import AssistState
 from nemus.gui import i18n
 from nemus.gui.dialogs import ConfirmDialog, SettingsDialog
@@ -46,6 +50,8 @@ from nemus.gui.theme import (
     qss,
 )
 from nemus.gui.widgets.chat import ChatView
+from nemus.gui.widgets.elide import ElidedLabel
+from nemus.gui.widgets.skill_suggest import SkillSuggester
 from nemus.gui.widgets.waveform import WaveformWidget
 from nemus.gui.worker import AgentWorker
 
@@ -303,7 +309,8 @@ class MainWindow(QMainWindow):
         self.state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._apply_state_label(AssistState.IDLE)
 
-        self.model_label = QLabel(self._model_text())
+        # длинное имя модели сокращается, а не обрезается посреди слова
+        self.model_label = ElidedLabel(self._model_text())
         self.model_label.setObjectName("ModelLabel")
         self.model_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -325,6 +332,12 @@ class MainWindow(QMainWindow):
         clear_btn.setObjectName("Ghost")
         clear_btn.clicked.connect(self._on_clear)
 
+        store_btn = QPushButton(i18n.tr("btn.store"))
+        store_btn.setObjectName("Ghost")
+        store_btn.setToolTip(i18n.tr("store.button_tip"))
+        store_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        store_btn.clicked.connect(self._open_skill_store)
+
         settings_btn = QPushButton(i18n.tr("btn.settings"))
         settings_btn.setObjectName("Ghost")
         settings_btn.clicked.connect(self._on_settings)
@@ -332,6 +345,7 @@ class MainWindow(QMainWindow):
         box.addWidget(self.listen_btn)
         box.addWidget(self.realtime_btn)
         box.addWidget(clear_btn)
+        box.addWidget(store_btn)
         box.addWidget(settings_btn)
 
         return panel
@@ -362,6 +376,8 @@ class MainWindow(QMainWindow):
         box.addWidget(header)
 
         self.chat = ChatView()
+        # клик по вариантам брейншторма — это ответ пользователя
+        self.chat.choice_submitted.connect(self._on_choice_submitted)
         self.chat.add_system(i18n.tr("chat.welcome"))
 
         # Пилюля ввода + круглая кнопка отправки
@@ -376,6 +392,10 @@ class MainWindow(QMainWindow):
         self.input.setPlaceholderText(i18n.tr("chat.placeholder"))
         self.input.returnPressed.connect(self._on_submit)
         self.input.installEventFilter(self)
+
+        # подсказки команд из скиллов прямо в поле ввода (без лишних кликов)
+        self.suggest = SkillSuggester(self.input, self)
+        QTimer.singleShot(0, self._reload_skill_commands)
 
         self.send_btn = QPushButton("↑")
         self.send_btn.setObjectName("SendButton")
@@ -573,7 +593,58 @@ class MainWindow(QMainWindow):
         text = self.input.text().strip()
         if not text or self._worker is not None:
             return
+        # открыт список подсказок: Enter выбирает команду, а не отправляет
+        if self.suggest.popup_visible():
+            return
+        if self._show_skill_help(text):
+            return
         self.input.clear()
+        self._start_agent(text)
+
+    def _show_skill_help(self, text: str) -> bool:
+        """«/имя» без задачи — карточка справки, без запроса к модели.
+
+        Показывает, что умеет скилл (его описание и разделы инструкции) и как
+        запустить его с задачей. Неизвестная команда — список доступных.
+        """
+        # имя команды без пробелов и без вложенных слэшей («/usr/bin» — путь)
+        match = re.fullmatch(r"/([^\s/]{1,64})", text)
+        if match is None:
+            return False
+        cfg = getattr(self.core, "config", None)
+        skills_cfg = getattr(cfg, "skills", None)
+        if skills_cfg is None or not getattr(skills_cfg, "enabled", False):
+            return False
+        self.input.clear()
+        name = match.group(1)
+        try:
+            skills = load_skills(
+                getattr(skills_cfg, "dir", None),
+                disabled=getattr(skills_cfg, "disabled", ()),
+            )
+        except OSError:
+            skills = []
+        available = ", ".join(f"/{item.name}" for item in skills[:12]) or "—"
+        skill = next((item for item in skills if item.name.lower() == name.lower()), None)
+        if skill is None:
+            self.chat.add_system(
+                f"{i18n.tr('help.unknown', cmd='/' + name)} "
+                f"{i18n.tr('help.available', list=available)}"
+            )
+            return True
+        self.chat.add_skill_help(
+            name=skill.name,
+            description=skill.description,
+            capabilities=skill_highlights(skill.body),
+            files=len(skill.files),
+            hint=i18n.tr("help.hint", cmd=f"/{skill.name}"),
+        )
+        return True
+
+    def _on_choice_submitted(self, text: str) -> None:
+        """Выбор вариантов брейншторма в чате — отправляем как сообщение."""
+        if self._worker is not None or not text.strip():
+            return
         self._start_agent(text)
 
     def _on_clear(self) -> None:
@@ -721,7 +792,65 @@ class MainWindow(QMainWindow):
     def _on_settings(self) -> None:
         dialog = SettingsDialog(self, core=self.core)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
+            self._reload_skill_commands()
             self.settings_saved.emit()
+
+    def _open_skill_store(self) -> None:
+        """Открывает магазин скиллов в отдельном окне (не модально для чата)."""
+        from nemus.gui.skill_store import SkillStoreDialog
+
+        cfg = getattr(self.core, "config", None)
+        skills_cfg = getattr(cfg, "skills", None)
+        directory = getattr(skills_cfg, "dir", None) if skills_cfg else None
+        dialog = SkillStoreDialog(self, directory=directory)
+        dialog.installed.connect(self._on_skill_installed)
+        dialog.removed.connect(self._on_skill_removed)
+        dialog.updated.connect(self._on_skill_updated)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _on_skill_installed(self, name: str) -> None:
+        """Скилл из магазина сразу включается в работу, без перезапуска."""
+        cfg = getattr(self.core, "config", None)
+        skills_cfg = getattr(cfg, "skills", None)
+        if skills_cfg is not None and not getattr(skills_cfg, "enabled", False):
+            skills_cfg.enabled = True
+            try:
+                save_config(cfg)
+            except OSError as exc:
+                self.chat.add_error(i18n.tr("app.settings_failed", msg=str(exc)))
+            # сам тумблер ничего не включает в ядре — просим приложение
+            # пересобрать конфиг и инструменты скиллов
+            self.settings_saved.emit()
+            self.chat.add_system(i18n.tr("store.enabled_chat"))
+        self._reload_skill_commands()
+        self.chat.add_system(i18n.tr("store.installed_chat", name=name))
+
+    def _on_skill_removed(self, name: str) -> None:
+        """Удалённый скилл сразу пропадает из подсказок и системного промпта."""
+        self._reload_skill_commands()
+        self.chat.add_system(i18n.tr("store.removed_chat", name=name))
+
+    def _on_skill_updated(self, name: str) -> None:
+        """Обновлённый скилл подхватывается сразу — со следующего запроса."""
+        self._reload_skill_commands()
+        self.chat.add_system(i18n.tr("store.updated_chat", name=name))
+
+    def _reload_skill_commands(self) -> None:
+        """Перечитывает скиллы и обновляет подсказки команд в поле ввода."""
+        cfg = getattr(self.core, "config", None)
+        skills_cfg = getattr(cfg, "skills", None)
+        if skills_cfg is None or not getattr(skills_cfg, "enabled", False):
+            self.suggest.set_commands([])
+            return
+        try:
+            skills = load_skills(
+                getattr(skills_cfg, "dir", None),
+                disabled=getattr(skills_cfg, "disabled", ()),
+            )
+        except OSError:
+            skills = []
+        self.suggest.set_commands(parse_skill_commands(skills))
 
     # ------------------------------------------------------------- state/close
     def _apply_state_label(self, state: AssistState) -> None:

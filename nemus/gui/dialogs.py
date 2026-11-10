@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import shlex
 from pathlib import Path
 from typing import Any
 
-import yaml
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QEvent, QObject, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -32,22 +32,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nemus import __version__
+from nemus import __version__, telegram_autostart
 from nemus.config import (
-    CONFIG_DIR,
     MCPServerConfig,
     ProviderConfig,
     _resolve_path,
     get_config,
     load_config,
-    relativize_paths,
+    save_config,
 )
 from nemus.core.language import REPLY_AUTO, REPLY_CHOICES
 from nemus.core.language import normalize as normalize_lang
 from nemus.core.mcp import MCP_PRESETS, parse_claude_config
 from nemus.core.providers import PROVIDER_SPECS
 from nemus.core.providers.models import list_models, static_models
-from nemus.core.skills import load_skills, skills_root
+from nemus.core.skills import load_skills, skill_highlights, skills_root
 from nemus.core.tools.base import RiskLevel, Tool
 from nemus.gui import i18n
 from nemus.gui.theme import (
@@ -58,7 +57,7 @@ from nemus.gui.theme import (
     TEXT_DIM,
     qss,
 )
-from nemus.gui.widgets import ROLE_FREE, ModelComboBox, ToggleSwitch
+from nemus.gui.widgets import ROLE_FREE, ElidedLabel, ModelComboBox, ToggleSwitch
 from nemus.utils.secrets import set_secret
 from nemus.voice.tts import OPENAI_VOICES, TTSEngine, list_engine_voices, resolve_openai_key
 
@@ -68,6 +67,22 @@ _HINT = f"color:{TEXT_DIM};font-size:12px;"
 
 #: дискретные периоды обновления инструментов MCP (секунды) — их ходит ползунок
 _REFRESH_STEPS: tuple[int, ...] = (5, 15, 30, 60, 300, 900, 1800, 3600, 10800, 21600, 43200, 86400)
+
+
+def _parse_user_ids(text: str) -> list[int]:
+    """ID пользователей из строки «123, 456; 789» (мусор пропускаем)."""
+    ids: list[int] = []
+    for chunk in re.split(r"[,;\s]+", text or ""):
+        value = chunk.strip()
+        if not value:
+            continue
+        try:
+            uid = int(value)
+        except ValueError:
+            continue
+        if uid > 0:  # ID пользователя всегда положительный, группы — нет
+            ids.append(uid)
+    return ids
 
 
 def _fmt_refresh(seconds: int) -> str:
@@ -189,6 +204,39 @@ def _split_args(text: str) -> list[str]:
         return list(lexer)
     except ValueError:
         return text.split()
+
+
+def _soft_wrap(text: str, limit: int = 28) -> str:
+    """Вставляет невидимые разрывы в токены без пробелов (пути, base64).
+
+    QLabel с переносом по словам не режет длинный токен: минимум по ширине
+    равен его длине, и текст уезжает за край диалога. Невидимый пробел
+    (U+200B) даёт место переноса, внешний вид текста не меняется.
+    """
+    out: list[str] = []
+    for token in re.split(r"(\s+)", str(text)):
+        if len(token) <= limit or token.isspace():
+            out.append(token)
+            continue
+        out.append(
+            "".join(
+                token[i : i + limit] + "\u200b" for i in range(0, len(token), limit)
+            )
+        )
+    return "".join(out)
+
+
+def _short_text(text: str, limit: int = 180) -> str:
+    """Сжимает длинное описание скилла в одну читаемую фразу.
+
+    Описания Agent Skills бывают по несколько абзацев: в списке они показаны
+    кратко (полный текст — в подсказке), иначе строка распирает всю вкладку.
+    """
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= limit:
+        return clean
+    cut = clean[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:—-")
+    return f"{cut}…"
 
 
 def _parse_env(text: str) -> dict[str, str]:
@@ -319,6 +367,31 @@ class _ModelsWorker(QThread):
         self.done.emit(self._provider, models)
 
 
+class _TelegramCheckWorker(QThread):
+    """Проверяет токен бота через getMe, не блокируя GUI."""
+
+    done = Signal(bool, str)
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+
+    def run(self) -> None:  # noqa: D102
+        import urllib.request
+
+        try:
+            url = f"https://api.telegram.org/bot{self._token}/getMe"
+            with urllib.request.urlopen(url, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            if data.get("ok"):
+                self.done.emit(True, str(data["result"].get("username") or ""))
+            else:
+                self.done.emit(False, str(data.get("description") or ""))
+        except Exception as exc:  # noqa: BLE001
+            # В тексте HTTPError может оказаться URL с токеном — маскируем
+            self.done.emit(False, str(exc).replace(self._token, "***"))
+
+
 class _MCPServerCard(QFrame):
     """Карточка одного MCP-сервера в списке: шапка с тумблером и статусом + форма.
 
@@ -353,9 +426,9 @@ class _MCPServerCard(QFrame):
 
         titles = QVBoxLayout()
         titles.setSpacing(1)
-        self.lbl_name = QLabel()
+        self.lbl_name = ElidedLabel()
         self.lbl_name.setStyleSheet("font-weight:600;font-size:13px;")
-        self.lbl_cmd = QLabel()
+        self.lbl_cmd = ElidedLabel()
         self.lbl_cmd.setStyleSheet(_HINT)
         titles.addWidget(self.lbl_name)
         titles.addWidget(self.lbl_cmd)
@@ -507,6 +580,145 @@ class _MCPServerCard(QFrame):
         self.lbl_tools.setText(i18n.tr("mcp.tools_count", n=count) if count is not None else "")
 
 
+class _SkillRow(QFrame):
+    """Строка списка скиллов: галочка, название и краткое описание в переносе.
+
+    Описания скиллов — абзацы текста, поэтому строка двухстрочная: одна строка
+    с длинным текстом распирала вкладку и обрезалась по краю окна. Клик по
+    краткому описанию разворачивает подробности прямо под ним — в ширину строки,
+    а не отдельным окном на всю ширину экрана.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        path: str,
+        checked: bool,
+        skill: Any = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("SkillRow")
+        self.name = name
+        self._description = str(description or "")
+        self._path = path
+        self._highlights = skill_highlights(getattr(skill, "body", "") or "")
+        self._tools = list(getattr(skill, "allowed_tools", None) or [])
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        tooltip = f"{name}\n{path}"
+        if self._description:
+            tooltip += f"\n\n{self._description}"
+        self.setToolTip(tooltip)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(10)
+        self.box = QCheckBox()
+        self.box.setChecked(checked)
+        self.box.setAccessibleName(name)
+        self.box.setToolTip(i18n.tr("skills.toggle_tip", name=name))
+        row.addWidget(self.box, 0, Qt.AlignmentFlag.AlignTop)
+
+        texts = QVBoxLayout()
+        texts.setSpacing(2)
+        self.lbl_name = QLabel(name)
+        self.lbl_name.setStyleSheet("font-weight:600;font-size:13px;")
+        self.lbl_desc = QLabel()
+        self.lbl_desc.setWordWrap(True)
+        self.lbl_desc.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.lbl_desc.setStyleSheet(f"color:{TEXT_DIM};font-size:12px;")
+        # описание — кнопка «подробнее»: клик не переключает скилл
+        self.lbl_desc.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_desc.setToolTip(i18n.tr("skills.more"))
+        self.lbl_desc.installEventFilter(self)
+        texts.addWidget(self.lbl_name)
+        texts.addWidget(self.lbl_desc)
+        self.detail = self._build_detail()
+        #: подробности открыты (isVisible() не годится: вкладка может быть скрыта)
+        self._details_open = False
+        self.detail.setVisible(False)
+        texts.addWidget(self.detail)
+        row.addLayout(texts, 1)
+        self._refresh_desc()
+
+        self.box.toggled.connect(self._on_toggled)
+        self._paint_state()
+
+    # ------------------------------------------------------------ подробности
+    def _build_detail(self) -> QFrame:
+        """Панель подробностей: полное описание, разделы инструкции, инструменты.
+
+        Всё в переносе и с невидимыми разрывами в длинных токенах, поэтому
+        панель не шире строки и не растягивает вкладку.
+        """
+        box = QFrame()
+        box.setObjectName("SkillDetail")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(6)
+
+        def add(text: str, dim: bool = False) -> QLabel:
+            lbl = QLabel(_soft_wrap(text))
+            lbl.setWordWrap(True)
+            # текст скилла — не разметка: показываем ровно то, что в файле
+            lbl.setTextFormat(Qt.TextFormat.PlainText)
+            lbl.setStyleSheet(f"font-size:12px;color:{TEXT_DIM};" if dim else "font-size:12px;")
+            v.addWidget(lbl)
+            return lbl
+
+        if self._description:
+            add(self._description)
+        if self._highlights:
+            bullets = "\n".join(f"• {h}" for h in self._highlights)
+            add(f"{i18n.tr('skills.in_instruction')}\n{bullets}")
+        if self._tools:
+            add(i18n.tr("skills.tools") + " " + ", ".join(self._tools), dim=True)
+        add(i18n.tr("skills.path") + " " + self._path, dim=True)
+        return box
+
+    def _refresh_desc(self) -> None:
+        """Краткое описание со стрелкой: ▸ свёрнуто, ▾ подробности открыты."""
+        mark = "▾" if self._details_open else "▸"
+        short = _short_text(self._description) or i18n.tr("skills.no_desc")
+        self.lbl_desc.setText(f"{mark} {short}")
+
+    def _toggle_details(self) -> None:
+        """Разворачивает/сворачивает подробности по клику на описание."""
+        self._details_open = not self._details_open
+        self.detail.setVisible(self._details_open)
+        self._refresh_desc()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802
+        if obj is self.lbl_desc and event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._toggle_details()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _on_toggled(self, _checked: bool) -> None:
+        self._paint_state()
+
+    def _paint_state(self) -> None:
+        """Выключенный скилл виден сразу: строка тускнеет и теряет фон."""
+        on = self.box.isChecked()
+        self.setProperty("state", "on" if on else "off")
+        color = TEXT if on else TEXT_DIM
+        self.lbl_name.setStyleSheet(f"font-weight:600;font-size:13px;color:{color};")
+        style = self.style()
+        if style is not None:
+            style.unpolish(self)
+            style.polish(self)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        """Клик по строке (не только по квадратику) переключает скилл."""
+        if event.button() == Qt.MouseButton.LeftButton and self.box.isEnabled():
+            self.box.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class SettingsDialog(QDialog):
     """Диалог настроек: провайдеры, ключи API, голос, инструменты."""
 
@@ -514,7 +726,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(i18n.tr("set.window"))
         self.setStyleSheet(qss())
-        self.resize(780, 600)
+        self.resize(940, 640)
+        self.setMinimumSize(820, 560)
         self.config = load_config()
         #: живое ядро приложения (для статуса/обновления MCP) — может быть None
         self.core = core
@@ -552,10 +765,16 @@ class SettingsDialog(QDialog):
         tabs.addTab(
             self._scrollable(self._build_spotify_tab()), i18n.tr("tab.spotify")
         )
+        tabs.addTab(
+            self._scrollable(self._build_telegram_tab()), i18n.tr("tab.telegram")
+        )
         tabs.addTab(self._scrollable(self._build_tools_tab()), i18n.tr("tab.tools"))
         tabs.addTab(self._mcp_page, i18n.tr("tab.mcp"))
-        tabs.addTab(self._scrollable(self._build_skills_tab()), i18n.tr("tab.skills"))
+        self._skills_page = self._scrollable(self._build_skills_tab())
+        tabs.addTab(self._skills_page, i18n.tr("tab.skills"))
         tabs.addTab(self._scrollable(self._build_about_tab()), i18n.tr("tab.about"))
+        tabs.tabBar().setExpanding(False)
+        tabs.setDocumentMode(False)
         tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs = tabs
         layout.addWidget(tabs)
@@ -579,7 +798,8 @@ class SettingsDialog(QDialog):
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
-        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # если содержимое не влезает по ширине — показываем полосу, а не прячем
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         area.setWidget(widget)
         return area
 
@@ -736,9 +956,11 @@ class SettingsDialog(QDialog):
         self.chk_wake = QCheckBox(i18n.tr("voice.wake_enable"))
         form.addRow(i18n.tr("voice.wake"), self.chk_wake)
         form.addRow(i18n.tr("voice.engine"), self.cb_wake_engine)
+        self.edit_wake_words.setToolTip(i18n.tr("voice.words_tip"))
         form.addRow(i18n.tr("voice.words"), self.edit_wake_words)
 
         rt = QGroupBox(i18n.tr("voice.rt_group"))
+        rt.setToolTip(i18n.tr("voice.rt_group_tip"))
         rform = QFormLayout(rt)
         rform.setSpacing(10)
         self.chk_realtime = QCheckBox(i18n.tr("voice.rt_enable"))
@@ -751,6 +973,7 @@ class SettingsDialog(QDialog):
         self.chk_rt_wake = QCheckBox(i18n.tr("voice.rt_wake"))
         self.chk_rt_fallback = QCheckBox(i18n.tr("voice.rt_fallback"))
         self.chk_barge = QCheckBox(i18n.tr("voice.barge_in"))
+        self.chk_barge.setToolTip(i18n.tr("voice.barge_in_tip"))
         rform.addRow(self.chk_realtime)
         rform.addRow(i18n.tr("voice.rt_provider"), self.cb_rt_provider)
         rform.addRow(i18n.tr("voice.rt_gemini"), self.edit_rt_gemini)
@@ -978,24 +1201,27 @@ class SettingsDialog(QDialog):
         v = QVBoxLayout(w)
         v.setSpacing(10)
 
-        # --- общий тумблер + ползунок периода обновления
-        top = QHBoxLayout()
-        top.setSpacing(8)
+        # --- общий тумблер, под ним отдельной строкой период обновления
+        # (в одну строку тумблер+подпись+ползунок не влезали по ширине)
         self.chk_mcp_enabled = ToggleSwitch(i18n.tr("mcp.enable"))
-        top.addWidget(self.chk_mcp_enabled)
-        top.addStretch(1)
-        top.addWidget(QLabel(i18n.tr("mcp.refresh")))
+        v.addWidget(self.chk_mcp_enabled)
+
+        refresh_row = QHBoxLayout()
+        refresh_row.setSpacing(8)
+        refresh_row.addWidget(QLabel(i18n.tr("mcp.refresh")))
         self.slider_mcp_refresh = QSlider(Qt.Orientation.Horizontal)
         self.slider_mcp_refresh.setRange(0, len(_REFRESH_STEPS) - 1)
-        self.slider_mcp_refresh.setFixedWidth(180)
+        self.slider_mcp_refresh.setMinimumWidth(140)
+        self.slider_mcp_refresh.setMaximumWidth(240)
         self.slider_mcp_refresh.setToolTip(i18n.tr("mcp.refresh_tip_period"))
         self.slider_mcp_refresh.valueChanged.connect(self._mcp_refresh_changed)
-        top.addWidget(self.slider_mcp_refresh)
+        refresh_row.addWidget(self.slider_mcp_refresh, 1)
         self.lbl_mcp_refresh_val = QLabel("")
         self.lbl_mcp_refresh_val.setMinimumWidth(56)
-        top.addWidget(self.lbl_mcp_refresh_val)
+        refresh_row.addWidget(self.lbl_mcp_refresh_val)
+        refresh_row.addStretch(1)
+        v.addLayout(refresh_row)
         self._mcp_refresh_changed(self.slider_mcp_refresh.value())
-        v.addLayout(top)
 
         self.lbl_mcp_status = QLabel("")
         self.lbl_mcp_status.setWordWrap(True)
@@ -1359,6 +1585,149 @@ class SettingsDialog(QDialog):
         else:
             self.lbl_sp_status.setText(i18n.tr("spotify.fail", msg=message))
 
+    # --------------------------------------------------------------- Telegram
+    def _build_telegram_tab(self) -> QWidget:
+        """Настройки бота: токен, кому разрешено писать, статус подключения."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setSpacing(12)
+
+        self.chk_tg_enabled = QCheckBox(i18n.tr("tg.enable"))
+        self.chk_tg_enabled.setToolTip(i18n.tr("tg.enable_tip"))
+        v.addWidget(self.chk_tg_enabled)
+
+        info = QLabel(i18n.tr("tg.hint"))
+        info.setWordWrap(True)
+        info.setStyleSheet(_HINT)
+        v.addWidget(info)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        self.edit_tg_token = QLineEdit()
+        self.edit_tg_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit_tg_token.setPlaceholderText("123456789:AA…")
+        form.addRow(i18n.tr("tg.token"), self.edit_tg_token)
+
+        self.edit_tg_users = QLineEdit()
+        self.edit_tg_users.setPlaceholderText("123456789, 987654321")
+        self.edit_tg_users.setToolTip(i18n.tr("tg.users_tip"))
+        form.addRow(i18n.tr("tg.users"), self.edit_tg_users)
+
+        self.chk_tg_groups = QCheckBox(i18n.tr("tg.allow_groups"))
+        form.addRow("", self.chk_tg_groups)
+        self.chk_tg_voice = QCheckBox(i18n.tr("tg.transcribe"))
+        form.addRow("", self.chk_tg_voice)
+
+        self.spin_tg_size = QSpinBox()
+        self.spin_tg_size.setRange(1, 2000)
+        self.spin_tg_size.setSuffix(" " + i18n.tr("tg.mb"))
+        form.addRow(i18n.tr("tg.max_file"), self.spin_tg_size)
+        v.addLayout(form)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.btn_tg_check = QPushButton(i18n.tr("tg.check"))
+        self.btn_tg_check.setObjectName("Ghost")
+        self.btn_tg_check.clicked.connect(self._check_telegram)
+        row.addWidget(self.btn_tg_check)
+        btn_father = QPushButton(i18n.tr("tg.botfather"))
+        btn_father.setObjectName("Ghost")
+        btn_father.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://t.me/BotFather"))
+        )
+        row.addWidget(btn_father)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.lbl_tg_status = QLabel("")
+        self.lbl_tg_status.setWordWrap(True)
+        self.lbl_tg_status.setStyleSheet(_HINT)
+        v.addWidget(self.lbl_tg_status)
+
+        daemon = QGroupBox(i18n.tr("tg.autostart_group"))
+        dform = QVBoxLayout(daemon)
+        dform.setSpacing(6)
+        self.chk_tg_autostart = QCheckBox(i18n.tr("tg.autostart"))
+        self.chk_tg_autostart.setToolTip(i18n.tr("tg.autostart_tip"))
+        self.chk_tg_autostart.toggled.connect(self._on_tg_autostart_toggled)
+        dform.addWidget(self.chk_tg_autostart)
+        self.lbl_tg_autostart = QLabel("")
+        self.lbl_tg_autostart.setWordWrap(True)
+        self.lbl_tg_autostart.setStyleSheet(_HINT)
+        dform.addWidget(self.lbl_tg_autostart)
+        v.addWidget(daemon)
+        #: реальное состояние задачи на момент открытия — чтобы не трогать её,
+        #: если пользователь просто открыл настройки и нажал «Сохранить»
+        self._tg_autostart_initial = False
+        self._tg_autostart_loading = True
+
+        howto = QLabel(i18n.tr("tg.howto"))
+        howto.setWordWrap(True)
+        howto.setStyleSheet(_HINT)
+        v.addWidget(howto)
+        v.addStretch(1)
+        return w
+
+    def _telegram_status_text(self) -> str:
+        """Строка состояния: работает ли бот прямо сейчас."""
+        from nemus.core.telegram_bot import telegram_status
+
+        status = telegram_status()
+        if status.get("running"):
+            return i18n.tr("tg.status_running", username=status.get("username") or "?")
+        if status.get("error"):
+            return i18n.tr("tg.status_error", msg=status["error"])
+        return i18n.tr("tg.status_off")
+
+    def _check_telegram(self) -> None:
+        """Кнопка «Проверить токен»: getMe в фоне."""
+        token = self.edit_tg_token.text().strip()
+        if not token:
+            self.lbl_tg_status.setText(i18n.tr("tg.need_token"))
+            return
+        self.btn_tg_check.setEnabled(False)
+        self.lbl_tg_status.setText(i18n.tr("tg.checking"))
+        worker = _TelegramCheckWorker(token)
+        worker.done.connect(self._on_telegram_checked)
+        self._tg_check_worker = worker
+        worker.start()
+
+    def _on_telegram_checked(self, ok: bool, message: str) -> None:
+        self.btn_tg_check.setEnabled(True)
+        if ok:
+            self.lbl_tg_status.setText(i18n.tr("tg.check_ok", username=message))
+        else:
+            self.lbl_tg_status.setText(i18n.tr("tg.check_fail", msg=message))
+
+    def _on_tg_autostart_toggled(self, checked: bool) -> None:
+        """Показывает, что автозапуск применится после «Сохранить»."""
+        if self._tg_autostart_loading:
+            return
+        if not telegram_autostart.supported():
+            return
+        key = "tg.autostart_pending_on" if checked else "tg.autostart_pending_off"
+        self.lbl_tg_autostart.setText(i18n.tr(key))
+
+    def _apply_tg_autostart(self) -> bool:
+        """Применяет галочку автозапуска. False — показали ошибку, диалог открыт."""
+        if not telegram_autostart.supported():
+            return True
+        desired = self.chk_tg_autostart.isChecked()
+        if desired == self._tg_autostart_initial:
+            return True
+        ok, message = telegram_autostart.set_enabled(desired)
+        if not ok:
+            self.lbl_tg_autostart.setText(
+                i18n.tr("tg.autostart_fail", msg=message)
+            )
+            return False
+        self._tg_autostart_initial = desired
+        self.lbl_tg_autostart.setText(
+            i18n.tr("tg.autostart_on" if desired else "tg.autostart_off")
+        )
+        return True
+
     # ----------------------------------------------------------------- Tools
     def _build_tools_tab(self) -> QWidget:
         w = QWidget()
@@ -1415,6 +1784,7 @@ class SettingsDialog(QDialog):
     def _build_skills_tab(self) -> QWidget:
         """Скиллы Claude Agent Skills: включение, список, папка на диске."""
         self._skill_checks: dict[str, QCheckBox] = {}
+        self._skill_rows: dict[str, _SkillRow] = {}
 
         w = QWidget()
         v = QVBoxLayout(w)
@@ -1423,6 +1793,7 @@ class SettingsDialog(QDialog):
         top = QHBoxLayout()
         top.setSpacing(8)
         self.chk_skills_enabled = ToggleSwitch(i18n.tr("skills.enable"))
+        self.chk_skills_enabled.setToolTip(i18n.tr("skills.enable_tip"))
         top.addWidget(self.chk_skills_enabled)
         top.addStretch(1)
         btn_refresh = QPushButton(i18n.tr("skills.refresh"))
@@ -1481,28 +1852,35 @@ class SettingsDialog(QDialog):
             if widget is not None:
                 widget.deleteLater()
         self._skill_checks.clear()
+        self._skill_rows.clear()
 
         root = self._skills_root_path()
         self.lbl_skills_path.setText(f"{i18n.tr('skills.folder')}: {root.as_posix()}")
         try:
-            skills = load_skills(root)
+            # команды плагинов — не скиллы: их выключают/включают вместе с плагином
+            skills = [
+                skill for skill in load_skills(root) if skill.kind != "command"
+            ]
         except OSError as exc:
             self.lbl_skills_empty.setText(i18n.tr("skills.load_fail", msg=str(exc)))
             self.lbl_skills_empty.setVisible(True)
             return
 
         disabled = {d.strip().lower() for d in self.config.skills.disabled}
-        for skill in skills:
-            box = QCheckBox(
-                f"{skill.name} — {skill.description or i18n.tr('skills.no_desc')}"
+        for skill in sorted(skills, key=lambda s: s.name.lower()):
+            row = _SkillRow(
+                name=skill.name,
+                description=skill.description or "",
+                path=skill.skill_file.as_posix(),
+                skill=skill,
+                checked=(
+                    skill.name.lower() not in disabled
+                    and skill.path.name.lower() not in disabled
+                ),
             )
-            box.setToolTip(skill.skill_file.as_posix())
-            box.setChecked(
-                skill.name.lower() not in disabled
-                and skill.path.name.lower() not in disabled
-            )
-            self._skill_checks[skill.name] = box
-            self._skills_list.addWidget(box)
+            self._skill_checks[skill.name] = row.box
+            self._skill_rows[skill.name] = row
+            self._skills_list.addWidget(row)
         self.lbl_skills_empty.setVisible(not skills)
         self.lbl_skills_status.setText(
             i18n.tr("skills.count", n=len(skills)) if skills else ""
@@ -1562,6 +1940,40 @@ class SettingsDialog(QDialog):
         self.spin_time_budget.setValue(
             int(getattr(cfg.tools, "run_budget_seconds", 600) or 600)
         )
+        tg = cfg.telegram
+        self.chk_tg_enabled.setChecked(tg.enabled)
+        self.edit_tg_token.setText(tg.token)
+        self.edit_tg_users.setText(", ".join(str(uid) for uid in tg.allowed_users))
+        self.chk_tg_groups.setChecked(tg.allow_groups)
+        self.chk_tg_voice.setChecked(tg.transcribe_voice)
+        self.spin_tg_size.setValue(max(1, int(tg.max_download_mb or 100)))
+        self.lbl_tg_status.setText(self._telegram_status_text())
+
+        # Автозапуск демона: не хранится в YAML, читается из задачи и ярлыка.
+        self._tg_autostart_loading = True
+        try:
+            if telegram_autostart.supported():
+                enabled, error = telegram_autostart.status()
+                self._tg_autostart_initial = enabled
+                self.chk_tg_autostart.setChecked(enabled)
+                self.chk_tg_autostart.setEnabled(True)
+                if error:
+                    self.lbl_tg_autostart.setText(
+                        i18n.tr("tg.autostart_fail", msg=error)
+                    )
+                else:
+                    self.lbl_tg_autostart.setText(
+                        i18n.tr(
+                            "tg.autostart_on" if enabled else "tg.autostart_off"
+                        )
+                    )
+            else:
+                self.chk_tg_autostart.setChecked(False)
+                self.chk_tg_autostart.setEnabled(False)
+                self.lbl_tg_autostart.setText(i18n.tr("tg.autostart_unsupported"))
+        finally:
+            self._tg_autostart_loading = False
+
         sp = cfg.spotify
         self.chk_sp_enabled.setChecked(sp.enabled)
         self.edit_sp_id.setText(sp.client_id)
@@ -1645,6 +2057,19 @@ class SettingsDialog(QDialog):
             cfg.tools.workspace = _resolve_path(ws)
         cfg.tools.max_steps = self.spin_max_steps.value()
         cfg.tools.run_budget_seconds = self.spin_time_budget.value()
+        tg = cfg.telegram
+        tg.enabled = self.chk_tg_enabled.isChecked()
+        tg.token = self.edit_tg_token.text().strip()
+        tg.allowed_users = _parse_user_ids(self.edit_tg_users.text())
+        tg.allow_groups = self.chk_tg_groups.isChecked()
+        tg.transcribe_voice = self.chk_tg_voice.isChecked()
+        tg.max_download_mb = self.spin_tg_size.value()
+        set_secret("telegram/token", tg.token)
+
+        # Автозапуск демона — состояние Task Scheduler, а не поле YAML.
+        if not self._apply_tg_autostart():
+            return
+
         sp = cfg.spotify
         sp.enabled = self.chk_sp_enabled.isChecked()
         sp.client_id = self.edit_sp_id.text().strip()
@@ -1695,6 +2120,7 @@ class SettingsDialog(QDialog):
             "_mcp_probe_worker",
             "_mcp_refresh_worker",
             "_models_worker",
+            "_tg_check_worker",
         )
         for name in names:
             worker = getattr(self, name, None)
@@ -1718,14 +2144,7 @@ class SettingsDialog(QDialog):
     def _write_yaml(cfg) -> None:
         # Сериализуем весь конфиг целиком: так в файле сохраняются и секции,
         # которые пока не редактируются в GUI (например, mcp), и новые поля.
-        # Пути в памяти абсолютные — перед записью возвращаем их к виду
-        # относительно корня проекта, чтобы не плодить хардкод D:\Nemesis.
-        relativize_paths(cfg)
-        out = cfg.model_dump()
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        path = CONFIG_DIR / "config.yaml"
-        with path.open("w", encoding="utf-8") as fh:
-            yaml.safe_dump(out, fh, allow_unicode=True, sort_keys=False)
+        save_config(cfg)
 
 
 class ConfirmDialog(QDialog):
@@ -1778,12 +2197,20 @@ class ConfirmDialog(QDialog):
             for k, v in args.items():
                 row = QHBoxLayout()
                 row.setSpacing(10)
-                key_lbl = QLabel(str(k))
+                # значения показываем как есть (PlainText): иначе HTML-сущности
+                # ломают перенос по невидимым пробелам в длинных токенах
+                raw_key, raw_value = str(k), str(v)
+                key_lbl = QLabel(_soft_wrap(raw_key, 24))
+                key_lbl.setTextFormat(Qt.TextFormat.PlainText)
+                key_lbl.setWordWrap(True)
+                key_lbl.setToolTip(raw_key)
                 key_lbl.setStyleSheet(
                     f"color:{TEXT_DIM};font-size:12px;font-family:monospace;"
                 )
-                val_lbl = QLabel(html.escape(str(v)))
+                val_lbl = QLabel(_soft_wrap(raw_value))
+                val_lbl.setTextFormat(Qt.TextFormat.PlainText)
                 val_lbl.setWordWrap(True)
+                val_lbl.setToolTip(raw_value)
                 val_lbl.setStyleSheet(
                     f"color:{TEXT};font-size:12px;font-family:monospace;"
                 )
@@ -1795,8 +2222,10 @@ class ConfirmDialog(QDialog):
                 args_text = json.dumps(args, ensure_ascii=False, indent=2)
             except Exception:  # noqa: BLE001
                 args_text = str(args)
-            val_lbl = QLabel(html.escape(args_text))
+            val_lbl = QLabel(_soft_wrap(args_text))
+            val_lbl.setTextFormat(Qt.TextFormat.PlainText)
             val_lbl.setWordWrap(True)
+            val_lbl.setToolTip(args_text)
             val_lbl.setStyleSheet(
                 f"color:{TEXT};font-size:12px;font-family:monospace;"
             )
@@ -1805,7 +2234,15 @@ class ConfirmDialog(QDialog):
         card_head = QLabel(i18n.tr("confirm.params"))
         card_head.setObjectName("SectionLabel")
         layout.addWidget(card_head)
-        layout.addWidget(card)
+
+        # параметры могут быть огромными (содержимое файла, длинная команда):
+        # ограничиваем высоту и прокручиваем, иначе кнопки уезжают за экран
+        card_scroll = QScrollArea()
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        card_scroll.setWidget(card)
+        card_scroll.setMaximumHeight(320)
+        layout.addWidget(card_scroll)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(10)

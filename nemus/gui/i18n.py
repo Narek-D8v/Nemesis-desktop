@@ -32,6 +32,24 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "chat.cleared": "Диалог очищен.",
         "chat.no_core": "Ядро ассистента не подключено.",
+        # брейншторм: кликабельные варианты A/B/C/D
+        "bm.title": "БРЕЙНШТОРМ · ВЫБЕРИТЕ ВАРИАНТЫ",
+        "bm.hint": "клик по варианту выбирает его; можно ответить и текстом: «1A, 2B»",
+        "bm.recommended": "рекомендую",
+        "bm.custom": "Свой вариант",
+        "bm.custom_empty": "Свой вариант: нажмите, чтобы ввести",
+        "bm.custom_title": "Свой вариант",
+        "bm.custom_hint": "Введите свой вариант для этого пункта:",
+        "bm.send": "Отправить выбор",
+        "bm.send_default": "Отправить рекомендованное",
+        "bm.sent": "Выбор отправлен",
+        "bm.frozen": "Выбор не отправлен — диалог продолжен",
+        # справка по скиллу: команда «/имя» без задачи
+        "help.title": "СПРАВКА · {name}",
+        "help.files": "вспомогательные файлы: {n}",
+        "help.hint": "Напиши «{cmd} <задача>» — и я возьмусь за работу по этому скиллу.",
+        "help.unknown": "Скилла {cmd} нет.",
+        "help.available": "Доступные команды: {list}",
         # диалоги (сессии)
         "sessions.button": "🗂 {title}",
         "sessions.window": "Диалоги",
@@ -119,11 +137,67 @@ _STRINGS: dict[str, dict[str, str]] = {
         "tab.tts": "Озвучка (TTS)",
         "tab.mcp": "MCP",
         "tab.spotify": "Spotify",
-        "tab.tools": "Инструменты/Безопасность",
+        "tab.telegram": "Telegram",
+        "tab.tools": "Инструменты",
         "tab.about": "О программе",
         "tab.skills": "Скиллы",
+        # Telegram-бот
+        "tg.enable": "Включить Telegram-бота",
+        "tg.enable_tip": (
+            "Писать Немусе в Telegram и получать ответы и файлы прямо в чат"
+        ),
+        "tg.hint": (
+            "Бот выполняет команды на этом компьютере, поэтому слушает только "
+            "указанные ID: случайный человек не получит доступ к ноутбуку. "
+            "Свой ID можно узнать у @userinfobot. Без токена и хотя бы одного ID "
+            "бот не запустится."
+        ),
+        "tg.token": "Токен бота",
+        "tg.users": "ID пользователей",
+        "tg.users_tip": (
+            "Кому разрешено писать боту — через запятую. Другим бот ответит «Доступ запрещён»."
+        ),
+        "tg.allow_groups": "Отвечать в группах",
+        "tg.transcribe": "Распознавать голосовые сообщения",
+        "tg.max_file": "Максимальный файл",
+        "tg.mb": "МБ",
+        "tg.check": "Проверить токен",
+        "tg.botfather": "Открыть @BotFather",
+        "tg.checking": "Проверяю токен…",
+        "tg.check_ok": "Токен верный: @{username}",
+        "tg.check_fail": "Токен не подошёл: {msg}",
+        "tg.need_token": "Сначала вставьте токен от @BotFather.",
+        "tg.status_running": "Бот @{username} слушает Telegram.",
+        "tg.status_error": "Бот не запустился: {msg}",
+        "tg.status_off": "Бот выключен — включите галочку и сохраните настройки.",
+        "tg.autostart_group": "Демон без окна",
+        "tg.autostart": "Запускать Telegram-бота при входе в Windows",
+        "tg.autostart_tip": (
+            "В автозагрузке Windows появится ярлык «Немуся Telegram». Он "
+            "запускает бота после входа в систему даже с закрытым "
+            "приложением, а задача NemusTelegram перезапускает его при падении."
+        ),
+        "tg.autostart_on": (
+            "Автозапуск включён: ярлык «Немуся Telegram» и задача "
+            "NemusTelegram активны."
+        ),
+        "tg.autostart_off": "Автозапуск выключен.",
+        "tg.autostart_pending_on": "Автозапуск включится после сохранения настроек.",
+        "tg.autostart_pending_off": "Автозапуск выключится после сохранения настроек.",
+        "tg.autostart_fail": "Не удалось изменить автозапуск: {msg}",
+        "tg.autostart_unsupported": "Автозапуск доступен только в Windows.",
+        "tg.howto": (
+            "Напишите боту текст, пришлите файл, фото или голосовое — задача "
+            "выполнится здесь, а результат и готовые файлы бот пришлёт в чат. "
+            "Видео можно попросить превратить в круг: «сделай из этого видео кружок»."
+        ),
         # скиллы (формат Claude Agent Skills)
-        "skills.enable": "Включить скиллы (Claude Agent Skills)",
+        "skills.enable": "Включить скиллы",
+        "skills.enable_tip": (
+            "Скиллы в формате Claude Agent Skills: модель видит названия и "
+            "описания, а полный текст подгружает сама."
+        ),
+        "skills.toggle_tip": "Включить или выключить скилл {name}",
         "skills.refresh": "Обновить",
         "skills.open_folder": "Открыть папку",
         "skills.open_folder_tip": "Где лежат скиллы на диске",
@@ -142,7 +216,122 @@ _STRINGS: dict[str, dict[str, str]] = {
             "сохранить навык через create_skill."
         ),
         "skills.no_desc": "без описания",
+        "skills.more": "Нажмите на описание — будет подробнее",
+        "skills.in_instruction": "В инструкции:",
+        "skills.tools": "Инструменты:",
+        "skills.path": "Путь:",
         "skills.count": "Найдено скиллов: {n}. Снятие галочки прячет скилл от модели.",
+        # магазин скиллов
+        "btn.store": "Магазин",
+        "store.button_tip": "Магазин: готовые скиллы и плагины с GitHub в один клик",
+        "store.title": "Магазин",
+        "store.section.skills": "Скиллы",
+        "store.section.plugins": "Плагины",
+        "store.plugin_hint": (
+            "Плагины Claude Code целиком: скиллы, команды и агенты внутри. "
+            "Скиллы работают как обычные, а команды вызываются так: «/плагин:команда»."
+        ),
+        "store.plugin_search_placeholder": "Поиск плагинов на GitHub: review, git, tests…",
+        "store.plugin_loading": "Загружаем плагины с GitHub…",
+        "store.plugin_rec_empty": (
+            "Не удалось загрузить плагины. Проверьте интернет и нажмите «Обновить»."
+        ),
+        "store.plugin_installed_empty": (
+            "Плагинов пока нет. Выберите подходящий в «Рекомендуемых» или найдите поиском."
+        ),
+        "store.plugin_parts": "скиллов: {skills} · команд: {commands} · агентов: {agents}",
+        "store.version": "v{version}",
+        "store.plugin_install": "Установить плагин «{name}» целиком",
+        "store.plugin_installing": "Скачиваем плагин «{name}»…",
+        "store.plugin_installed_status": (
+            "Плагин «{name}» установлен: его скиллы и команды уже доступны."
+        ),
+        "store.plugin_install_fail": "Не удалось установить плагин «{name}»: {msg}",
+        "store.plugin_update_tip": "Обновить плагин «{name}» с GitHub",
+        "store.plugin_remove_tip": "Удалить плагин «{name}» целиком",
+        "store.plugin_member": "в составе плагина «{name}»",
+        "store.plugin_local_zip": "Из .zip",
+        "store.plugin_local_folder": "Из папки",
+        "store.plugin_local_zip_tip": "Поставить плагин из скачанного архива целиком",
+        "store.plugin_local_folder_tip": (
+            "Поставить плагин из папки на диске целиком"
+        ),
+        "store.plugin_local_zip_title": "Выберите архив с плагином",
+        "store.plugin_local_folder_title": "Выберите папку плагина",
+        "store.plugin_local_filter": "Архивы плагинов (*.zip)",
+        "store.plugin_local_fail": "Плагин из файла не установлен: {msg}",
+        "store.local_source": "источник: {path}",
+        "store.source_manual": "источник: поставлен вручную",
+        "store.source_repo": "источник: {repo}",
+        "store.source_repo_path": "источник: {repo} · {path}",
+        "store.skill_local_zip_tip": "Поставить скилл из скачанного архива",
+        "store.skill_local_folder_tip": "Поставить скилл из папки на диске",
+        "store.skill_local_zip_title": "Выберите архив со скиллом",
+        "store.skill_local_folder_title": "Выберите папку скилла",
+        "store.skill_local_filter": "Архивы скиллов (*.zip)",
+        "store.skill_local_fail": "Скилл из файла не установлен: {msg}",
+        "store.hint": (
+            "Готовые скиллы с GitHub: нажмите «+», и скилл встанет в вашу папку "
+            "скиллов — Немуся увидит его со следующего запроса, без перезапуска."
+        ),
+        "store.search_placeholder": "Поиск на GitHub: pdf, excel, видео, дизайн…",
+        "store.find": "Найти",
+        "store.refresh": "Обновить",
+        "store.refresh_tip": "Пересобрать витрину со случайной подборкой",
+        "store.tab.recommended": "Рекомендуемые",
+        "store.tab.search": "Поиск",
+        "store.tab.installed": "Скачанные",
+        "store.tab.installed_count": "Скачанные ({n})",
+        "store.loading": "Загружаем с GitHub…",
+        "store.search_hint": "Введите запрос — найдём скиллы в репозиториях GitHub.",
+        "store.search_empty": "По запросу «{query}» ничего не нашлось. Попробуйте другое слово.",
+        "store.rec_empty": "Не удалось загрузить витрину. Проверьте интернет и нажмите «Обновить».",
+        "store.rec_end": "Это все скиллы, что нашлись, — остальное ищите через поиск.",
+        "store.rec_loading": "Догружаем витрину с GitHub…",
+        "store.filter_tip": "Показать скиллы только одного репозитория",
+        "store.filter_all": "Все репозитории ({n})",
+        "store.sort_tip": "Порядок витрины: по звёздам или по свежести репозитория",
+        "store.sort.stars": "По звёздам",
+        "store.sort.new": "По новизне",
+        "store.fresh": "обновлён {date}",
+        "store.search_loading": "Догружаем результаты с GitHub…",
+        "store.search_end": "Это все результаты — уточните запрос, чтобы найти больше.",
+        "store.files": "файлов: {n}",
+        "store.plugin": "плагин {name}",
+        "store.install": "Установить скилл «{name}»",
+        "store.installing": "Скачиваем «{name}»…",
+        "store.installed": "установлен",
+        "store.installed_status": "Скилл «{name}» установлен — он уже в папке скиллов.",
+        "store.install_fail": "Не удалось установить «{name}»: {msg}",
+        "store.load_fail": "Не удалось прочитать папку скиллов: {msg}",
+        "store.installed_empty": (
+            "Пока ничего не скачано. Откройте «Рекомендуемые» или «Поиск» и "
+            "нажмите «+» у подходящего скилла."
+        ),
+        "store.group.standalone": "Самостоятельные скиллы ({n})",
+        "store.group.plugin_members": "В составе плагинов ({n})",
+        "store.path": "Папка: {path}",
+        "store.update_tip": "Обновить скилл «{name}» с GitHub",
+        "store.updating": "Обновляем «{name}» с GitHub…",
+        "store.update_done": "Скилл «{name}» обновлён до свежей версии с GitHub.",
+        "store.update_fresh": "Скилл «{name}» уже свежий — менять нечего.",
+        "store.update_fail": "Не удалось обновить «{name}»: {msg}",
+        "store.updated_chat": "Скилл «{name}» обновлён с GitHub.",
+        "store.remove_tip": "Удалить скилл «{name}»",
+        "store.remove_title": "Удаление скилла",
+        "store.remove_ask": (
+            "Удалить скилл «{name}»? Папка скилла со всеми файлами будет удалена."
+        ),
+        "store.remove_done": "Скилл «{name}» удалён.",
+        "store.remove_fail": "Не удалось удалить «{name}»: файлы заняты или нет прав.",
+        "store.removed_chat": "«{name}» удалён из папки скиллов.",
+        "store.installed_chat": (
+            "«{name}» из магазина установлен — он уже в папке скиллов и "
+            "доступен модели со следующего запроса."
+        ),
+        "store.enabled_chat": (
+            "Скиллы были выключены — включил их, чтобы модель видела новые навыки."
+        ),
         "skills.load_fail": "Не удалось прочитать скиллы: {msg}",
         "skills.open_fail": "Не удалось открыть папку: {msg}",
         "btn.cancel": "Отмена",
@@ -150,7 +339,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "llm.name": "Имя ассистента",
         "llm.provider": "Провайдер по умолчанию",
         "llm.model": "Модель по умолчанию",
-        "llm.model_tip": "Выберите модель из списка (бесплатные сверху) или впишите своё название — оно сохранится как есть.",
+        "llm.model_tip": (
+            "Выберите модель из списка (бесплатные сверху) или впишите своё "
+            "название — оно сохранится как есть. У бесплатных моделей есть "
+            "лимиты запросов и суточные квоты — на долгих задачах они кончаются "
+            "быстрее, чем кажется."
+        ),
         "llm.free": "бесплатно",
         "llm.paid": "платно",
         "llm.search_ph": "Поиск модели…",
@@ -174,18 +368,27 @@ _STRINGS: dict[str, dict[str, str]] = {
         "voice.wake": "Wake word",
         "voice.engine": "Движок",
         "voice.words": "Слова (через запятую)",
-        "voice.rt_group": "Режим реального времени (непрерывный голосовой диалог)",
+        "voice.words_tip": (
+            "Можно кириллицей или латиницей: nemusya станет «немуся». "
+            "Имена, которых нет в словаре Vosk, разбиваются на похожие слова "
+            "(«немуся» → «не муся»), а совсем незнакомые слушаются в "
+            "open-vocabulary режиме."
+        ),
+        "voice.rt_group": "Режим реального времени",
+        "voice.rt_group_tip": (
+            "Непрерывный голосовой диалог: Gemini Live или OpenAI Realtime, "
+            "локальный офлайн-режим как запасной."
+        ),
         "voice.rt_enable": "Доступен (кнопка Realtime в окне)",
         "voice.rt_provider": "Провайдер (local — офлайн)",
         "voice.rt_gemini": "Модель Gemini Live",
         "voice.rt_openai": "Модель OpenAI Realtime",
         "voice.rt_voice": "Голос OpenAI",
         "voice.rt_audio": "Передавать и воспроизводить аудио",
-        "voice.rt_wake": "Запускать диалог по слову активации (Немуся)",
-        "voice.rt_fallback": "Без интернета/ключа — локальный режим (офлайн)",
-        "voice.barge_in": (
-            "Прерывать голосом (иначе микрофон молчит, пока говорит ассистент)"
-        ),
+        "voice.rt_wake": "Запускать по слову активации (Немуся)",
+        "voice.rt_fallback": "Офлайн без интернета и ключа",
+        "voice.barge_in": "Прерывать голосом (barge-in)",
+        "voice.barge_in_tip": "Иначе микрофон молчит, пока говорит ассистент.",
         # озвучка (TTS)
         "tts.engine": "Движок синтеза",
         "tts.engine_edge_tts": "Edge TTS (облачный, бесплатный)",
@@ -385,6 +588,24 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "chat.cleared": "Chat cleared.",
         "chat.no_core": "Assistant core is not connected.",
+        # brainstorm: clickable A/B/C/D options
+        "bm.title": "BRAINSTORM · PICK OPTIONS",
+        "bm.hint": "click an option to pick it; you can also answer in text: \"1A, 2B\"",
+        "bm.recommended": "recommended",
+        "bm.custom": "Custom",
+        "bm.custom_empty": "Custom: click to type",
+        "bm.custom_title": "Custom option",
+        "bm.custom_hint": "Type your own option for this question:",
+        "bm.send": "Send selection",
+        "bm.send_default": "Send recommended",
+        "bm.sent": "Selection sent",
+        "bm.frozen": "Selection not sent — the dialog moved on",
+        # skill help: "/name" command without a task
+        "help.title": "HELP · {name}",
+        "help.files": "helper files: {n}",
+        "help.hint": "Type «{cmd} <task>» and I will work on it with this skill.",
+        "help.unknown": "There is no {cmd} skill.",
+        "help.available": "Available commands: {list}",
         # chats (sessions)
         "sessions.button": "🗂 {title}",
         "sessions.window": "Chats",
@@ -464,11 +685,65 @@ _STRINGS: dict[str, dict[str, str]] = {
         "tab.tts": "Voice (TTS)",
         "tab.mcp": "MCP",
         "tab.spotify": "Spotify",
-        "tab.tools": "Tools/Security",
+        "tab.telegram": "Telegram",
+        "tab.tools": "Tools",
         "tab.about": "About",
         "tab.skills": "Skills",
+        # Telegram bot
+        "tg.enable": "Enable the Telegram bot",
+        "tg.enable_tip": "Message Nemusya in Telegram and get answers and files in the chat",
+        "tg.hint": (
+            "The bot runs commands on this computer, so it only listens to the "
+            "listed IDs: a random person cannot reach the laptop. Find your ID "
+            "via @userinfobot. Without a token and at least one ID the bot will "
+            "not start."
+        ),
+        "tg.token": "Bot token",
+        "tg.users": "User IDs",
+        "tg.users_tip": (
+            "Who may message the bot — comma separated. Others get “Access denied”."
+        ),
+        "tg.allow_groups": "Reply in groups",
+        "tg.transcribe": "Transcribe voice messages",
+        "tg.max_file": "Maximum file",
+        "tg.mb": "MB",
+        "tg.check": "Check token",
+        "tg.botfather": "Open @BotFather",
+        "tg.checking": "Checking the token…",
+        "tg.check_ok": "Token is valid: @{username}",
+        "tg.check_fail": "Token rejected: {msg}",
+        "tg.need_token": "Paste a token from @BotFather first.",
+        "tg.status_running": "Bot @{username} is listening to Telegram.",
+        "tg.status_error": "The bot did not start: {msg}",
+        "tg.status_off": "The bot is off — enable it and save the settings.",
+        "tg.autostart_group": "Headless daemon",
+        "tg.autostart": "Start the Telegram bot at Windows sign-in",
+        "tg.autostart_tip": (
+            "A “Немуся Telegram” shortcut appears in Windows Startup. It starts "
+            "the bot after sign-in even when the app is closed, and the "
+            "NemusTelegram task restarts it if it crashes."
+        ),
+        "tg.autostart_on": (
+            "Autostart is on: the “Немуся Telegram” shortcut and the "
+            "NemusTelegram task are active."
+        ),
+        "tg.autostart_off": "Autostart is off.",
+        "tg.autostart_pending_on": "Autostart will be enabled after saving.",
+        "tg.autostart_pending_off": "Autostart will be disabled after saving.",
+        "tg.autostart_fail": "Could not change autostart: {msg}",
+        "tg.autostart_unsupported": "Autostart is available on Windows only.",
+        "tg.howto": (
+            "Send the bot text, a file, a photo or a voice message — the task "
+            "runs here and the result and files come back to the chat. You can "
+            "ask it to turn a video into a round video note."
+        ),
         # skills (Claude Agent Skills format)
-        "skills.enable": "Enable skills (Claude Agent Skills)",
+        "skills.enable": "Enable skills",
+        "skills.enable_tip": (
+            "Skills in Claude Agent Skills format: the model sees names and "
+            "descriptions and loads the full text itself."
+        ),
+        "skills.toggle_tip": "Turn the skill {name} on or off",
         "skills.refresh": "Refresh",
         "skills.open_folder": "Open folder",
         "skills.open_folder_tip": "Where skills live on disk",
@@ -487,7 +762,120 @@ _STRINGS: dict[str, dict[str, str]] = {
             "to save a skill with create_skill."
         ),
         "skills.no_desc": "no description",
+        "skills.more": "Click the description for details",
+        "skills.in_instruction": "In the instructions:",
+        "skills.tools": "Tools:",
+        "skills.path": "Path:",
         "skills.count": "Skills found: {n}. Unchecking one hides it from the model.",
+        # skill store
+        "btn.store": "Store",
+        "store.button_tip": "Store: ready-made skills and plugins from GitHub in one click",
+        "store.title": "Store",
+        "store.section.skills": "Skills",
+        "store.section.plugins": "Plugins",
+        "store.plugin_hint": (
+            "Whole Claude Code plugins: skills, commands and agents inside. "
+            "Skills work as usual, commands are called as «/plugin:command»."
+        ),
+        "store.plugin_search_placeholder": "Search plugins on GitHub: review, git, tests…",
+        "store.plugin_loading": "Loading plugins from GitHub…",
+        "store.plugin_rec_empty": (
+            "Could not load plugins. Check the internet and press «Refresh»."
+        ),
+        "store.plugin_installed_empty": (
+            "No plugins yet. Pick one in «Recommended» or search for it."
+        ),
+        "store.plugin_parts": "skills: {skills} · commands: {commands} · agents: {agents}",
+        "store.version": "v{version}",
+        "store.plugin_install": "Install plugin «{name}» as a whole",
+        "store.plugin_installing": "Downloading plugin «{name}»…",
+        "store.plugin_installed_status": (
+            "Plugin «{name}» installed: its skills and commands are already available."
+        ),
+        "store.plugin_install_fail": "Could not install plugin «{name}»: {msg}",
+        "store.plugin_update_tip": "Update plugin «{name}» from GitHub",
+        "store.plugin_remove_tip": "Remove plugin «{name}» with all its files",
+        "store.plugin_member": "part of plugin «{name}»",
+        "store.plugin_local_zip": "From .zip",
+        "store.plugin_local_folder": "From folder",
+        "store.plugin_local_zip_tip": "Install a plugin from a downloaded archive",
+        "store.plugin_local_folder_tip": "Install a plugin from a folder on disk",
+        "store.plugin_local_zip_title": "Choose a plugin archive",
+        "store.plugin_local_folder_title": "Choose a plugin folder",
+        "store.plugin_local_filter": "Plugin archives (*.zip)",
+        "store.plugin_local_fail": "Plugin from file was not installed: {msg}",
+        "store.local_source": "source: {path}",
+        "store.source_manual": "source: installed manually",
+        "store.source_repo": "source: {repo}",
+        "store.source_repo_path": "source: {repo} · {path}",
+        "store.skill_local_zip_tip": "Install a skill from a downloaded archive",
+        "store.skill_local_folder_tip": "Install a skill from a folder on disk",
+        "store.skill_local_zip_title": "Choose a skill archive",
+        "store.skill_local_folder_title": "Choose a skill folder",
+        "store.skill_local_filter": "Skill archives (*.zip)",
+        "store.skill_local_fail": "Skill from file was not installed: {msg}",
+        "store.hint": (
+            "Ready-made skills from GitHub: press «+» and the skill lands in your "
+            "skills folder — Nemusya sees it from the next request, no restart."
+        ),
+        "store.search_placeholder": "Search GitHub: pdf, excel, video, design…",
+        "store.find": "Search",
+        "store.refresh": "Refresh",
+        "store.refresh_tip": "Rebuild the showcase with a new random selection",
+        "store.tab.recommended": "Recommended",
+        "store.tab.search": "Search",
+        "store.tab.installed": "Downloaded",
+        "store.tab.installed_count": "Downloaded ({n})",
+        "store.loading": "Loading from GitHub…",
+        "store.search_hint": "Type a query — we will look for skills in GitHub repositories.",
+        "store.search_empty": "Nothing found for «{query}». Try another word.",
+        "store.rec_empty": "Could not load the showcase. Check the internet and press «Refresh».",
+        "store.rec_end": "That's every skill we found — search for the rest.",
+        "store.rec_loading": "Loading more of the showcase from GitHub…",
+        "store.filter_tip": "Show skills from a single repository only",
+        "store.filter_all": "All repositories ({n})",
+        "store.sort_tip": "Showcase order: by stars or by repository freshness",
+        "store.sort.stars": "By stars",
+        "store.sort.new": "By freshness",
+        "store.fresh": "updated {date}",
+        "store.search_loading": "Loading more results from GitHub…",
+        "store.search_end": "That's every result — refine the query to find more.",
+        "store.files": "files: {n}",
+        "store.plugin": "plugin {name}",
+        "store.install": "Install skill «{name}»",
+        "store.installing": "Downloading «{name}»…",
+        "store.installed": "installed",
+        "store.installed_status": "Skill «{name}» installed — it is already in the skills folder.",
+        "store.install_fail": "Could not install «{name}»: {msg}",
+        "store.load_fail": "Could not read the skills folder: {msg}",
+        "store.installed_empty": (
+            "Nothing downloaded yet. Open «Recommended» or «Search» and press "
+            "«+» on a skill you like."
+        ),
+        "store.group.standalone": "Standalone skills ({n})",
+        "store.group.plugin_members": "Inside plugins ({n})",
+        "store.path": "Folder: {path}",
+        "store.update_tip": "Update skill «{name}» from GitHub",
+        "store.updating": "Updating «{name}» from GitHub…",
+        "store.update_done": "Skill «{name}» updated to the latest GitHub version.",
+        "store.update_fresh": "Skill «{name}» is already up to date.",
+        "store.update_fail": "Could not update «{name}»: {msg}",
+        "store.updated_chat": "Skill «{name}» was updated from GitHub.",
+        "store.remove_tip": "Remove skill «{name}»",
+        "store.remove_title": "Remove skill",
+        "store.remove_ask": (
+            "Remove skill «{name}»? The whole skill folder will be deleted."
+        ),
+        "store.remove_done": "Skill «{name}» removed.",
+        "store.remove_fail": "Could not remove «{name}»: files are in use or access denied.",
+        "store.removed_chat": "«{name}» was removed from the skills folder.",
+        "store.installed_chat": (
+            "«{name}» from the store is installed — it is in the skills folder "
+            "and available to the model from the next request."
+        ),
+        "store.enabled_chat": (
+            "Skills were off — I turned them on so the model can see the new skills."
+        ),
         "skills.load_fail": "Failed to read skills: {msg}",
         "skills.open_fail": "Failed to open the folder: {msg}",
         "btn.cancel": "Cancel",
@@ -495,7 +883,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "llm.name": "Assistant name",
         "llm.provider": "Default provider",
         "llm.model": "Default model",
-        "llm.model_tip": "Pick a model from the list (free ones first) or type your own — it will be saved as-is.",
+        "llm.model_tip": (
+            "Pick a model from the list (free ones first) or type your own — it "
+            "will be saved as-is. Free models have request limits and daily "
+            "quotas, which run out faster than you expect on long tasks."
+        ),
         "llm.free": "free",
         "llm.paid": "paid",
         "llm.search_ph": "Search models…",
@@ -519,18 +911,27 @@ _STRINGS: dict[str, dict[str, str]] = {
         "voice.wake": "Wake word",
         "voice.engine": "Engine",
         "voice.words": "Words (comma separated)",
-        "voice.rt_group": "Realtime mode (continuous voice dialog)",
+        "voice.words_tip": (
+            "Cyrillic or Latin: nemusya becomes “немуся”. Names missing from "
+            "the Vosk dictionary are split into similar words (“немуся” → "
+            "“не муся”); unknown names use open-vocabulary recognition."
+        ),
+        "voice.rt_group": "Realtime mode",
+        "voice.rt_group_tip": (
+            "Continuous voice dialog: Gemini Live or OpenAI Realtime, with the "
+            "local offline mode as a fallback."
+        ),
         "voice.rt_enable": "Available (Realtime button in the window)",
         "voice.rt_provider": "Provider (local — offline)",
         "voice.rt_gemini": "Gemini Live model",
         "voice.rt_openai": "OpenAI Realtime model",
         "voice.rt_voice": "OpenAI voice",
         "voice.rt_audio": "Send and play audio",
-        "voice.rt_wake": "Start the dialog on the wake word (Немуся)",
-        "voice.rt_fallback": "No internet/key — local offline mode",
-        "voice.barge_in": (
-            "Allow voice interruption (otherwise the mic stays silent while "
-            "the assistant speaks)"
+        "voice.rt_wake": "Start on the wake word (Немуся)",
+        "voice.rt_fallback": "Offline without internet or key",
+        "voice.barge_in": "Allow voice interruption (barge-in)",
+        "voice.barge_in_tip": (
+            "Otherwise the mic stays silent while the assistant speaks."
         ),
         # TTS
         "tts.engine": "Synthesis engine",
