@@ -167,6 +167,11 @@ def test_authorization() -> None:
     assert "send_telegram" in suffix, suffix
     assert "react_telegram" in suffix, suffix
     assert "Немесис" in suffix and "Немо" in suffix and "Markdown" in suffix, suffix
+    # уточнения в Telegram — брейншторм с вариантами, а не открытый вопрос
+    assert "брейншторм" in suffix.lower(), suffix
+    assert "1A, 2B" in suffix, suffix
+    # и честность про озвучку: голосовых ответов в TG нет
+    assert "Голосовых ответов" in suffix, suffix
     print("ok  доступ: только ID владельца; группы — по настройке")
 
 
@@ -234,6 +239,164 @@ def test_reminder_delivery() -> None:
         thread.join(timeout=2)
         loop.close()
     print("ok  напоминание доставляется в Telegram-чат после завершения задачи")
+
+
+def test_send_text_chunks() -> None:
+    """Длинный текст напоминаний режется, а не теряется на лимите Telegram."""
+    import asyncio
+    import threading
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[int, str, str | None]] = []
+
+        async def send_message(
+            self, chat_id: int, text: str, **kwargs: object
+        ) -> None:
+            mode = kwargs.get("parse_mode")
+            self.sent.append((chat_id, text, mode if isinstance(mode, str) else None))
+
+    cfg = Config()
+    cfg.telegram.enabled = True
+    cfg.telegram.token = "123:test"
+    cfg.telegram.allowed_users = [42]
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    bot = TelegramBot(cfg, core)
+    fake = _FakeBot()
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        bot._loop = loop
+        bot._app = SimpleNamespace(bot=fake)
+        bot._thread = threading.current_thread()
+        bot._chat_id = None
+        long_text = "**Отчёт.** " + "Строка результата. " * 900
+        assert bot.send_text(long_text), "длинный текст должен уйти частями"
+        assert len(fake.sent) >= 2, fake.sent
+        assert all(len(text) <= 4096 for _, text, _ in fake.sent), [
+            len(text) for _, text, _ in fake.sent
+        ]
+        assert all(mode == "HTML" for _, _, mode in fake.sent), fake.sent
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+    print("ok  длинный send_text режется на части Telegram")
+
+
+def test_stt_import_without_numpy() -> None:
+    """Импорт STT не тянет numpy: контейнер Telegram его не ставит."""
+    code = (
+        "import sys; sys.modules['numpy'] = None; "
+        "import nemus.voice.stt; print('STT OK')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "STT OK" in result.stdout, result.stdout
+    print("ok  STT импортируется без numpy (облачная расшифровка в контейнере)")
+
+
+def test_start_timeout_stops_hung_thread() -> None:
+    """Таймаут старта не оставляет зомби-поток, который поллит без замка."""
+    import time
+
+    cfg = Config()
+    cfg.telegram.enabled = True
+    cfg.telegram.token = "123:test"
+    cfg.telegram.allowed_users = [42]
+    # изолируем замок от рабочего data/telegram.lock
+    tmp = tempfile.mkdtemp(prefix="nemus-tg-")
+    cfg.memory.database = str(Path(tmp) / "nemus.db")
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    bot = TelegramBot(cfg, core)
+
+    def _hang() -> None:
+        # «зависший» старт: готовность не наступает, ждём стоп-сигнал
+        while not bot._stopping.is_set():
+            time.sleep(0.02)
+
+    bot._thread_main = _hang  # type: ignore[method-assign]
+    bot._ready = SimpleNamespace(  # type: ignore[assignment]
+        clear=lambda: None, wait=lambda timeout=None: False
+    )
+    try:
+        assert bot.start() is False, "старт должен честно вернуть False"
+        assert bot._stopping.is_set(), (
+            "таймаут обязан подать стоп-сигнал зависшему потоку"
+        )
+        assert not bot.running, "зомби-поток не должен считаться работающим"
+    finally:
+        bot._stopping.set()
+        if bot._thread is not None:
+            bot._thread.join(timeout=3)
+        bot._release_lock()
+    print("ok  таймаут старта гасит поток и снимает замок без зомби")
+
+
+def test_stop_watchdog_kills_zombie_loop() -> None:
+    """Сторож гасит цикл бота, если стоп пришёл уже после проверки в старте."""
+    import asyncio
+    import threading
+    import time
+
+    cfg = Config()
+    cfg.telegram.enabled = True
+    cfg.telegram.token = "123:test"
+    cfg.telegram.allowed_users = [42]
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    bot = TelegramBot(cfg, core)
+    stopped = threading.Event()
+
+    async def fake_shutdown() -> None:
+        stopped.set()
+
+    bot._shutdown = fake_shutdown  # type: ignore[method-assign]
+    loop = asyncio.new_event_loop()
+
+    def run() -> None:
+        asyncio.set_event_loop(loop)
+        bot._loop = loop
+        loop.create_task(bot._stop_watchdog())
+        loop.run_forever()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        time.sleep(0.2)  # сторож крутится, стоп-сигнала нет
+        assert thread.is_alive(), "цикл должен работать до стоп-сигнала"
+        assert not stopped.is_set(), "без stop() гасить нечего"
+        bot._stopping.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "сторож обязан остановить цикл"
+        assert stopped.is_set(), "перед остановкой цикл должен погасить бота"
+    finally:
+        bot._stopping.set()
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+    print("ok  сторож гасит зомби-цикл бота после таймаута старта")
 
 
 def test_formatting() -> None:
@@ -542,6 +705,10 @@ def main() -> int:
     test_authorization()
     test_formatting()
     test_reminder_delivery()
+    test_send_text_chunks()
+    test_stt_import_without_numpy()
+    test_start_timeout_stops_hung_thread()
+    test_stop_watchdog_kills_zombie_loop()
     test_typing_and_reactions()
     test_attachment_without_caption()
     test_reaction_list_complete()

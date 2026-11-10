@@ -39,7 +39,6 @@ from nemus.core.telegram_format import (
     html_chunks,
     split_message,
     strip_html,
-    to_html,
 )
 from nemus.core.tools.telegram import (
     _ALLOWED_REACTIONS,
@@ -629,12 +628,24 @@ class TelegramBot:
         if not self._ready.wait(20):
             _last_error = self._start_error or "бот не ответил за 20 с"
             logger.error(f"Telegram: {_last_error}")
+            # Поток мог зависнуть на сетевом вызове и ожить после таймаута.
+            # Если не подать стоп-сигнал, он начнёт поллинг уже без нашего
+            # присмотра (ссылка потеряна, замок снят) — получится зомби,
+            # который конфликтует с новым ботом за getUpdates (409).
+            self._stopping.set()
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5)
             self._thread = None
             self._release_lock()
             return False
         if self._start_error or not self.running:
             _last_error = self._start_error or "бот не запустился"
             logger.error(f"Telegram: {_last_error}")
+            self._stopping.set()
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5)
             self._thread = None
             self._release_lock()
             return False
@@ -671,21 +682,28 @@ class TelegramBot:
         logger.info("Telegram: бот остановлен.")
 
     def send_text(self, text: str, chat_id: int | None = None) -> bool:
-        """Отправляет текст в чат из любого потока (напоминания, уведомления)."""
+        """Отправляет текст в чат из любого потока (напоминания, уведомления).
+
+        Длинный текст режется на части лимитом Telegram — один send_message
+        на 10 000 символов падает с ошибкой, и уведомление теряется.
+        """
         if not self.running or self._loop is None or self._app is None:
             return False
         target = self._chat_target(chat_id)
         if target is None:
             return False
-        body = to_html(text)
+        chunks = html_chunks(text) or ["…"]
 
         async def _send() -> None:
-            try:
-                await self._app.bot.send_message(
-                    chat_id=target, text=body, parse_mode="HTML"
-                )
-            except Exception:  # noqa: BLE001
-                await self._app.bot.send_message(chat_id=target, text=strip_html(body))
+            for chunk in chunks:
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=target, text=chunk, parse_mode="HTML"
+                    )
+                except Exception:  # noqa: BLE001
+                    await self._app.bot.send_message(
+                        chat_id=target, text=strip_html(chunk)
+                    )
 
         try:
             future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
@@ -869,6 +887,10 @@ class TelegramBot:
                 self._loop.run_until_complete(self._shutdown())
                 self._close_loop()
                 return
+            # Сторож: если stop() (или таймаут старта) пришёл после проверки
+            # выше, цикл остановится сам — иначе поток ожил бы зомби и поллил
+            # без присмотра, конфликтуя с новым ботом за getUpdates (409).
+            self._loop.create_task(self._stop_watchdog())
             self._loop.run_forever()
         except Exception as exc:  # noqa: BLE001
             # В тексте InvalidToken лежит сам токен — в лог и статус только ***
@@ -907,6 +929,21 @@ class TelegramBot:
             except Exception:  # noqa: BLE001
                 pass
             loop.close()
+
+    async def _stop_watchdog(self) -> None:
+        """Гасит бота, если стоп-сигнал пришёл уже после проверки в старте.
+
+        ``start()`` после таймаута ставит ``_stopping`` и уходит, не дожидаясь
+        зависшего потока. Без сторожа поток мог бы ожить и поллить вечно.
+        """
+        while not self._stopping.is_set():
+            await asyncio.sleep(0.25)
+        try:
+            await self._shutdown()
+        finally:
+            loop = self._loop
+            if loop is not None:
+                loop.stop()
 
     async def _shutdown(self) -> None:
         if self._app is None:
@@ -1019,7 +1056,21 @@ class TelegramBot:
             "грустное — 😢 или 💔, хорошая новость — 🎉 или 🔥, вопрос — 🤔. "
             "Это только примеры: доступен весь список из описания инструмента, "
             "выбирай любой подходящий по смыслу. Не ставь реакцию на каждое "
-            "сообщение; сомневаешься — не ставь."
+            "сообщение; сомневаешься — не ставь.\n"
+            "8. Уточнения — только брейнштормом (ПРАВИЛО БРЕЙНШТОРМА выше). "
+            "Как только задаче нужен ответ пользователя — формат, место, "
+            "поведение при ошибках, объём, — не задавай открытый вопрос "
+            "одним списком. Одна строка «как поняла», затем 3–5 пронумерованных "
+            "вопросов с вариантами A), B), C) и «D) Свой вариант»; в каждом "
+            "вопросе ровно один «(рекомендую)». Панели в Telegram нет, поэтому "
+            "добавь: «ответь коротко: 1A, 2B» — пользователь может написать "
+            "это текстом или голосом. Получив «1A, 2B» (или «всё A»), сразу "
+            "выполняй без второго круга вопросов; ответ «свой вариант» — "
+            "прочитай текст после двоеточия.\n"
+            "9. Голосовых ответов в Telegram нет: твой ответ приходит "
+            "сообщением или файлом. Если просят «скажи / произнеси вслух» — "
+            "просто напиши нужный текст; не предлагай запускать скрипты или "
+            "библиотеки для звука и не обещай озвучку."
         )
 
     # ------------------------------------------------------------- команды
