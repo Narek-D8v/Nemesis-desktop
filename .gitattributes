@@ -1,0 +1,22 @@
+# Переводы строк: в репозитории всегда LF, у .bat — CRLF (требование cmd.exe).
+# Правило делает поведение одинаковым на любой машине, независимо от
+# core.autocrlf, и убирает шум «LF will be replaced by CRLF» в git status.
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Бинарные файлы — git не должен пытаться их склеивать и диффать как текст
+*.dll binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.wav binary
+*.mp3 binary
+*.mp4 binary
+*.onnx binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
