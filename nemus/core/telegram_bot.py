@@ -507,8 +507,11 @@ class TelegramBot:
         self._message_id: int | None = None
         #: агент уже поставил реакцию — второй раз не ставим
         self._reaction_set = False
-        #: вложение без подписи по чатам: текст, изображения, время
-        self._pending_attachments: dict[int, tuple[str, list[str], float]] = {}
+        #: вложение без подписи по чатам:
+        #: текст, изображения, время, id вопроса и id отправителя
+        self._pending_attachments: dict[
+            int, tuple[str, list[str], float, int | None, int | None]
+        ] = {}
         #: первая подсказка и персональный мьют (в памяти, если нет telegram.db)
         self._hints_shown: set[int] = set()
         self._hints_muted: set[int] = set()
@@ -693,13 +696,27 @@ class TelegramBot:
         return chat_id or self._chat_id or self._notify_chat_id
 
     def _remember_pending_attachment(
-        self, chat_id: int, text: str, images: list[str], at: float | None = None
+        self,
+        chat_id: int,
+        text: str,
+        images: list[str],
+        at: float | None = None,
+        *,
+        message_id: int | None = None,
+        user_id: int | None = None,
     ) -> None:
-        """Запоминает вложение без подписи для конкретного чата."""
+        """Запоминает вложение без подписи для конкретного чата.
+
+        ``message_id`` — сообщение с кнопками, ``user_id`` — кто прислал
+        файл. Они не дают старой кнопке забрать более новое вложение или
+        чужой файл в общем чате.
+        """
         self._pending_attachments[chat_id] = (
             text,
             list(images),
             time.time() if at is None else at,
+            message_id,
+            user_id,
         )
 
     def _peek_pending_attachment(self, chat_id: int) -> tuple[str, list[str]]:
@@ -707,11 +724,31 @@ class TelegramBot:
         item = self._pending_attachments.get(chat_id)
         if item is None:
             return "", []
-        text, images, at = item
+        text, images, at, _message_id, _user_id = item
         if time.time() - at > ATTACHMENT_CONTEXT_TTL:
             self._pending_attachments.pop(chat_id, None)
             return "", []
         return text, list(images)
+
+    def _pending_attachment_matches(
+        self,
+        chat_id: int,
+        message_id: int | None,
+        user_id: int | None,
+    ) -> bool:
+        """Относится ли живое вложение к этой кнопке и этому пользователю."""
+        item = self._pending_attachments.get(chat_id)
+        if item is None:
+            return False
+        _text, _images, at, stored_message, stored_user = item
+        if time.time() - at > ATTACHMENT_CONTEXT_TTL:
+            self._pending_attachments.pop(chat_id, None)
+            return False
+        if stored_message is not None and stored_message != message_id:
+            return False
+        if stored_user is not None and stored_user != user_id:
+            return False
+        return True
 
     def _take_pending_attachment(self, chat_id: int) -> tuple[str, list[str]]:
         """Забирает недавнее вложение без подписи: текст и сами изображения."""
@@ -1314,12 +1351,14 @@ class TelegramBot:
         if not self._authorized(update):
             await self._deny(update)
             return
+        chat_id = update.effective_chat.id
+        hints = self._hints_active(chat_id)
         await start_message(
             self._app.bot,
-            update.effective_chat.id,
-            help_text(self._hints_enabled),
+            chat_id,
+            help_text(hints),
             reply_to=update.message.message_id,
-            reply_markup=self._keyboard(main_menu_rows(self._hints_enabled)),
+            reply_markup=self._keyboard(main_menu_rows(hints)),
         )
 
     async def _cmd_new(self, update: Any, context: Any) -> None:
@@ -1523,17 +1562,21 @@ class TelegramBot:
             # иначе модель домысливает действие (например, делает чиби).
             # Запоминаем путь и само изображение: следующая задача будет
             # знать, о чём речь, и модель действительно увидит фото.
-            self._remember_pending_attachment(
-                chat_id, _attachment_context(saved), image_urls
-            )
             rows = (
                 attachment_action_rows(guess_kind(saved[0]))
                 if len(saved) == 1 and self._hints_active(chat_id)
                 else []
             )
-            await message.reply_text(
+            question = await message.reply_text(
                 _attachment_question(saved, short=bool(rows)),
                 reply_markup=self._keyboard(rows),
+            )
+            self._remember_pending_attachment(
+                chat_id,
+                _attachment_context(saved),
+                image_urls,
+                message_id=getattr(question, "message_id", None),
+                user_id=getattr(update.effective_user, "id", None),
             )
             return
         parts: list[str] = []
@@ -1900,11 +1943,23 @@ class TelegramBot:
             key = action.split(":", 1)[1]
             prompt = attachment_prompt(key)
             chat_id = query.message.chat_id
+            user_id = getattr(query.from_user, "id", None)
+            message_id = getattr(query.message, "message_id", None)
             if prompt is None:
                 await query.answer("Неизвестное действие")
                 return
-            pending, images = self._take_pending_attachment(chat_id)
-            if not pending:
+            if not self._hints_active(chat_id):
+                await query.answer(
+                    "Подсказки выключены в этом чате", show_alert=True
+                )
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            if not self._pending_attachment_matches(
+                chat_id, message_id, user_id
+            ):
                 await query.answer(
                     "Вложение уже не актуально — пришли его ещё раз",
                     show_alert=True,
@@ -1914,6 +1969,7 @@ class TelegramBot:
                 except Exception:  # noqa: BLE001
                     pass
                 return
+            pending, images = self._take_pending_attachment(chat_id)
             await query.answer("Запускаю")
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
@@ -1922,8 +1978,8 @@ class TelegramBot:
             text = f"{pending}\n\nЗадача пользователя: {prompt}"
             await self._run_task_for(
                 chat_id=chat_id,
-                user_id=getattr(query.from_user, "id", None),
-                message_id=getattr(query.message, "message_id", None),
+                user_id=user_id,
+                message_id=message_id,
                 text=text,
                 images=images,
             )
@@ -1982,22 +2038,27 @@ class TelegramBot:
             )
             return
         if action == "help":
+            chat_id = query.message.chat_id
+            hints = self._hints_active(chat_id)
             await query.answer()
             await start_message(
                 self._app.bot,
-                query.message.chat_id,
-                help_text(self._hints_enabled),
-                reply_markup=self._keyboard(main_menu_rows(self._hints_enabled)),
+                chat_id,
+                help_text(hints),
+                reply_markup=self._keyboard(main_menu_rows(hints)),
             )
             return
         if action == "examples":
-            if not self._hints_enabled:
-                await query.answer("Подсказки выключены в настройках", show_alert=True)
+            chat_id = query.message.chat_id
+            if not self._hints_active(chat_id):
+                await query.answer(
+                    "Подсказки выключены в этом чате", show_alert=True
+                )
                 return
             await query.answer()
             await start_message(
                 self._app.bot,
-                query.message.chat_id,
+                chat_id,
                 examples_text(),
                 reply_markup=self._keyboard(main_menu_rows(True)),
             )

@@ -39,7 +39,6 @@ from nemus.core.telegram_ux import (  # noqa: E402
     error_rows,
     error_text,
     examples_text,
-    first_hint_rows,
     help_text,
     main_menu_rows,
     start_text,
@@ -586,10 +585,12 @@ def test_first_hint_once_and_mute() -> None:
     assert len(bot._app.bot.sent) == 1, bot._app.bot.sent
     assert bot.memory.meta["telegram_hint_shown:7"] == "1"
 
-    bot._set_hint_muted(7, True)
-    asyncio.run(bot._maybe_show_first_hint(7))
+    # Мьют проверяем на свежем чате: иначе сработает флаг «уже показано»,
+    # и тест пройдёт, даже если мьют вообще не учитывается.
+    bot._set_hint_muted(8, True)
+    asyncio.run(bot._maybe_show_first_hint(8))
     assert len(bot._app.bot.sent) == 1
-    assert first_hint_rows()
+    assert "telegram_hint_shown:8" not in bot.memory.meta
     print("ok  первая подсказка показывается один раз и уважает мьют")
 
 
@@ -602,6 +603,17 @@ def test_error_text_and_progress_keyboard() -> None:
         "ValueError: плохой файл"
     )
     assert "плохой файл" in text and "Traceback" not in text
+
+    qualified = error_text("telegram.error.BadRequest: Chat not found")
+    assert "telegram.error" not in qualified and "BadRequest" not in qualified
+
+    file_error = error_text(
+        "FileNotFoundError: [Errno 2] No such file or directory: "
+        "'C:\\Users\\User\\secret\\report.pdf'"
+    )
+    assert "Файл не найден" in file_error
+    assert "C:\\" not in file_error and "secret" not in file_error
+
     rows = error_rows(True)
     assert any(data == "ux:retry" for row in rows for _, data in row)
     assert not any(data == "ux:retry" for row in error_rows(False) for _, data in row)
@@ -777,6 +789,98 @@ def test_start_help_respect_hints() -> None:
     print("ok  /start и /help уважают общий выключатель подсказок")
 
 
+def test_muted_help_examples_and_attachment_buttons() -> None:
+    """Мьют чата не обходится через /help, старые кнопки и вложения."""
+    import asyncio
+    import time
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict]] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+            self.sent.append((text, kwargs))
+
+    class _Query:
+        def __init__(self, data: str, message_id: int = 5) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=42)
+            self.message = SimpleNamespace(chat_id=42, message_id=message_id)
+            self.answers: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            pass
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot.memory = None
+    bot._hints_shown = {42}
+    bot._hints_muted = {42}
+    bot._pending_attachments = {}
+    bot._last_tasks = {}
+    fake = _FakeBot()
+    bot._app = SimpleNamespace(bot=fake)
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=42, type="private"),
+        message=SimpleNamespace(message_id=11),
+    )
+    asyncio.run(bot._cmd_help(update, None))
+    text, kwargs = fake.sent[-1]
+    assert "Фишка" not in text
+    assert kwargs.get("reply_markup") is None
+
+    fake.sent.clear()
+    examples = _Query("ux:examples")
+    asyncio.run(
+        bot._on_callback(
+            SimpleNamespace(
+                callback_query=examples,
+                effective_user=examples.from_user,
+                effective_chat=SimpleNamespace(id=42, type="private"),
+            ),
+            None,
+        )
+    )
+    assert not fake.sent
+    assert "этом чате" in examples.answers[-1]
+
+    bot._remember_pending_attachment(
+        42,
+        "Пользователь прислал файл(ы):\n- photo.jpg",
+        [],
+        at=time.time(),
+        message_id=5,
+        user_id=42,
+    )
+    stale_action = _Query("ux:attach:photo_describe")
+    seen: list[dict] = []
+
+    async def _run_task_for(**kwargs: object) -> None:
+        seen.append(kwargs)
+
+    bot._run_task_for = _run_task_for  # type: ignore[method-assign]
+    asyncio.run(
+        bot._on_callback(
+            SimpleNamespace(
+                callback_query=stale_action,
+                effective_user=stale_action.from_user,
+                effective_chat=SimpleNamespace(id=42, type="private"),
+            ),
+            None,
+        )
+    )
+    assert not seen, "замьюченный чат не должен запускать действие вложения"
+    assert "этом чате" in stale_action.answers[-1]
+    print("ok  мьют чата закрывает /help, примеры и старые кнопки вложений")
+
+
 def test_ux_examples_callback() -> None:
     """Кнопка «Примеры задач» отправляет примеры, а не молчит."""
     import asyncio
@@ -878,9 +982,16 @@ def test_attachment_callback_runs_task() -> None:
     cfg.telegram.allowed_users = [42]
     bot = object.__new__(TelegramBot)
     bot.cfg = cfg.telegram
+    bot.memory = None
     bot._pending_attachments = {}
+    bot._hints_shown = set()
+    bot._hints_muted = set()
     bot._remember_pending_attachment(
-        42, "Пользователь прислал файл(ы):\n- photo.jpg", []
+        42,
+        "Пользователь прислал файл(ы):\n- photo.jpg",
+        [],
+        message_id=5,
+        user_id=42,
     )
     query = _Query()
     update = SimpleNamespace(
@@ -913,6 +1024,86 @@ def test_attachment_callback_runs_task() -> None:
     assert len(seen) == 1, "старая кнопка не должна запускать вторую задачу"
     assert "уже не актуально" in stale.answers[-1]
     print("ok  кнопка под вложением сразу запускает задачу")
+
+
+def test_stale_attachment_button_does_not_take_newer_file() -> None:
+    """Кнопка под старым фото не должна забрать новое вложение чата."""
+    import asyncio
+    import time
+
+    class _Query:
+        def __init__(self, message_id: int, user_id: int = 42) -> None:
+            self.data = "ux:attach:photo_describe"
+            self.from_user = SimpleNamespace(id=user_id)
+            self.message = SimpleNamespace(chat_id=42, message_id=message_id)
+            self.answers: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            pass
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42, 7]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot.memory = None
+    bot._pending_attachments = {}
+    bot._hints_shown = set()
+    bot._hints_muted = set()
+    bot._last_tasks = {}
+    bot._remember_pending_attachment(
+        42,
+        "Пользователь прислал файл(ы):\n- old.jpg",
+        [],
+        at=time.time(),
+        message_id=101,
+        user_id=42,
+    )
+    bot._remember_pending_attachment(
+        42,
+        "Пользователь прислал файл(ы):\n- new.jpg",
+        [],
+        at=time.time(),
+        message_id=102,
+        user_id=42,
+    )
+    seen: list[dict] = []
+
+    async def _run_task_for(**kwargs: object) -> None:
+        seen.append(kwargs)
+
+    bot._run_task_for = _run_task_for  # type: ignore[method-assign]
+
+    def _run(query: _Query) -> None:
+        asyncio.run(
+            bot._on_callback(
+                SimpleNamespace(
+                    callback_query=query,
+                    effective_user=query.from_user,
+                    effective_chat=SimpleNamespace(id=42, type="private"),
+                ),
+                None,
+            )
+        )
+
+    old = _Query(101)
+    _run(old)
+    assert not seen, "старая кнопка не должна брать новое фото"
+    assert "уже не актуально" in old.answers[-1]
+    assert "new.jpg" in bot._peek_pending_attachment(42)[0]
+
+    foreign = _Query(102, user_id=7)
+    _run(foreign)
+    assert not seen, "чужой пользователь не должен забрать вложение"
+    assert "уже не актуально" in foreign.answers[-1]
+
+    current = _Query(102)
+    _run(current)
+    assert seen and "new.jpg" in seen[0]["text"]
+    assert bot._peek_pending_attachment(42) == ("", [])
+    print("ok  старая кнопка и чужой пользователь не забирают новое вложение")
 
 
 def test_attachment_without_caption() -> None:
@@ -1486,10 +1677,12 @@ def main() -> int:
     test_status_context_lines()
     test_ux_texts()
     test_start_help_respect_hints()
+    test_muted_help_examples_and_attachment_buttons()
     test_ux_examples_callback()
     test_attachment_actions()
     test_pending_attachments_are_per_chat()
     test_attachment_callback_runs_task()
+    test_stale_attachment_button_does_not_take_newer_file()
     test_attachment_without_caption()
     test_stt_failure_does_not_ask_attachment()
     test_download_limit_is_twenty_mb()

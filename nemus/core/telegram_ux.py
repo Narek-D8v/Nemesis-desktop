@@ -114,6 +114,30 @@ def first_hint_rows() -> list[list[tuple[str, str]]]:
     ]
 
 
+#: тип исключения → короткая причина без внутренностей Python/Telegram
+_ERROR_REASONS = {
+    "FileNotFoundError": "Файл не найден",
+    "PermissionError": "Нет доступа к файлу",
+    "IsADirectoryError": "Ожидался файл, а не папка",
+    "TimeoutError": "Превышено время ожидания",
+    "ConnectionError": "Нет соединения",
+    "NetworkError": "Нет соединения с Telegram",
+    "BadRequest": "Telegram не принял запрос",
+    "OSError": "Ошибка доступа к файлу",
+}
+
+_ERROR_PREFIX = re.compile(
+    r"^(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*):\s*(.*)$"
+)
+
+
+def _redact_paths(text: str) -> str:
+    """Убирает абсолютные пути из причины ошибки."""
+    text = re.sub(r"[A-Za-z]:\\[^\s'\"]+", "…", text)
+    text = re.sub(r"(?<![\w:])/(?:[^\s/'\"]+/)+[^\s/'\"]+", "…", text)
+    return text
+
+
 def error_text(error: str) -> str:
     """Короткая человеческая причина без стектрейса и путей."""
     lines = [
@@ -128,7 +152,12 @@ def error_text(error: str) -> str:
         and not re.match(r'^File ".*", line \d+', line)
     ]
     reason = lines[-1] if lines else "Неизвестная ошибка"
-    reason = re.sub(r"^\w*(?:Error|Exception):\s*", "", reason)
+    match = _ERROR_PREFIX.match(reason)
+    if match:
+        kind, detail = match.group(1), match.group(2).strip()
+        reason = _ERROR_REASONS.get(kind, detail or "Ошибка выполнения")
+    reason = _redact_paths(reason)
+    reason = re.sub(r"\s+", " ", reason).strip()
     reason = reason[:300] or "Неизвестная ошибка"
     return (
         "Не получилось выполнить задачу.\n\n"
