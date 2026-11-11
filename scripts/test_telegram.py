@@ -32,6 +32,12 @@ from nemus.core.telegram_bot import (  # noqa: E402
     split_message,
     telegram_status,
 )
+from nemus.core.telegram_ux import (  # noqa: E402
+    examples_text,
+    help_text,
+    main_menu_rows,
+    start_text,
+)
 from nemus.core.tools.registry import ToolRegistry  # noqa: E402
 from nemus.core.tools.telegram import (  # noqa: E402
     _ALLOWED_REACTIONS,
@@ -537,6 +543,113 @@ def test_typing_and_reactions() -> None:
     # если Telegram не принял разметку — тот же текст ушёл обычным
     assert fake.sent[1][0] == "ещё раз", fake.sent[1][0]
     print("ok  «печатает…», реакции и HTML-ответ с запасным текстом")
+
+
+def test_ux_texts() -> None:
+    """Тексты первого экрана и примеров зависят от переключателя."""
+    with_hints = start_text("Немесис", "Немо", True)
+    without_hints = start_text("Немесис", "Немо", False)
+    assert "Примеры" in with_hints and "сделай из этого видео кружок" in with_hints
+    assert "Примеры" not in without_hints
+    assert "Фишка" in help_text(True)
+    assert "Фишка" not in help_text(False)
+    assert "PDF" in examples_text()
+    assert main_menu_rows(True)
+    assert main_menu_rows(False) == []
+    print("ok  тексты первого экрана и примеров зависят от подсказок")
+
+
+def test_start_help_respect_hints() -> None:
+    """При выключенных подсказках нет примеров и кнопок-подсказок."""
+    import asyncio
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict]] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+            self.sent.append((text, kwargs))
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    bot = TelegramBot(cfg, core)
+    fake = _FakeBot()
+    bot._app = SimpleNamespace(bot=fake)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=42, type="private"),
+        message=SimpleNamespace(message_id=11),
+    )
+
+    asyncio.run(bot._cmd_start(update, None))
+    text, kwargs = fake.sent[-1]
+    assert "Примеры" in text
+    assert kwargs.get("reply_markup") is not None
+
+    fake.sent.clear()
+    cfg.telegram.hints_enabled = False
+    asyncio.run(bot._cmd_start(update, None))
+    text, kwargs = fake.sent[-1]
+    assert "Примеры" not in text
+    assert kwargs.get("reply_markup") is None
+
+    fake.sent.clear()
+    asyncio.run(bot._cmd_help(update, None))
+    assert "Фишка" not in fake.sent[-1][0]
+    print("ok  /start и /help уважают общий выключатель подсказок")
+
+
+def test_ux_examples_callback() -> None:
+    """Кнопка «Примеры задач» отправляет примеры, а не молчит."""
+    import asyncio
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+            self.sent.append(text)
+
+    class _Query:
+        data = "ux:examples"
+        from_user = SimpleNamespace(id=42)
+        message = SimpleNamespace(chat_id=42)
+
+        def __init__(self) -> None:
+            self.answers: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            pass
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    bot = TelegramBot(cfg, core)
+    fake = _FakeBot()
+    bot._app = SimpleNamespace(bot=fake)
+    query = _Query()
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=query.from_user,
+        effective_chat=SimpleNamespace(id=42, type="private"),
+    )
+    asyncio.run(bot._on_callback(update, None))
+    assert fake.sent and "Примеры задач" in fake.sent[-1], fake.sent
+    print("ok  кнопка «Примеры задач» присылает примеры")
 
 
 def test_attachment_without_caption() -> None:
@@ -1099,6 +1212,9 @@ def main() -> int:
     test_start_timeout_stops_hung_thread()
     test_stop_watchdog_kills_zombie_loop()
     test_typing_and_reactions()
+    test_ux_texts()
+    test_start_help_respect_hints()
+    test_ux_examples_callback()
     test_attachment_without_caption()
     test_stt_failure_does_not_ask_attachment()
     test_download_limit_is_twenty_mb()

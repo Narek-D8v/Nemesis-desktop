@@ -40,6 +40,12 @@ from nemus.core.telegram_format import (
     split_message,
     strip_html,
 )
+from nemus.core.telegram_ux import (
+    examples_text,
+    help_text,
+    main_menu_rows,
+    start_text,
+)
 from nemus.core.tools.telegram import (
     _ALLOWED_REACTIONS,
     REACTION_EMOJIS,
@@ -409,18 +415,24 @@ class _Progress:
 
 
 async def start_message(
-    bot: Any, chat_id: int, text: str, reply_to: int | None = None
+    bot: Any,
+    chat_id: int,
+    text: str,
+    reply_to: int | None = None,
+    reply_markup: Any | None = None,
 ) -> None:
     """Отправляет ответ с форматированием Telegram и разбивкой по лимиту.
 
     Если Telegram не принял разметку (например, модель выдала странный тег),
     тот же текст уходит обычным сообщением — без падения задачи.
+    Клавиатура ставится на последний чанк, чтобы не дублироваться.
     """
     chunks = html_chunks(text) or ["…"]
     for index, chunk in enumerate(chunks):
         kwargs = {
             "reply_to_message_id": reply_to if index == 0 else None,
             "allow_sending_without_reply": True,
+            "reply_markup": reply_markup if index == len(chunks) - 1 else None,
         }
         try:
             await bot.send_message(chat_id, chunk, parse_mode="HTML", **kwargs)
@@ -503,6 +515,27 @@ class TelegramBot:
             confirm=self._confirm,
             memory=self.memory,
             system_suffix=self._system_suffix(),
+        )
+
+    @property
+    def _hints_enabled(self) -> bool:
+        """Включены ли подсказки глобально."""
+        return bool(getattr(self.cfg, "hints_enabled", True))
+
+    def _keyboard(self, rows: list[list[tuple[str, str]]]) -> Any | None:
+        """Собирает inline-клавиатуру из пар «подпись, callback»."""
+        if not rows:
+            return None
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(label, callback_data=data)
+                    for label, data in row
+                ]
+                for row in rows
+            ]
         )
 
     def _session_key(self, chat_id: int) -> str:
@@ -1158,19 +1191,12 @@ class TelegramBot:
         if not self._authorized(update):
             await self._deny(update)
             return
-        full = self._names()[1]
         await start_message(
             self._app.bot,
             update.effective_chat.id,
-            f"**Привет! Я {full}** — можно просто {self._aliases()}. 🚀\n\n"
-            "> Живу на твоём компьютере: открою программы, найду файлы, "
-            "сделаю видео или соберу отчёт — и пришлю результат прямо сюда.\n\n"
-            "**Что можно присылать**\n"
-            "• текст или голосовое с задачей;\n"
-            "• файлы, фото и видео — разберусь по содержимому.\n\n"
-            "**Команды:** /new — новый диалог, /status — состояние, "
-            "/id — мой ID, /help — помощь.",
+            start_text(self._names()[1], self._aliases(), self._hints_enabled),
             reply_to=update.message.message_id,
+            reply_markup=self._keyboard(main_menu_rows(self._hints_enabled)),
         )
 
     async def _cmd_help(self, update: Any, context: Any) -> None:
@@ -1180,18 +1206,9 @@ class TelegramBot:
         await start_message(
             self._app.bot,
             update.effective_chat.id,
-            "**Что я умею в Telegram**\n"
-            "• текстовые задачи: «сделай из видео кружок», «собери отчёт», "
-            "«найди файл и пришли»;\n"
-            "• файлы, фото, видео и голосовые: скачаю в рабочую папку и "
-            "выполню задачу по ним;\n"
-            "• отправлю результат обратно файлом, фото или видео-кружком;\n"
-            "• опасные действия подтверждаю кнопками прямо в чате.\n\n"
-            "> Фишка: пришли видео и напиши «сделай кружок» — обрежу кадр, "
-            "сожму и отправлю видео-кружком.\n\n"
-            "**Команды:** /new — очистить контекст, /status — модель и время "
-            "работы, /id — ваш Telegram ID, /stop — остановить бота.",
+            help_text(self._hints_enabled),
             reply_to=update.message.message_id,
+            reply_markup=self._keyboard(main_menu_rows(self._hints_enabled)),
         )
 
     async def _cmd_new(self, update: Any, context: Any) -> None:
@@ -1701,6 +1718,32 @@ class TelegramBot:
         finally:
             self._pending.pop(key, None)
 
+    async def _on_ux_callback(self, update: Any, query: Any) -> None:
+        """Кнопки подсказок: помощь и примеры."""
+        action = (query.data or "")[3:]
+        if action == "help":
+            await query.answer()
+            await start_message(
+                self._app.bot,
+                query.message.chat_id,
+                help_text(self._hints_enabled),
+                reply_markup=self._keyboard(main_menu_rows(self._hints_enabled)),
+            )
+            return
+        if action == "examples":
+            if not self._hints_enabled:
+                await query.answer("Подсказки выключены в настройках", show_alert=True)
+                return
+            await query.answer()
+            await start_message(
+                self._app.bot,
+                query.message.chat_id,
+                examples_text(),
+                reply_markup=self._keyboard(main_menu_rows(True)),
+            )
+            return
+        await query.answer("Кнопка устарела")
+
     async def _on_callback(self, update: Any, context: Any) -> None:
         query = update.callback_query
         if query is None:
@@ -1708,7 +1751,11 @@ class TelegramBot:
         if not self._authorized(update):
             await query.answer("Доступ запрещён", show_alert=True)
             return
-        parts = (query.data or "").split(":")
+        data = query.data or ""
+        if data.startswith("ux:"):
+            await self._on_ux_callback(update, query)
+            return
+        parts = data.split(":")
         if len(parts) < 5 or parts[0] != "tg":
             await query.answer()
             return
