@@ -7,6 +7,11 @@
 
 from __future__ import annotations
 
+import re
+
+HINT_SHOWN_PREFIX = "telegram_hint_shown:"
+HINT_MUTED_PREFIX = "telegram_hints_muted:"
+
 
 def start_text(full_name: str, aliases: str, hints: bool) -> str:
     """Первый экран: что умеет бот и с чего начать."""
@@ -86,8 +91,64 @@ def main_menu_rows(hints: bool) -> list[list[tuple[str, str]]]:
         [
             ("📋 Примеры задач", "ux:examples"),
             ("🧰 Что я умею", "ux:help"),
+        ],
+        [
+            ("🆕 Новый диалог", "ux:new"),
+            ("ℹ️ Статус", "ux:status"),
+        ],
+    ]
+
+
+def first_hint_text() -> str:
+    """Короткая подсказка после первой успешной задачи."""
+    return "💡 Я умею ещё работать с файлами и медиа. Показать примеры?"
+
+
+def first_hint_rows() -> list[list[tuple[str, str]]]:
+    """Кнопки под первой подсказкой."""
+    return [
+        [
+            ("Показать примеры", "ux:examples"),
+            ("Больше не показывать", "ux:mute"),
         ]
     ]
+
+
+def error_text(error: str) -> str:
+    """Короткая человеческая причина без стектрейса и путей."""
+    lines = [
+        line.strip()
+        for line in (error or "").splitlines()
+        if line.strip()
+    ]
+    lines = [
+        line
+        for line in lines
+        if not line.startswith("Traceback")
+        and not re.match(r'^File ".*", line \d+', line)
+    ]
+    reason = lines[-1] if lines else "Неизвестная ошибка"
+    reason = re.sub(r"^\w*(?:Error|Exception):\s*", "", reason)
+    reason = reason[:300] or "Неизвестная ошибка"
+    return (
+        "Не получилось выполнить задачу.\n\n"
+        f"{reason}\n\n"
+        "Попробуй повторить или сформулируй проще."
+    )
+
+
+def error_rows(can_retry: bool) -> list[list[tuple[str, str]]]:
+    """Кнопки восстановления после ошибки."""
+    row: list[tuple[str, str]] = []
+    if can_retry:
+        row.append(("🔁 Повторить", "ux:retry"))
+    row.extend(
+        [
+            ("🆕 Новый диалог", "ux:new"),
+            ("❓ Помощь", "ux:help"),
+        ]
+    )
+    return [row]
 
 
 #: действие → (подпись кнопки, промпт для агента)

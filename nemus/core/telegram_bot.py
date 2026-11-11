@@ -41,9 +41,15 @@ from nemus.core.telegram_format import (
     strip_html,
 )
 from nemus.core.telegram_ux import (
+    HINT_MUTED_PREFIX,
+    HINT_SHOWN_PREFIX,
     attachment_action_rows,
     attachment_prompt,
+    error_rows,
+    error_text,
     examples_text,
+    first_hint_rows,
+    first_hint_text,
     help_text,
     main_menu_rows,
     start_text,
@@ -413,16 +419,26 @@ class _Progress:
             pass
         self.message_id = None
 
-    async def fail(self, text: str) -> None:
+    async def fail(self, text: str, reply_markup: Any | None = None) -> None:
         if self.message_id is None:
-            await start_message(self.bot, self.chat_id, text)
+            await start_message(
+                self.bot, self.chat_id, text, reply_markup=reply_markup
+            )
             return
         try:
             await self.bot.edit_message_text(
-                f"❌ {text}"[:3900], chat_id=self.chat_id, message_id=self.message_id
+                f"❌ {text}"[:3900],
+                chat_id=self.chat_id,
+                message_id=self.message_id,
+                reply_markup=reply_markup,
             )
         except Exception:  # noqa: BLE001
-            await start_message(self.bot, self.chat_id, f"❌ {text}")
+            await start_message(
+                self.bot,
+                self.chat_id,
+                f"❌ {text}",
+                reply_markup=reply_markup,
+            )
 
 
 async def start_message(
@@ -493,6 +509,13 @@ class TelegramBot:
         self._reaction_set = False
         #: вложение без подписи по чатам: текст, изображения, время
         self._pending_attachments: dict[int, tuple[str, list[str], float]] = {}
+        #: первая подсказка и персональный мьют (в памяти, если нет telegram.db)
+        self._hints_shown: set[int] = set()
+        self._hints_muted: set[int] = set()
+        #: последняя задача чата для кнопки «Повторить»
+        self._last_tasks: dict[
+            int, tuple[str, list[str] | None, int | None, int | None]
+        ] = {}
         #: чат для фоновых уведомлений (напоминания): не сбрасывается после
         #: ответа, в отличие от _chat_id текущей задачи
         self._notify_chat_id: int | None = (
@@ -530,6 +553,43 @@ class TelegramBot:
         """Включены ли подсказки глобально."""
         return bool(getattr(self.cfg, "hints_enabled", True))
 
+    def _hint_shown(self, chat_id: int) -> bool:
+        """Показывали ли уже первую подсказку в этом чате."""
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            return memory.get_meta(HINT_SHOWN_PREFIX + str(chat_id)) == "1"
+        return chat_id in self._hints_shown
+
+    def _mark_hint_shown(self, chat_id: int) -> None:
+        """Запоминает факт показа первой подсказки."""
+        self._hints_shown.add(chat_id)
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            memory.set_meta(HINT_SHOWN_PREFIX + str(chat_id), "1")
+
+    def _hint_muted(self, chat_id: int) -> bool:
+        """Отключил ли пользователь подсказки в этом чате."""
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            return memory.get_meta(HINT_MUTED_PREFIX + str(chat_id)) == "1"
+        return chat_id in self._hints_muted
+
+    def _set_hint_muted(self, chat_id: int, muted: bool) -> None:
+        """Включает или выключает подсказки для одного чата."""
+        if muted:
+            self._hints_muted.add(chat_id)
+        else:
+            self._hints_muted.discard(chat_id)
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            memory.set_meta(
+                HINT_MUTED_PREFIX + str(chat_id), "1" if muted else "0"
+            )
+
+    def _hints_active(self, chat_id: int) -> bool:
+        """Глобальные подсказки включены и чат не нажал «Больше не показывать»."""
+        return self._hints_enabled and not self._hint_muted(chat_id)
+
     def _keyboard(self, rows: list[list[tuple[str, str]]]) -> Any | None:
         """Собирает inline-клавиатуру из пар «подпись, callback»."""
         if not rows:
@@ -544,6 +604,22 @@ class TelegramBot:
                 ]
                 for row in rows
             ]
+        )
+
+    def _error_keyboard(self, chat_id: int) -> Any | None:
+        """Кнопки восстановления; «Повторить» — только если есть что повторять."""
+        return self._keyboard(error_rows(chat_id in self._last_tasks))
+
+    async def _maybe_show_first_hint(self, chat_id: int) -> None:
+        """Один раз на чат показывает, что бот умеет ещё и файлы/медиа."""
+        if not self._hints_active(chat_id) or self._hint_shown(chat_id):
+            return
+        self._mark_hint_shown(chat_id)
+        await start_message(
+            self._app.bot,
+            chat_id,
+            first_hint_text(),
+            reply_markup=self._keyboard(first_hint_rows()),
         )
 
     def _session_key(self, chat_id: int) -> str:
@@ -1223,9 +1299,12 @@ class TelegramBot:
         if not self._authorized(update):
             await self._deny(update)
             return
+        chat_id = update.effective_chat.id
+        self._set_hint_muted(chat_id, False)
+        self._mark_hint_shown(chat_id)
         await start_message(
             self._app.bot,
-            update.effective_chat.id,
+            chat_id,
             start_text(self._names()[1], self._aliases(), self._hints_enabled),
             reply_to=update.message.message_id,
             reply_markup=self._keyboard(main_menu_rows(self._hints_enabled)),
@@ -1252,8 +1331,10 @@ class TelegramBot:
                 "⏳ Сначала дождись завершения текущей задачи — потом /new."
             )
             return
-        self._clear_pending_attachments(update.effective_chat.id)
-        self._new_session_for_chat(update.effective_chat.id)
+        chat_id = update.effective_chat.id
+        self._clear_pending_attachments(chat_id)
+        self._new_session_for_chat(chat_id)
+        self._last_tasks.pop(chat_id, None)
         await update.message.reply_text("🧹 Контекст очищен — начинаем заново.")
 
     async def _cmd_id(self, update: Any, context: Any) -> None:
@@ -1263,22 +1344,56 @@ class TelegramBot:
             f"Username: @{user.username}" if user.username else f"Ваш ID: {user.id}"
         )
 
-    async def _cmd_status(self, update: Any, context: Any) -> None:
-        if not self._authorized(update):
-            await self._deny(update)
-            return
+    def _status_text(self, chat_id: int | None = None) -> str:
+        """Состояние бота и текущего диалога."""
+        lock = getattr(self, "_task_lock", None)
+        if chat_id is not None and not (lock is not None and lock.locked()):
+            try:
+                self._prepare_session(chat_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Telegram: не удалось подготовить сессию для статуса %s", chat_id
+                )
         uptime = time.monotonic() - (self.started_at or time.monotonic())
         hours, minutes = int(uptime // 3600), int(uptime % 3600 // 60)
-        busy = "выполняю задачу" if self._chat_id else "свободна"
-        await start_message(
-            self._app.bot,
-            update.effective_chat.id,
+        busy = "выполняю задачу" if getattr(self, "_chat_id", None) else "свободна"
+        history = getattr(self.agent, "history", [])
+        turns = sum(1 for message in history if getattr(message, "role", "") == "user")
+        summary = bool(getattr(self.agent, "_summary", ""))
+        memory = getattr(self, "memory", None)
+        if not summary and memory is not None:
+            getter = getattr(memory, "get_summary", None)
+            if callable(getter):
+                try:
+                    summary = bool(getter())
+                except Exception:  # noqa: BLE001
+                    summary = False
+        if not self._hints_enabled:
+            hints = "выключены"
+        elif chat_id is not None and self._hint_muted(chat_id):
+            hints = "включены (для этого чата выключены)"
+        else:
+            hints = "включены"
+        return (
             f"**Состояние**\n"
             f"• модель: `{self.core.llm.model}`\n"
             f"• провайдер: {self.core.llm.provider}\n"
             f"• бот: @{self.username or '?'}\n"
             f"• работаю: {hours} ч {minutes} мин\n"
-            f"• сейчас: {busy}",
+            f"• сейчас: {busy}\n"
+            f"• диалог: {turns} реплик\n"
+            f"• память: {'сжатая выжимка' if summary else 'обычная'}\n"
+            f"• подсказки: {hints}"
+        )
+
+    async def _cmd_status(self, update: Any, context: Any) -> None:
+        if not self._authorized(update):
+            await self._deny(update)
+            return
+        await start_message(
+            self._app.bot,
+            update.effective_chat.id,
+            self._status_text(update.effective_chat.id),
             reply_to=update.message.message_id,
         )
 
@@ -1413,7 +1528,7 @@ class TelegramBot:
             )
             rows = (
                 attachment_action_rows(guess_kind(saved[0]))
-                if len(saved) == 1 and self._hints_enabled
+                if len(saved) == 1 and self._hints_active(chat_id)
                 else []
             )
             await message.reply_text(
@@ -1620,6 +1735,7 @@ class TelegramBot:
         text: str,
         images: list[str] | None = None,
     ) -> None:
+        self._last_tasks[chat_id] = (text, list(images or []), message_id, user_id)
         if self._task_lock is None:
             self._task_lock = asyncio.Lock()
         if self._task_lock.locked():
@@ -1697,18 +1813,23 @@ class TelegramBot:
                 self._message_id = None
 
             if error:
-                await progress.fail(error[:3000])
+                await progress.fail(
+                    error_text(self._mask(error)),
+                    reply_markup=self._error_keyboard(chat_id),
+                )
                 return
             final_text = (final_text or "").strip()
             if not final_text:
                 await progress.fail(
-                    "Пустой ответ модели. Попробуйте переформулировать задачу."
+                    error_text("Пустой ответ модели. Попробуйте переформулировать задачу."),
+                    reply_markup=self._error_keyboard(chat_id),
                 )
                 return
             await progress.close()
             await start_message(
                 self._app.bot, chat_id, final_text, reply_to=message_id
             )
+            await self._maybe_show_first_hint(chat_id)
             # Агент в общем наборе инструментов часто отвечает эмодзи в тексте,
             # а не вызывает react_telegram. Спрашиваем отдельно и ставим сами,
             # только если агент уже не поставил реакцию.
@@ -1803,6 +1924,59 @@ class TelegramBot:
                 chat_id=chat_id,
                 user_id=getattr(query.from_user, "id", None),
                 message_id=getattr(query.message, "message_id", None),
+                text=text,
+                images=images,
+            )
+            return
+        if action == "mute":
+            chat_id = query.message.chat_id
+            self._set_hint_muted(chat_id, True)
+            self._mark_hint_shown(chat_id)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+            await query.answer("Больше не буду показывать подсказки в этом чате")
+            return
+        if action == "new":
+            chat_id = query.message.chat_id
+            lock = getattr(self, "_task_lock", None)
+            if lock is not None and lock.locked():
+                await query.answer(
+                    "Сначала дождись завершения текущей задачи",
+                    show_alert=True,
+                )
+                return
+            self._clear_pending_attachments(chat_id)
+            self._new_session_for_chat(chat_id)
+            self._last_tasks.pop(chat_id, None)
+            await query.answer("Контекст очищен")
+            await start_message(
+                self._app.bot,
+                chat_id,
+                "🧹 Контекст очищен — начинаем заново.",
+                reply_markup=self._keyboard(
+                    main_menu_rows(self._hints_active(chat_id))
+                ),
+            )
+            return
+        if action == "status":
+            chat_id = query.message.chat_id
+            await query.answer()
+            await start_message(self._app.bot, chat_id, self._status_text(chat_id))
+            return
+        if action == "retry":
+            chat_id = query.message.chat_id
+            last = self._last_tasks.get(chat_id)
+            if last is None:
+                await query.answer("Пока нечего повторять", show_alert=True)
+                return
+            text, images, message_id, user_id = last
+            await query.answer("Повторяю")
+            await self._run_task_for(
+                chat_id=chat_id,
+                user_id=user_id,
+                message_id=message_id,
                 text=text,
                 images=images,
             )

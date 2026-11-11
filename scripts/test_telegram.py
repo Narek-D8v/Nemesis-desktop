@@ -25,6 +25,7 @@ from nemus.core.telegram_bot import (  # noqa: E402
     SEND_LIMIT_MB,
     TelegramBot,
     _attachment_question,
+    _Progress,
     _reaction_from_reply,
     convert_to_video_note,
     guess_kind,
@@ -35,7 +36,10 @@ from nemus.core.telegram_bot import (  # noqa: E402
 from nemus.core.telegram_ux import (  # noqa: E402
     attachment_action_rows,
     attachment_prompt,
+    error_rows,
+    error_text,
     examples_text,
+    first_hint_rows,
     help_text,
     main_menu_rows,
     start_text,
@@ -547,6 +551,166 @@ def test_typing_and_reactions() -> None:
     print("ok  «печатает…», реакции и HTML-ответ с запасным текстом")
 
 
+def test_first_hint_once_and_mute() -> None:
+    """Первая подсказка показывается один раз; «Больше не показывать» молчит."""
+    import asyncio
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+            self.sent.append(text)
+
+    class _Memory:
+        def __init__(self) -> None:
+            self.meta: dict[str, str] = {}
+
+        def get_meta(self, key: str, default: str | None = None) -> str | None:
+            return self.meta.get(key, default)
+
+        def set_meta(self, key: str, value: str) -> None:
+            self.meta[key] = value
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot.memory = _Memory()
+    bot._app = SimpleNamespace(bot=_FakeBot())
+    bot._hints_shown = set()
+    bot._hints_muted = set()
+
+    asyncio.run(bot._maybe_show_first_hint(7))
+    asyncio.run(bot._maybe_show_first_hint(7))
+    assert len(bot._app.bot.sent) == 1, bot._app.bot.sent
+    assert bot.memory.meta["telegram_hint_shown:7"] == "1"
+
+    bot._set_hint_muted(7, True)
+    asyncio.run(bot._maybe_show_first_hint(7))
+    assert len(bot._app.bot.sent) == 1
+    assert first_hint_rows()
+    print("ok  первая подсказка показывается один раз и уважает мьют")
+
+
+def test_error_text_and_progress_keyboard() -> None:
+    """Ошибка короткая, без стектрейса, с кнопками восстановления."""
+    import asyncio
+
+    text = error_text(
+        'Traceback (most recent call last):\nFile "x.py", line 1\n'
+        "ValueError: плохой файл"
+    )
+    assert "плохой файл" in text and "Traceback" not in text
+    rows = error_rows(True)
+    assert any(data == "ux:retry" for row in rows for _, data in row)
+    assert not any(data == "ux:retry" for row in error_rows(False) for _, data in row)
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.edits: list[tuple[str, dict]] = []
+            self.sent: list[tuple[str, dict]] = []
+
+        async def send_message(
+            self, chat_id: int, text: str, **kwargs: object
+        ) -> object:
+            self.sent.append((text, kwargs))
+            return SimpleNamespace(message_id=10)
+
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            self.edits.append((text, kwargs))
+
+    fake = _FakeBot()
+    progress = _Progress(fake, 7)
+    marker = object()
+    asyncio.run(progress.start("⏳ Думаю…"))
+    asyncio.run(progress.fail("Не получилось", reply_markup=marker))
+    assert fake.edits and fake.edits[-1][1]["reply_markup"] is marker
+    print("ok  ошибка короткая, с кнопками восстановления")
+
+
+def test_retry_and_new_callbacks() -> None:
+    """Повтор берёт последнюю задачу, /new не сбрасывает работающий контекст."""
+    import asyncio
+
+    class _Query:
+        def __init__(self, data: str) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=42)
+            self.message = SimpleNamespace(chat_id=42, message_id=5)
+            self.answers: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            pass
+
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            pass
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot._last_tasks = {42: ("найди отчёт", [], 11, 42)}
+    bot._task_lock = None
+    seen: list[dict] = []
+
+    async def _run_task_for(**kwargs: object) -> None:
+        seen.append(kwargs)
+
+    bot._run_task_for = _run_task_for  # type: ignore[method-assign]
+
+    query = _Query("ux:retry")
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=query.from_user,
+        effective_chat=SimpleNamespace(id=42, type="private"),
+    )
+    asyncio.run(bot._on_callback(update, None))
+    assert seen and seen[0]["text"] == "найди отчёт"
+
+    resets: list[int] = []
+    bot._new_session_for_chat = lambda chat_id: resets.append(chat_id)  # type: ignore[method-assign]
+    bot._task_lock = asyncio.Lock()
+    asyncio.run(bot._task_lock.acquire())
+    blocked = _Query("ux:new")
+    blocked_update = SimpleNamespace(
+        callback_query=blocked,
+        effective_user=blocked.from_user,
+        effective_chat=SimpleNamespace(id=42, type="private"),
+    )
+    asyncio.run(bot._on_callback(blocked_update, None))
+    assert not resets, "нельзя сбрасывать контекст во время задачи"
+    assert "дождись" in blocked.answers[-1]
+    print("ok  повтор и /new не ломают работающий контекст")
+
+
+def test_status_context_lines() -> None:
+    """Статус показывает реплики, выжимку и состояние подсказок."""
+    bot = object.__new__(TelegramBot)
+    bot.cfg = Config().telegram
+    bot.memory = None
+    bot.agent = SimpleNamespace(
+        history=[
+            SimpleNamespace(role="system"),
+            SimpleNamespace(role="user"),
+            SimpleNamespace(role="assistant"),
+        ],
+        _summary="краткая выжимка",
+    )
+    bot.core = SimpleNamespace(llm=SimpleNamespace(model="m", provider="p"))
+    bot.username = "bot"
+    bot.started_at = 0.0
+    bot._hints_shown, bot._hints_muted = set(), set()
+    text = bot._status_text(42)
+    assert "диалог: 1 реплик" in text
+    assert "сжатая выжимка" in text
+    assert "подсказки: включены" in text
+    print("ok  статус показывает реплики, выжимку и подсказки")
+
+
 def test_ux_texts() -> None:
     """Тексты первого экрана и примеров зависят от переключателя."""
     with_hints = start_text("Немесис", "Немо", True)
@@ -556,7 +720,13 @@ def test_ux_texts() -> None:
     assert "Фишка" in help_text(True)
     assert "Фишка" not in help_text(False)
     assert "PDF" in examples_text()
-    assert main_menu_rows(True)
+    menu = main_menu_rows(True)
+    assert {data for row in menu for _, data in row} == {
+        "ux:examples",
+        "ux:help",
+        "ux:new",
+        "ux:status",
+    }
     assert main_menu_rows(False) == []
     print("ok  тексты первого экрана и примеров зависят от подсказок")
 
@@ -1310,6 +1480,10 @@ def main() -> int:
     test_start_timeout_stops_hung_thread()
     test_stop_watchdog_kills_zombie_loop()
     test_typing_and_reactions()
+    test_first_hint_once_and_mute()
+    test_error_text_and_progress_keyboard()
+    test_retry_and_new_callbacks()
+    test_status_context_lines()
     test_ux_texts()
     test_start_help_respect_hints()
     test_ux_examples_callback()
