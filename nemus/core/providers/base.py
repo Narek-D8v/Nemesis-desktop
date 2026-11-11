@@ -46,6 +46,8 @@ class Message:
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+    #: id строки в SQLite (для границы выжимки); в API модели не уходит
+    db_id: int | None = field(default=None, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         if self.role == "tool":

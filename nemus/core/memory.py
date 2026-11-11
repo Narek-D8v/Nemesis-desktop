@@ -117,6 +117,12 @@ class Memory:
                     key TEXT PRIMARY KEY,
                     value TEXT
                 );
+                CREATE TABLE IF NOT EXISTS session_summaries (
+                    session_id INTEGER PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    covered_until INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             # Миграция старых БД: колонки tool_calls и session_id появились
@@ -289,6 +295,9 @@ class Memory:
         sid = int(session_id)
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+            self._conn.execute(
+                "DELETE FROM session_summaries WHERE session_id = ?", (sid,)
+            )
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
             if sid == self._current_session_id:
                 row = self._conn.execute(
@@ -318,8 +327,8 @@ class Memory:
         tool_call_id: str | None = None,
         name: str | None = None,
         tool_calls: Any = None,
-    ) -> None:
-        """Сохраняет сообщение; для ассистента — вместе с его tool-calls.
+    ) -> int:
+        """Сохраняет сообщение и возвращает id строки в SQLite.
 
         Без tool_calls результаты инструментов (role=tool) при следующем
         старте загрузились бы «осиротевшими», и провайдеры отвергли бы
@@ -329,7 +338,7 @@ class Memory:
         """
         ts = _now()
         with self._lock, self._conn:
-            self._conn.execute(
+            rowid = self._conn.execute(
                 "INSERT INTO messages "
                 "(role, content, tool_calls, tool_call_id, name, session_id, ts) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -347,23 +356,103 @@ class Memory:
                 "UPDATE sessions SET updated_at = ? WHERE id = ?",
                 (ts, self._current_session_id),
             )
+            return int(rowid.lastrowid)
 
-    def recent_messages(self, limit: int = 40) -> list[dict]:
-        """Последние сообщения **текущего** диалога (в хронологии)."""
+    def recent_messages(self, limit: int = 40, after_id: int = 0) -> list[dict]:
+        """Последние сообщения **текущего** диалога (в хронологии).
+
+        ``after_id`` ограничивает выборку сообщениями с id больше границы —
+        так после рестарта догружается всё, что не попало в выжимку.
+        ``limit <= 0`` означает «без ограничения».
+        """
+        sql = (
+            "SELECT id, role, content, tool_calls, tool_call_id, name FROM messages "
+            "WHERE session_id = ?"
+        )
+        params: list[Any] = [self._current_session_id]
+        if after_id:
+            sql += " AND id > ?"
+            params.append(int(after_id))
+        sql += " ORDER BY id DESC"
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT role, content, tool_calls, tool_call_id, name FROM messages "
-                "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-                (self._current_session_id, limit),
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in reversed(rows)]
 
     def clear_messages(self) -> None:
-        """Очищает текущий диалог (остальные не трогает)."""
+        """Очищает текущий диалог и его выжимку (остальные не трогает)."""
         with self._lock, self._conn:
             self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (self._current_session_id,),
+            )
+            self._conn.execute(
+                "DELETE FROM session_summaries WHERE session_id = ?",
+                (self._current_session_id,),
+            )
+
+    # ------------------------------------------------------------ summaries
+    def get_summary(self, session_id: int | None = None) -> tuple[str, int] | None:
+        """Возвращает ``(выжимка, covered_until)`` для диалога или ``None``."""
+        sid = self._current_session_id if session_id is None else int(session_id)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT summary, covered_until FROM session_summaries "
+                "WHERE session_id = ?",
+                (sid,),
+            ).fetchone()
+        if row is None or not str(row["summary"] or "").strip():
+            return None
+        return str(row["summary"]), int(row["covered_until"] or 0)
+
+    def set_summary(
+        self,
+        summary: str,
+        covered_until: int,
+        session_id: int | None = None,
+    ) -> None:
+        """Сохраняет выжимку и id последнего вошедшего в неё сообщения."""
+        text = (summary or "").strip()
+        if not text:
+            return
+        sid = self._current_session_id if session_id is None else int(session_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO session_summaries "
+                "(session_id, summary, covered_until, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "summary = excluded.summary, "
+                "covered_until = excluded.covered_until, "
+                "updated_at = excluded.updated_at",
+                (sid, text, int(covered_until), _now()),
+            )
+
+    def clear_summary(self, session_id: int | None = None) -> None:
+        """Удаляет выжимку диалога (при сбросе/очистке)."""
+        sid = self._current_session_id if session_id is None else int(session_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM session_summaries WHERE session_id = ?", (sid,)
+            )
+
+    # ------------------------------------------------------------------ meta
+    def get_meta(self, key: str, default: str | None = None) -> str | None:
+        """Читает служебное значение (например, session_id Telegram-чата)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        return str(row["value"]) if row and row["value"] is not None else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
             )
 
     # ----------------------------------------------------------------- facts
@@ -404,6 +493,7 @@ def load_messages_into(history: list, rows: list[dict]) -> None:
                 tool_calls=_load_tool_calls(row.get("tool_calls")),
                 tool_call_id=row["tool_call_id"],
                 name=row["name"],
+                db_id=row.get("id"),
             )
         )
 
