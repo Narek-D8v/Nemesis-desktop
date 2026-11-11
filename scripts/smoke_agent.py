@@ -100,12 +100,19 @@ def test_fast_reply_rejects_promise() -> None:
     events, handled = _drain(agent._run_fast_reply())
     assert handled is False and events == [], (events, handled)
 
+    agent = _new_agent(FakeFastLLM("У меня нет доступа к твоему компьютеру."))
+    events, handled = _drain(agent._run_fast_reply())
+    assert handled is False and events == [], (events, handled)
+    assert not any(m.role == "assistant" for m in agent.history), (
+        "выдуманный отказ не должен попадать в историю и в чат"
+    )
+
     agent = _new_agent(FakeFastLLM("Как здорово! Рада за тебя."))
     events, handled = _drain(agent._run_fast_reply())
     assert handled is True, "светская реплика должна закрываться быстро"
     assert len(events) == 1 and events[0].kind == "final", events
     assert events[0].text == "Как здорово! Рада за тебя."
-    print("ok  быстрый ответ: обещание откатывается в основной цикл")
+    print("ok  быстрый ответ: обещание и отказ откатываются в основной цикл")
 
 
 def test_promise_nudge_we_forms() -> None:

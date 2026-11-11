@@ -249,6 +249,40 @@ def test_promise_is_not_final() -> None:
     print("ok  обещание «сейчас сделаю» не считается финальным ответом")
 
 
+def test_access_denial_is_not_final() -> None:
+    """«Нет доступа к устройству» — не финал: агент требует инструменты."""
+    class _FakeLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, history: object, tools: object = None):
+            self.calls += 1
+            if self.calls == 1:
+                text = "У меня нет доступа к твоему компьютеру."
+            else:
+                text = "Готово: блокнот открыт."
+            yield StreamEvent(kind="final", response=LLMResponse(content=text))
+
+    cfg = Config()
+    fake = _FakeLLM()
+    agent = Agent(
+        cfg,
+        llm=fake,  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        memory=None,
+    )
+    events = list(agent.run("Открой блокнот"))
+    assert fake.calls == 2, f"выдуманный отказ принят за финал: вызовов {fake.calls}"
+    assert events[-1].kind == "final", [e.kind for e in events]
+    assert "Готово" in events[-1].text, events[-1].text
+    assert any(
+        message.role == "user" and "доступ" in str(message.content).lower()
+        for message in agent.history
+    ), "агенту не отправлено требование работать с устройством"
+    print("ok  «нет доступа к устройству» не считается финальным ответом")
+
+
 def test_fast_paths() -> None:
     """Прямое обращение — мгновенно; короткий вопрос — без 20k промпта."""
     assert quick_reply("Немуся?!") == "Да, я здесь. Чем помочь?"
@@ -328,6 +362,7 @@ def main() -> int:
     test_reasoning_effort_for_gemini3_only()
     test_run_token_ceiling_stops_task()
     test_promise_is_not_final()
+    test_access_denial_is_not_final()
     test_fast_paths()
     test_defaults_are_frugal()
     print("\nCONTEXT BUDGET TESTS PASSED")

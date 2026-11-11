@@ -118,6 +118,10 @@ def test_system_prompt_language() -> None:
         assert "ПРАВИЛО БРЕЙНШТОРМА" in prompt, prompt
         assert "D) Свой вариант: _________" in prompt, prompt
         assert "1. Вход:" in prompt, prompt
+        # доступ к устройству — не повод отказываться: Немуся работает на
+        # компьютере пользователя и обязана вызывать инструменты
+        assert "работаешь на компьютере пользователя" in prompt, prompt
+        assert "нет доступа к устройству" in prompt, prompt
 
         cfg.assistant.reply_language = "en"
         prompt_en = build_system_prompt(cfg, registry)
@@ -461,6 +465,12 @@ def test_quick_replies_and_simple_requests() -> None:
     assert not is_simple_request("Read it aloud")
     assert not is_simple_request("Polish the intro")
     assert not is_simple_request("Tweak the parser")
+    # состояние устройства и системы — это задачи, а не светская реплика:
+    # быстрый путь без инструментов не должен отвечать «нет доступа»
+    assert not is_simple_request("Что у меня на экране?")
+    assert not is_simple_request("Сколько места на диске?")
+    assert not is_simple_request("Что запущено на компьютере?")
+    assert not is_simple_request("How much disk space do I have?")
     print("ok  короткие реплики и простые запросы: ru + en")
 
 
@@ -502,6 +512,31 @@ def test_promise_and_deferral() -> None:
     print("ok  обещания и отсрочки: we-формы, «секунду», защита быстрого пути")
 
 
+def test_access_denial_is_detected() -> None:
+    """Отказ «нет доступа к устройству» — не готовый ответ, а повод работать."""
+    from nemus.core.language import looks_like_access_denial
+
+    assert looks_like_access_denial("У меня нет доступа к твоему компьютеру.")
+    assert looks_like_access_denial("Я не имею доступа к вашему устройству.")
+    assert looks_like_access_denial(
+        "Я не могу получить доступ к экрану или файлам на компьютере."
+    )
+    assert looks_like_access_denial("I don't have access to your device.")
+    assert looks_like_access_denial("I can't access your computer.")
+    assert looks_like_access_denial(
+        "As an AI, I cannot interact with your device."
+    )
+    # отказ доступа к конкретному файлу — это реальный результат инструмента,
+    # его нельзя путать с выдуманным «нет доступа к устройству»
+    assert not looks_like_access_denial("Нет доступа к файлу отчёта.")
+    assert not looks_like_access_denial(
+        "Не могу получить доступ к файлу отчёта: он занят другим процессом."
+    )
+    assert not looks_like_access_denial("Нет доступа к системному файлу.")
+    assert not looks_like_access_denial("Готово: доступ к папке восстановлен.")
+    print("ok  отказ «нет доступа к устройству» распознаётся отдельно")
+
+
 def _permissions():
     from nemus.core.permissions import PermissionManager
 
@@ -525,6 +560,7 @@ def main() -> int:
         test_gui_language_switch,
         test_quick_replies_and_simple_requests,
         test_promise_and_deferral,
+        test_access_denial_is_detected,
     )
     failures = 0
     for test in tests:
