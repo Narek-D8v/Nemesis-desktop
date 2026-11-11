@@ -41,6 +41,8 @@ from nemus.core.telegram_format import (
     strip_html,
 )
 from nemus.core.telegram_ux import (
+    attachment_action_rows,
+    attachment_prompt,
     examples_text,
     help_text,
     main_menu_rows,
@@ -205,11 +207,20 @@ def _attachment_context(paths: list[Path]) -> str:
     return "Пользователь прислал файл(ы):\n" + "\n".join(lines)
 
 
-def _attachment_question(paths: list[Path]) -> str:
+def _attachment_question(paths: list[Path], short: bool = False) -> str:
     """Вопрос для вложения без подписи: не угадывать задачу."""
     if len(paths) == 1:
         path = paths[0]
         kind = guess_kind(path)
+        if short:
+            names = {
+                "photo": "изображение",
+                "video": "видео",
+                "audio": "аудио",
+            }
+            if kind in names:
+                return f"Я получила {names[kind]}. Что с ним сделать?"
+            return f"Я получила файл «{path.name}». Что с ним сделать?"
         if kind == "photo":
             return (
                 "Я получила изображение, но не поняла задачу. Что с ним "
@@ -480,11 +491,8 @@ class TelegramBot:
         self._message_id: int | None = None
         #: агент уже поставил реакцию — второй раз не ставим
         self._reaction_set = False
-        #: вложение без подписи, к которому ждём задачу
-        self._pending_attachment = ""
-        self._pending_attachment_at = 0.0
-        #: сами изображения — чтобы следующая задача видела фото, а не только путь
-        self._pending_images: list[str] = []
+        #: вложение без подписи по чатам: текст, изображения, время
+        self._pending_attachments: dict[int, tuple[str, list[str], float]] = {}
         #: чат для фоновых уведомлений (напоминания): не сбрасывается после
         #: ответа, в отличие от _chat_id текущей задачи
         self._notify_chat_id: int | None = (
@@ -608,15 +616,39 @@ class TelegramBot:
         """Куда отправить: явный чат → текущая задача → постоянный чат."""
         return chat_id or self._chat_id or self._notify_chat_id
 
-    def _take_pending_attachment(self) -> tuple[str, list[str]]:
+    def _remember_pending_attachment(
+        self, chat_id: int, text: str, images: list[str], at: float | None = None
+    ) -> None:
+        """Запоминает вложение без подписи для конкретного чата."""
+        self._pending_attachments[chat_id] = (
+            text,
+            list(images),
+            time.time() if at is None else at,
+        )
+
+    def _peek_pending_attachment(self, chat_id: int) -> tuple[str, list[str]]:
+        """Смотрит недавнее вложение чата, не забирая его."""
+        item = self._pending_attachments.get(chat_id)
+        if item is None:
+            return "", []
+        text, images, at = item
+        if time.time() - at > ATTACHMENT_CONTEXT_TTL:
+            self._pending_attachments.pop(chat_id, None)
+            return "", []
+        return text, list(images)
+
+    def _take_pending_attachment(self, chat_id: int) -> tuple[str, list[str]]:
         """Забирает недавнее вложение без подписи: текст и сами изображения."""
-        text = self._pending_attachment
-        images = self._pending_images
-        fresh = time.time() - self._pending_attachment_at <= ATTACHMENT_CONTEXT_TTL
-        self._pending_attachment = ""
-        self._pending_attachment_at = 0.0
-        self._pending_images = []
-        return (text, images) if fresh else ("", [])
+        text, images = self._peek_pending_attachment(chat_id)
+        self._pending_attachments.pop(chat_id, None)
+        return text, images
+
+    def _clear_pending_attachments(self, chat_id: int | None = None) -> None:
+        """Сбрасывает вложения без подписи: все или только одного чата."""
+        if chat_id is None:
+            self._pending_attachments.clear()
+        else:
+            self._pending_attachments.pop(chat_id, None)
 
     def react_current(self, emoji: str) -> tuple[bool, str]:
         """Ставит реакцию на сообщение текущей задачи из любого потока."""
@@ -1220,9 +1252,7 @@ class TelegramBot:
                 "⏳ Сначала дождись завершения текущей задачи — потом /new."
             )
             return
-        self._pending_attachment = ""
-        self._pending_attachment_at = 0.0
-        self._pending_images = []
+        self._clear_pending_attachments(update.effective_chat.id)
         self._new_session_for_chat(update.effective_chat.id)
         await update.message.reply_text("🧹 Контекст очищен — начинаем заново.")
 
@@ -1314,7 +1344,8 @@ class TelegramBot:
     async def _handle_text(self, update: Any) -> None:
         text = (update.message.text or "").strip()
         if text:
-            pending, pending_images = self._take_pending_attachment()
+            chat_id = update.effective_chat.id
+            pending, pending_images = self._take_pending_attachment(chat_id)
             if pending:
                 text = f"{pending}\n\nЗадача пользователя: {text}"
             await self._run_task(update, text, images=pending_images)
@@ -1377,10 +1408,18 @@ class TelegramBot:
             # иначе модель домысливает действие (например, делает чиби).
             # Запоминаем путь и само изображение: следующая задача будет
             # знать, о чём речь, и модель действительно увидит фото.
-            self._pending_attachment = _attachment_context(saved)
-            self._pending_attachment_at = time.time()
-            self._pending_images = image_urls
-            await message.reply_text(_attachment_question(saved))
+            self._remember_pending_attachment(
+                chat_id, _attachment_context(saved), image_urls
+            )
+            rows = (
+                attachment_action_rows(guess_kind(saved[0]))
+                if len(saved) == 1 and self._hints_enabled
+                else []
+            )
+            await message.reply_text(
+                _attachment_question(saved, short=bool(rows)),
+                reply_markup=self._keyboard(rows),
+            )
             return
         parts: list[str] = []
         if voice_text:
@@ -1389,7 +1428,7 @@ class TelegramBot:
             parts.append(caption)
         images: list[str] = []
         if saved:
-            pending, pending_images = self._take_pending_attachment()
+            pending, pending_images = self._take_pending_attachment(chat_id)
             images.extend(pending_images)
             if pending:
                 parts.append(pending)
@@ -1565,13 +1604,28 @@ class TelegramBot:
     async def _run_task(
         self, update: Any, text: str, images: list[str] | None = None
     ) -> None:
-        chat_id = update.effective_chat.id
-        message_id = getattr(update.message, "message_id", None)
+        await self._run_task_for(
+            chat_id=update.effective_chat.id,
+            user_id=getattr(update.effective_user, "id", None),
+            message_id=getattr(update.message, "message_id", None),
+            text=text,
+            images=images,
+        )
+
+    async def _run_task_for(
+        self,
+        chat_id: int,
+        user_id: int | None,
+        message_id: int | None,
+        text: str,
+        images: list[str] | None = None,
+    ) -> None:
         if self._task_lock is None:
             self._task_lock = asyncio.Lock()
         if self._task_lock.locked():
-            await update.message.reply_text(
-                "⏳ Ещё выполняю предыдущую задачу — это сообщение в очереди."
+            await self._app.bot.send_message(
+                chat_id,
+                "⏳ Ещё выполняю предыдущую задачу — это сообщение в очереди.",
             )
         async with self._task_lock:
             try:
@@ -1581,7 +1635,7 @@ class TelegramBot:
                     "Telegram: не удалось переключить сессию чата %s", chat_id
                 )
             self._chat_id = chat_id
-            self._user_id = getattr(update.effective_user, "id", None)
+            self._user_id = user_id
             self._message_id = message_id
             self._reaction_set = False
             self._notify_chat_id = chat_id
@@ -1719,8 +1773,40 @@ class TelegramBot:
             self._pending.pop(key, None)
 
     async def _on_ux_callback(self, update: Any, query: Any) -> None:
-        """Кнопки подсказок: помощь и примеры."""
+        """Кнопки подсказок: действия вложений, помощь и примеры."""
         action = (query.data or "")[3:]
+        if action.startswith("attach:"):
+            key = action.split(":", 1)[1]
+            prompt = attachment_prompt(key)
+            chat_id = query.message.chat_id
+            if prompt is None:
+                await query.answer("Неизвестное действие")
+                return
+            pending, images = self._take_pending_attachment(chat_id)
+            if not pending:
+                await query.answer(
+                    "Вложение уже не актуально — пришли его ещё раз",
+                    show_alert=True,
+                )
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            await query.answer("Запускаю")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+            text = f"{pending}\n\nЗадача пользователя: {prompt}"
+            await self._run_task_for(
+                chat_id=chat_id,
+                user_id=getattr(query.from_user, "id", None),
+                message_id=getattr(query.message, "message_id", None),
+                text=text,
+                images=images,
+            )
+            return
         if action == "help":
             await query.answer()
             await start_message(

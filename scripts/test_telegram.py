@@ -33,6 +33,8 @@ from nemus.core.telegram_bot import (  # noqa: E402
     telegram_status,
 )
 from nemus.core.telegram_ux import (  # noqa: E402
+    attachment_action_rows,
+    attachment_prompt,
     examples_text,
     help_text,
     main_menu_rows,
@@ -652,6 +654,97 @@ def test_ux_examples_callback() -> None:
     print("ok  кнопка «Примеры задач» присылает примеры")
 
 
+def test_attachment_actions() -> None:
+    """Для каждого типа вложения есть понятные кнопки и промпт."""
+    photo = attachment_action_rows("photo")
+    assert any("Описать" in label for row in photo for label, _ in row)
+    assert any(data == "ux:attach:photo_describe" for row in photo for _, data in row)
+    assert "кружок" in attachment_prompt("video_note").lower()  # type: ignore[union-attr]
+    assert "отчёт" in attachment_prompt("document_report").lower()  # type: ignore[union-attr]
+    assert attachment_prompt("unknown") is None
+    print("ok  для вложений есть кнопки действий и промпты")
+
+
+def test_pending_attachments_are_per_chat() -> None:
+    """Вложение одного чата не забирает другой чат."""
+    bot = object.__new__(TelegramBot)
+    bot._pending_attachments = {}
+    bot._remember_pending_attachment(1, "чат 1", ["img1"])
+    bot._remember_pending_attachment(2, "чат 2", ["img2"])
+
+    assert bot._peek_pending_attachment(1)[0] == "чат 1"
+    assert bot._peek_pending_attachment(2)[0] == "чат 2"
+    assert bot._take_pending_attachment(1)[0] == "чат 1"
+    assert bot._peek_pending_attachment(1) == ("", [])
+    assert bot._peek_pending_attachment(2)[0] == "чат 2"
+    bot._clear_pending_attachments(2)
+    assert bot._peek_pending_attachment(2) == ("", [])
+    print("ok  вложения без подписи хранятся по чатам")
+
+
+def test_attachment_callback_runs_task() -> None:
+    """Кнопка под фото сразу запускает задачу с этим фото."""
+    import asyncio
+
+    class _Query:
+        data = "ux:attach:photo_describe"
+        from_user = SimpleNamespace(id=42)
+        message = SimpleNamespace(chat_id=42, message_id=5)
+
+        def __init__(self) -> None:
+            self.answers: list[str] = []
+            self.edits: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            self.edits.append(text)
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            pass
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot._pending_attachments = {}
+    bot._remember_pending_attachment(
+        42, "Пользователь прислал файл(ы):\n- photo.jpg", []
+    )
+    query = _Query()
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=query.from_user,
+        effective_chat=SimpleNamespace(id=42, type="private"),
+    )
+    seen: list[dict] = []
+
+    async def _run_task_for(**kwargs: object) -> None:
+        seen.append(kwargs)
+
+    bot._run_task_for = _run_task_for  # type: ignore[method-assign]
+    asyncio.run(bot._on_callback(update, None))
+    assert seen and "photo.jpg" in seen[0]["text"]
+    assert "Опиши" in seen[0]["text"]
+    assert bot._peek_pending_attachment(42) == ("", [])
+
+    stale = _Query()
+    asyncio.run(
+        bot._on_callback(
+            SimpleNamespace(
+                callback_query=stale,
+                effective_user=stale.from_user,
+                effective_chat=SimpleNamespace(id=42, type="private"),
+            ),
+            None,
+        )
+    )
+    assert len(seen) == 1, "старая кнопка не должна запускать вторую задачу"
+    assert "уже не актуально" in stale.answers[-1]
+    print("ok  кнопка под вложением сразу запускает задачу")
+
+
 def test_attachment_without_caption() -> None:
     """Фото без подписи — вопрос, а не выдуманная задача."""
     import asyncio
@@ -705,10 +798,10 @@ def test_attachment_without_caption() -> None:
             photo = [SimpleNamespace(file_size=10)]
 
             def __init__(self) -> None:
-                self.replies: list[str] = []
+                self.replies: list[tuple[str, dict]] = []
 
-            async def reply_text(self, text: str, **_: object) -> None:
-                self.replies.append(text)
+            async def reply_text(self, text: str, **kwargs: object) -> None:
+                self.replies.append((text, kwargs))
 
         message = _Message()
         update = SimpleNamespace(
@@ -723,19 +816,21 @@ def test_attachment_without_caption() -> None:
         called: list[str] = []
         seen_images: list[list[str]] = []
 
-        async def _run_task(
-            update: object, text: str, images: list[str] | None = None
-        ) -> None:
-            called.append(text)
-            seen_images.append(images or [])
+        async def _run_task_for(**kwargs: object) -> None:
+            called.append(str(kwargs["text"]))
+            seen_images.append(kwargs.get("images") or [])  # type: ignore[arg-type]
 
         fake_bot = _FakeBot()
         bot._app = SimpleNamespace(bot=fake_bot)
         bot._download = _download  # type: ignore[method-assign]
-        bot._run_task = _run_task  # type: ignore[method-assign]
+        bot._run_task_for = _run_task_for  # type: ignore[method-assign]
         asyncio.run(bot._on_media(update, None))
         assert not called, "вложение без подписи не должно уходить агенту"
-        assert message.replies and "не поняла задачу" in message.replies[-1]
+        assert message.replies
+        question, reply_kwargs = message.replies[-1]
+        assert question.startswith("Я получила изображение. Что с ним сделать?")
+        assert reply_kwargs.get("reply_markup") is not None, reply_kwargs
+        assert bot._peek_pending_attachment(42) != ("", [])
         assert not fake_bot.reactions, "👀 как статус больше не ставится"
 
         # следующая текстовая задача должна знать путь к фото и видеть его
@@ -745,6 +840,7 @@ def test_attachment_without_caption() -> None:
         assert "опиши" in called[-1], called[-1]
         assert seen_images and seen_images[-1], "фото должно уйти модели как изображение"
         assert seen_images[-1][0].startswith("data:image/"), seen_images[-1][0][:40]
+        assert bot._peek_pending_attachment(42) == ("", [])
     print("ok  фото без подписи: бот спрашивает задачу и передаёт изображение")
 
 
@@ -825,7 +921,9 @@ def test_stt_failure_does_not_ask_attachment() -> None:
     assert message.notice.edits, "должно быть сообщение об ошибке распознавания"
     assert "Не удалось распознать" in message.notice.edits[-1]
     assert not any("Я получила аудио" in text for text in message.replies)
-    assert bot._pending_attachment == "", "голосовое не должно стать вложением"
+    assert bot._peek_pending_attachment(42) == ("", []), (
+        "голосовое не должно стать вложением"
+    )
     print("ok  сбой STT не превращается в вопрос про вложение")
 
 
@@ -1215,6 +1313,9 @@ def main() -> int:
     test_ux_texts()
     test_start_help_respect_hints()
     test_ux_examples_callback()
+    test_attachment_actions()
+    test_pending_attachments_are_per_chat()
+    test_attachment_callback_runs_task()
     test_attachment_without_caption()
     test_stt_failure_does_not_ask_attachment()
     test_download_limit_is_twenty_mb()

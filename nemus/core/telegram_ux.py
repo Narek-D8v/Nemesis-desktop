@@ -88,3 +88,60 @@ def main_menu_rows(hints: bool) -> list[list[tuple[str, str]]]:
             ("🧰 Что я умею", "ux:help"),
         ]
     ]
+
+
+#: действие → (подпись кнопки, промпт для агента)
+_ATTACHMENT_ACTIONS: dict[str, tuple[str, str]] = {
+    "photo_describe": ("📝 Описать", "Опиши, что на этом изображении."),
+    "photo_ocr": (
+        "🔎 Распознать текст",
+        "Распознай текст на изображении и пришли его текстом.",
+    ),
+    "photo_what": ("❓ Что на фото?", "Что на этом фото? Опиши главное."),
+    "video_note": ("⭕ Сделать кружок", "Сделай из этого видео кружок."),
+    "video_audio": (
+        "🔊 Извлечь звук",
+        "Извлеки звук из этого видео и пришли аудиофайлом.",
+    ),
+    "video_trim": ("✂️ Обрезать", "Обрежь это видео до 30 секунд."),
+    "audio_transcribe": (
+        "📝 Распознать речь",
+        "Распознай речь в этом аудио и пришли текст.",
+    ),
+    "audio_what": (
+        "❓ Что здесь?",
+        "Кратко опиши, что это за аудио, и распознай речь, если можешь.",
+    ),
+    "document_read": ("📖 Прочитать", "Прочитай этот файл и кратко перескажи."),
+    "document_report": ("📄 Сделать отчёт", "Сделай краткий отчёт по этому файлу."),
+    "document_send": (
+        "📤 Отправить обратно",
+        "Обработай этот файл и отправь результат обратно.",
+    ),
+}
+
+_ATTACHMENT_ROWS: dict[str, list[list[str]]] = {
+    "photo": [["photo_describe", "photo_ocr"], ["photo_what"]],
+    "video": [["video_note", "video_audio"], ["video_trim"]],
+    "audio": [["audio_transcribe", "audio_what"]],
+    "document": [["document_read", "document_report"], ["document_send"]],
+}
+
+
+def attachment_action_rows(kind: str) -> list[list[tuple[str, str]]]:
+    """Кнопки быстрых действий для одного вложения."""
+    rows: list[list[tuple[str, str]]] = []
+    for row in _ATTACHMENT_ROWS.get((kind or "").lower(), []):
+        rows.append(
+            [
+                (_ATTACHMENT_ACTIONS[key][0], f"ux:attach:{key}")
+                for key in row
+            ]
+        )
+    return rows
+
+
+def attachment_prompt(action: str) -> str | None:
+    """Промпт для действия или None, если действие неизвестно."""
+    item = _ATTACHMENT_ACTIONS.get(action)
+    return item[1] if item else None
