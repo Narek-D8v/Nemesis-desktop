@@ -850,7 +850,7 @@ class Agent:
         if self.max_summary_chars <= 0:
             return 0
         quarter = max(200, self.max_history_chars // 4)
-        return max(200, min(self.max_summary_chars, quarter))
+        return max(1, min(self.max_summary_chars, quarter))
 
     def _system_for_model(self) -> Message:
         """System-сообщение с выжимкой — только для запроса, без мутации."""

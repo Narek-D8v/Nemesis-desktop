@@ -256,6 +256,25 @@ def test_delete_session_removes_summary() -> None:
     print("ok  удаление диалога удаляет его выжимку")
 
 
+def test_summary_limit_follows_config() -> None:
+    """Потолок выжимки не раздувается сверх max_summary_chars."""
+    agent = _agent()
+    agent.max_history_chars = 60000
+    agent.max_summary_chars = 500
+    assert agent._summary_limit() == 500
+
+    agent.max_history_chars = 900
+    agent.max_summary_chars = 300
+    assert agent._summary_limit() == 225
+
+    agent.max_summary_chars = 100
+    assert agent._summary_limit() == 100, "лимит проигнорировал настройку"
+
+    agent.max_summary_chars = 0
+    assert agent._summary_limit() == 0, "0 должен отключать выжимку"
+    print("ok  лимит выжимки следует за max_summary_chars")
+
+
 def test_telegram_chat_sessions_are_isolated_and_restored() -> None:
     """У каждого Telegram-чата своя сессия; /new не трогает соседей."""
     cfg = Config()
@@ -310,6 +329,7 @@ def main() -> int:
     test_large_system_prompt_does_not_trigger_summary()
     test_reset_clears_summary()
     test_summary_tail_starts_at_user_and_keeps_tool_pair()
+    test_summary_limit_follows_config()
     test_telegram_chat_sessions_are_isolated_and_restored()
     print("\nCONTEXT SUMMARY TESTS PASSED")
     return 0
