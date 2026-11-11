@@ -298,6 +298,8 @@ telegram:
   allow_groups: false
   # Распознавать голосовые (Gemini/OpenAI, при сбое — локальный faster-whisper)
   transcribe_voice: true
+  # Показывать примеры задач и контекстные подсказки в чате
+  hints_enabled: true
   # Максимальный размер скачиваемого файла, МБ (Bot API отдаёт до 20)
   max_download_mb: 20
 

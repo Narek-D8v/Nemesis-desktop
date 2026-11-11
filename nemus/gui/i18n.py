@@ -159,6 +159,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "tg.allow_groups": "Отвечать в группах",
         "tg.transcribe": "Распознавать голосовые сообщения",
+        "tg.hints": "Показывать подсказки и примеры",
+        "tg.hints_tip": (
+            "Примеры задач, первая подсказка и кнопки действий под вложениями. "
+            "/help остаётся доступной всегда."
+        ),
         "tg.max_file": "Максимальный файл",
         "tg.mb": "МБ",
         "tg.check": "Проверить токен",
@@ -705,6 +710,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "tg.allow_groups": "Reply in groups",
         "tg.transcribe": "Transcribe voice messages",
+        "tg.hints": "Show hints and examples",
+        "tg.hints_tip": (
+            "Task examples, a first-run hint and action buttons under attachments. "
+            "/help always remains available."
+        ),
         "tg.max_file": "Maximum file",
         "tg.mb": "MB",
         "tg.check": "Check token",

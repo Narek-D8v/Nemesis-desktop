@@ -55,6 +55,7 @@ def test_config_defaults() -> None:
     assert cfg.telegram.allowed_users == [], cfg.telegram.allowed_users
     assert cfg.telegram.allow_groups is False
     assert cfg.telegram.transcribe_voice is True
+    assert cfg.telegram.hints_enabled is True, "подсказки должны быть включены по умолчанию"
     assert cfg.telegram.max_download_mb > 0
     print("ok  конфиг: бот выключен, список ID пуст, группы запрещены")
 
@@ -1043,6 +1044,40 @@ def test_user_ids_parsing() -> None:
     print("ok  ID пользователей из поля настроек парсятся без мусора")
 
 
+def test_gui_hints_toggle() -> None:
+    """Галочка подсказок читается из конфига и пишется обратно при сохранении."""
+    from PySide6.QtWidgets import QApplication
+
+    import nemus.gui.dialogs as dialogs
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    dlg = dialogs.SettingsDialog(None, core=None)
+    old_secret, old_get = dialogs.set_secret, dialogs.get_config
+    try:
+        assert hasattr(dlg, "chk_tg_hints"), "нет галочки подсказок"
+        dlg.config.telegram.hints_enabled = True
+        dlg._load()
+        assert dlg.chk_tg_hints.isChecked()
+
+        dlg.config.telegram.hints_enabled = False
+        dlg._load()
+        assert not dlg.chk_tg_hints.isChecked()
+
+        dlg.chk_tg_hints.setChecked(True)
+        captured = []
+        dialogs.set_secret = lambda *a, **k: None
+        dialogs.get_config = lambda *a, **k: None
+        dlg._write_yaml = lambda cfg: captured.append(cfg)
+        dlg._apply_tg_autostart = lambda: True
+        dlg.accept = lambda: None
+        dlg._save()
+        assert captured and captured[0].telegram.hints_enabled is True
+    finally:
+        dialogs.set_secret, dialogs.get_config = old_secret, old_get
+        dlg.done(0)
+    print("ok  галочка подсказок Telegram читается и сохраняется")
+
+
 def test_status() -> None:
     status = telegram_status()
     assert status["running"] is False, status
@@ -1077,6 +1112,7 @@ def main() -> int:
     test_tool_without_bot()
     test_factory_registration()
     test_user_ids_parsing()
+    test_gui_hints_toggle()
     test_status()
     print("\nTELEGRAM TESTS PASSED")
     return 0
