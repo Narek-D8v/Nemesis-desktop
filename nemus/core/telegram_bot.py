@@ -1236,6 +1236,9 @@ class TelegramBot:
                             "Проверьте интернет и ключи Gemini/OpenAI или "
                             "пришлите текстом."
                         )
+                        # Не проваливаемся в «вложение без подписи»: иначе
+                        # после ошибки STT бот спросит, что делать с аудио.
+                        return
                     else:
                         if voice_text:
                             await notice.edit_text(f"🗣 «{voice_text}»")

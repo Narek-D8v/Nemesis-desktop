@@ -633,6 +633,87 @@ def test_attachment_without_caption() -> None:
     print("ok  фото без подписи: бот спрашивает задачу и передаёт изображение")
 
 
+def test_stt_failure_does_not_ask_attachment() -> None:
+    """Сбой распознавания — это ошибка, а не «вложение без подписи»."""
+    import asyncio
+
+    cfg = Config()
+    cfg.telegram.enabled = True
+    cfg.telegram.token = "123:test"
+    cfg.telegram.allowed_users = [42]
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    bot = TelegramBot(cfg, core)
+
+    class _FakeBot:
+        async def send_chat_action(self, chat_id: int, action: str) -> None:
+            pass
+
+    class _Notice:
+        def __init__(self) -> None:
+            self.edits: list[str] = []
+
+        async def edit_text(self, text: str) -> None:
+            self.edits.append(text)
+
+    class _Message:
+        message_id = 1
+        voice = SimpleNamespace(file_size=10)
+        caption = ""
+        document = None
+        video = None
+        video_note = None
+        animation = None
+        audio = None
+        photo = None
+
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+            self.notice = _Notice()
+
+        async def reply_text(self, text: str, **_: object) -> _Notice:
+            self.replies.append(text)
+            return self.notice
+
+    message = _Message()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=42, type="private"),
+        message=message,
+    )
+
+    async def _download(
+        chat_id: int, attachment: object, default: str
+    ) -> Path:
+        return Path("voice.ogg")
+
+    def _transcribe(path: Path) -> str:
+        raise RuntimeError("нет ключа")
+
+    called: list[str] = []
+
+    async def _run_task(
+        update: object, text: str, images: list[str] | None = None
+    ) -> None:
+        called.append(text)
+
+    bot._app = SimpleNamespace(bot=_FakeBot())
+    bot._download = _download  # type: ignore[method-assign]
+    bot._transcribe = _transcribe  # type: ignore[method-assign]
+    bot._run_task = _run_task  # type: ignore[method-assign]
+    asyncio.run(bot._on_media(update, None))
+    assert not called, "после сбоя STT задача агенту не уходит"
+    assert message.notice.edits, "должно быть сообщение об ошибке распознавания"
+    assert "Не удалось распознать" in message.notice.edits[-1]
+    assert not any("Я получила аудио" in text for text in message.replies)
+    assert bot._pending_attachment == "", "голосовое не должно стать вложением"
+    print("ok  сбой STT не превращается в вопрос про вложение")
+
+
 def test_reaction_list_complete() -> None:
     """У инструмента реакций весь согласованный список эмодзи, без потерь."""
     expected = (
@@ -744,6 +825,7 @@ def main() -> int:
     test_stop_watchdog_kills_zombie_loop()
     test_typing_and_reactions()
     test_attachment_without_caption()
+    test_stt_failure_does_not_ask_attachment()
     test_reaction_list_complete()
     test_reaction_choice()
     test_tool_without_bot()
