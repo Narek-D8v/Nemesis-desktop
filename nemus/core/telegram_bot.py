@@ -486,15 +486,59 @@ class TelegramBot:
         self._lock_handle: Any = None
         self.username = ""
         self.started_at = 0.0
+        memory = getattr(core, "telegram_memory", None)
+        if memory is None:
+            store = getattr(core, "telegram_memory_store", None)
+            if callable(store):
+                try:
+                    memory = store()
+                except Exception:  # noqa: BLE001
+                    logger.exception("Telegram: не удалось открыть telegram.db")
+        self.memory = memory
         self.agent = Agent(
             config=config,
             llm=core.llm,
             registry=core.registry,
             permissions=core.permissions,
             confirm=self._confirm,
-            memory=None,
+            memory=self.memory,
             system_suffix=self._system_suffix(),
         )
+
+    def _session_key(self, chat_id: int) -> str:
+        """Ключ meta с session_id для конкретного Telegram-чата."""
+        return f"telegram_session:{chat_id}"
+
+    def _prepare_session(self, chat_id: int) -> None:
+        """Переключает агента на сохранённую сессию чата (или создаёт её)."""
+        if self.memory is None:
+            return
+        key = self._session_key(chat_id)
+        raw = self.memory.get_meta(key)
+        try:
+            session_id = int(raw) if raw else 0
+        except (TypeError, ValueError):
+            session_id = 0
+        if session_id:
+            try:
+                self.agent.switch_session(session_id)
+                return
+            except ValueError:
+                logger.info(
+                    "Telegram: сессия %s для чата %s не найдена — создаю новую",
+                    session_id,
+                    chat_id,
+                )
+        session_id = self.agent.new_session(f"Telegram {chat_id}")
+        self.memory.set_meta(key, str(session_id))
+
+    def _new_session_for_chat(self, chat_id: int) -> None:
+        """/new: новый диалог только для этого чата."""
+        if self.memory is None:
+            self.agent.reset()
+            return
+        session_id = self.agent.new_session(f"Telegram {chat_id}")
+        self.memory.set_meta(self._session_key(chat_id), str(session_id))
 
     # ----------------------------------------------------------- публичное
     @property
@@ -1162,7 +1206,7 @@ class TelegramBot:
         self._pending_attachment = ""
         self._pending_attachment_at = 0.0
         self._pending_images = []
-        self.agent.reset()
+        self._new_session_for_chat(update.effective_chat.id)
         await update.message.reply_text("🧹 Контекст очищен — начинаем заново.")
 
     async def _cmd_id(self, update: Any, context: Any) -> None:
@@ -1513,6 +1557,12 @@ class TelegramBot:
                 "⏳ Ещё выполняю предыдущую задачу — это сообщение в очереди."
             )
         async with self._task_lock:
+            try:
+                self._prepare_session(chat_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Telegram: не удалось переключить сессию чата %s", chat_id
+                )
             self._chat_id = chat_id
             self._user_id = getattr(update.effective_user, "id", None)
             self._message_id = message_id

@@ -218,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
                     core.memory.close()
                 except Exception:  # noqa: BLE001
                     pass
+            if core.telegram_memory is not None:
+                try:
+                    core.telegram_memory.close()
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             _health_path(config).unlink(missing_ok=True)
         except OSError:

@@ -324,6 +324,12 @@ class NemusApp:
             except Exception:  # noqa: BLE001
                 pass
             self.telegram = None
+        if self.core is not None and self.core.telegram_memory is not None:
+            try:
+                self.core.telegram_memory.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.core.telegram_memory = None
         if self.realtime is not None:
             try:
                 self.realtime.stop()

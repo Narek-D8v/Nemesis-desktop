@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from nemus.config import PROJECT_ROOT, Config
 from nemus.core.agent import Agent, ConfirmCallback
@@ -52,10 +53,19 @@ class Core:
     permissions: PermissionManager
     agent: Agent
     memory: Memory | None = None
+    #: отдельная база Telegram: сессии чатов не смешиваются с GUI
+    telegram_memory: Memory | None = None
     notes: NoteBook | None = None
     tools: list[Tool] = field(default_factory=list)
     mcp_manager: MCPManager | None = None
     reminder: ReminderScheduler | None = None
+
+    def telegram_memory_store(self) -> Memory:
+        """Лениво открывает отдельную БД Telegram (рядом с основной)."""
+        if self.telegram_memory is None:
+            path = Path(self.config.memory.database).with_name("telegram.db")
+            self.telegram_memory = Memory(path)
+        return self.telegram_memory
 
     def rebuild_agent(self, confirm: ConfirmCallback | None = None) -> None:
         self.agent = Agent(

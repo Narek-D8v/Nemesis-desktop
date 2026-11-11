@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,6 +24,7 @@ from nemus.core.llm import StreamEvent  # noqa: E402
 from nemus.core.memory import Memory, load_messages_into  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
 from nemus.core.providers import LLMResponse, Message, ToolCall  # noqa: E402
+from nemus.core.telegram_bot import TelegramBot  # noqa: E402
 from nemus.core.tools.registry import ToolRegistry  # noqa: E402
 
 
@@ -254,6 +256,50 @@ def test_delete_session_removes_summary() -> None:
     print("ok  удаление диалога удаляет его выжимку")
 
 
+def test_telegram_chat_sessions_are_isolated_and_restored() -> None:
+    """У каждого Telegram-чата своя сессия; /new не трогает соседей."""
+    cfg = Config()
+    cfg.telegram.enabled = True
+    cfg.telegram.token = "123:test"
+    cfg.telegram.allowed_users = [42]
+    mem = Memory(_tmp_db())
+
+    def core() -> SimpleNamespace:
+        return SimpleNamespace(
+            config=cfg,
+            llm=_SummaryLLM(),
+            registry=ToolRegistry(),
+            permissions=PermissionManager(cfg),
+            telegram_memory=mem,
+        )
+
+    bot = TelegramBot(cfg, core())
+    bot._prepare_session(42)
+    list(bot.agent.run("запомни число 7"))
+    bot._prepare_session(43)
+    list(bot.agent.run("запомни число 9"))
+
+    bot._prepare_session(42)
+    texts = [_text(message) for message in bot.agent.history if message.content]
+    assert any("число 7" in text for text in texts), texts
+    assert not any("число 9" in text for text in texts), texts
+
+    restarted = TelegramBot(cfg, core())
+    restarted._prepare_session(42)
+    texts = [_text(message) for message in restarted.agent.history if message.content]
+    assert any("число 7" in text for text in texts), texts
+
+    bot._new_session_for_chat(42)
+    bot._prepare_session(42)
+    texts = [_text(message) for message in bot.agent.history if message.content]
+    assert not any("число 7" in text for text in texts), "новый диалог не очистился"
+    bot._prepare_session(43)
+    texts = [_text(message) for message in bot.agent.history if message.content]
+    assert any("число 9" in text for text in texts), "новый диалог затёр соседний чат"
+    mem.close()
+    print("ok  Telegram-чаты изолированы, /new не трогает соседей")
+
+
 def main() -> int:
     test_summary_storage_roundtrip()
     test_recent_messages_after_id_and_db_id()
@@ -264,6 +310,7 @@ def main() -> int:
     test_large_system_prompt_does_not_trigger_summary()
     test_reset_clears_summary()
     test_summary_tail_starts_at_user_and_keeps_tool_pair()
+    test_telegram_chat_sessions_are_isolated_and_restored()
     print("\nCONTEXT SUMMARY TESTS PASSED")
     return 0
 
