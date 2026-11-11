@@ -292,6 +292,8 @@ def test_fast_paths() -> None:
     assert not is_simple_request("Который час?")
     assert not is_simple_request("Открой блокнот")
     assert not is_simple_request("Напиши функцию сортировки")
+    assert not is_simple_request("Какие у тебя есть скиллы?")
+    assert not is_simple_request("What skills do you have?")
     # шутка должна идти полным агентом: только там ИИ может выбрать реакцию
     assert not is_simple_request("Слушай анекдот: Oct 31 == Dec 25")
 

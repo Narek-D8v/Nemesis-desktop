@@ -233,7 +233,7 @@ SIMPLE_EXCLUDE: tuple[str, ...] = (
     "ошибк", "исправь", "почини", "напиши", "расскажи", "объясни",
     "обработа", "улучш", "переделай", "придумай",
     "переведи", "посчитай", "сравни", "план", "идеи", "брейншторм",
-    "музык", "песн", "стим", "телеграм", "почт", "отправь", "пришли",
+    "скилл", "музык", "песн", "стим", "телеграм", "почт", "отправь", "пришли",
     "удали", "измени", "сайт", "таблиц", "документ", "pdf", "excel",
     "word", "zip", "архив", "http", "d:\\", "c:\\", "работай",
     "продолжай", "анекдот", "шутк", "прикол", "смешн", "юмор",
@@ -269,7 +269,7 @@ SIMPLE_EXCLUDE: tuple[str, ...] = (
     "download", "upload", "create", "build", "generate", "draw", "paint",
     "design", "presentation", "slides", "video", "image", "picture",
     "photo", "file", "folder", "directory", "screenshot", "screen",
-    "code", "script", "error", "bug", "fix", "repair", "debug", "write",
+    "code", "script", "skill", "error", "bug", "fix", "repair", "debug", "write",
     "tell me", "explain", "process", "improve", "redo", "rewrite",
     "refactor", "translate", "calculate", "compute", "count", "compare",
     "plan", "idea", "brainstorm", "music", "song", "playlist", "spotify",
@@ -391,6 +391,34 @@ def is_simple_request(text: str) -> bool:
     return not any(marker in low for marker in SIMPLE_EXCLUDE)
 
 
+#: как пользователи спрашивают о списке установленных скиллов (ru + en)
+_SKILLS_QUESTION_MARKERS: tuple[str, ...] = (
+    # ru
+    "какие у тебя", "какие есть скилл", "какие скилл", "сколько скилл",
+    "список скилл", "покажи скилл", "назови скилл", "перечисли скилл",
+    "есть ли скилл", "какие скиллы", "какие скилы", "скиллы у тебя",
+    # en
+    "what skills", "which skills", "list skills", "show skills",
+    "your skills", "skills do you have", "how many skills",
+)
+
+
+def looks_like_skills_question(text: str) -> bool:
+    """Спрашивают ли, какие скиллы доступны.
+
+    Такой вопрос нельзя отдавать быстрому пути: там нет списка скиллов,
+    поэтому лёгкая модель отвечает общими словами и может оборваться по
+    лимиту токенов. В Telegram на него сразу приходит список, в остальных
+    интерфейсах — полный агентский промпт со списком.
+    """
+    low = " ".join((text or "").strip().lower().split())
+    if not low or len(low) > 400:
+        return False
+    if low.strip(" ?!.") in {"скиллы", "скилы", "skills"}:
+        return True
+    return any(marker in low for marker in _SKILLS_QUESTION_MARKERS)
+
+
 def looks_like_deferral(text: str) -> bool:
     """Похоже ли сообщение на откладывание работы или просьбу разрешения.
 
@@ -425,5 +453,6 @@ __all__ = [
     "reply_key",
     "quick_reply",
     "is_simple_request",
+    "looks_like_skills_question",
     "looks_like_deferral",
 ]

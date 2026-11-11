@@ -736,6 +736,8 @@ def test_ux_texts() -> None:
     assert "Фишка" not in help_text(False)
     assert "/skills" in with_hints
     assert "/skills" in without_hints
+    assert "/skill" in with_hints
+    assert "/skill" in without_hints
     assert "PDF" in examples_text()
     menu = main_menu_rows(True)
     assert {data for row in menu for _, data in row} == {
@@ -925,10 +927,90 @@ def test_skills_command_and_callback() -> None:
     fake.commands.clear()
     asyncio.run(bot._cmd_unknown(update, None))
     assert "/skills" in fake.sent[-1][0]
+    assert "/skill" in fake.sent[-1][0]
 
     asyncio.run(bot._set_commands())
-    assert any(getattr(item, "command", "") == "skills" for item in fake.commands)
-    print("ok  /skills, справка, callback и меню показывают скиллы")
+    commands = {getattr(item, "command", "") for item in fake.commands}
+    assert {"skills", "skill"} <= commands, commands
+    print("ok  /skills и /skill, справка, callback и меню показывают скиллы")
+
+
+def test_skill_alias_handler_registered() -> None:
+    """Короткий псевдоним /skill обслуживается тем же обработчиком."""
+    class _App:
+        def __init__(self) -> None:
+            self.handlers: list[object] = []
+
+        def add_handler(self, handler: object) -> None:
+            self.handlers.append(handler)
+
+    bot = object.__new__(TelegramBot)
+    app = _App()
+    bot._app = app
+    bot._register_handlers()
+    commands = {
+        command
+        for handler in app.handlers
+        for command in getattr(handler, "commands", ())
+    }
+    assert {"skills", "skill"} <= commands, commands
+    print("ok  /skill зарегистрирован как псевдоним /skills")
+
+
+def test_natural_language_skills_question() -> None:
+    """Вопрос о скиллах отвечает списком, а не общим быстрым ответом."""
+    import asyncio
+
+    from nemus.core.language import looks_like_skills_question
+
+    assert looks_like_skills_question("Какие у тебя есть скиллы?")
+    assert looks_like_skills_question("What skills do you have?")
+    assert not looks_like_skills_question("Загрузи скилл pdf-reader")
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict]] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+            self.sent.append((text, kwargs))
+
+    cfg = Config()
+    cfg.telegram.hints_enabled = False
+    cfg.mcp.enabled = False
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot.config = cfg
+    bot.memory = None
+    bot._hints_shown = set()
+    bot._hints_muted = set()
+    bot._pending_attachments = {}
+    fake = _FakeBot()
+    bot._app = SimpleNamespace(bot=fake)
+    bot._skills = lambda: [  # type: ignore[method-assign]
+        SimpleNamespace(
+            name="pdf-reader",
+            description="Read PDFs",
+            path=Path("pdf-reader"),
+            kind="skill",
+        )
+    ]
+    bot._skill_plugin_name = lambda item: ""  # type: ignore[method-assign]
+    bot._mcp_names = lambda: []  # type: ignore[method-assign]
+    called: list[bool] = []
+
+    async def _run_task(*args: object, **kwargs: object) -> None:
+        called.append(True)
+
+    bot._run_task = _run_task  # type: ignore[method-assign]
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=42),
+        message=SimpleNamespace(text="Какие у тебя есть скиллы?", message_id=11),
+    )
+    asyncio.run(bot._handle_text(update))
+    assert not called, "вопрос о скиллах не должен уходить в обычный цикл"
+    assert fake.sent and "Установлено скиллов: 1" in fake.sent[-1][0]
+    assert "/pdf-reader" in fake.sent[-1][0]
+    print("ok  естественный вопрос о скиллах присылает список")
 
 
 def test_skills_helpers_are_safe() -> None:
@@ -1935,6 +2017,8 @@ def main() -> int:
     test_skills_text()
     test_skill_details_text()
     test_skills_command_and_callback()
+    test_skill_alias_handler_registered()
+    test_natural_language_skills_question()
     test_skills_helpers_are_safe()
     test_skills_use_real_plugin_and_mcp_config()
     test_start_help_respect_hints()

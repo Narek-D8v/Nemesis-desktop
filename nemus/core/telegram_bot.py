@@ -33,6 +33,7 @@ from typing import Any
 
 from nemus.config import Config
 from nemus.core.agent import Agent, AgentEvent
+from nemus.core.language import looks_like_skills_question
 from nemus.core.providers import Message
 from nemus.core.telegram_format import (
     TEXT_LIMIT,
@@ -77,6 +78,9 @@ PROGRESS_INTERVAL = 1.5
 
 #: активный экземпляр бота: инструмент send_telegram находит его отсюда
 _active_bot: TelegramBot | None = None
+
+#: имена команды списка скиллов: каноническое и короткий псевдоним
+SKILL_COMMANDS = ("skills", "skill")
 
 #: выбор реакции: отдельный короткий запрос, потому что в общем наборе из
 #: десятков инструментов модель почти не вызывает react_telegram
@@ -1087,15 +1091,45 @@ class TelegramBot:
             builder = media_timeout(120)
         return builder.build()
 
+    def _register_handlers(self) -> None:
+        """Подключает команды, кнопки и медиа к текущему Application."""
+        from telegram.ext import (
+            CallbackQueryHandler,
+            CommandHandler,
+            MessageHandler,
+            filters,
+        )
+
+        self._app.add_handler(CommandHandler("start", self._cmd_start))
+        self._app.add_handler(CommandHandler("help", self._cmd_help))
+        for name in SKILL_COMMANDS:
+            self._app.add_handler(CommandHandler(name, self._cmd_skills))
+        self._app.add_handler(CommandHandler("new", self._cmd_new))
+        self._app.add_handler(CommandHandler("status", self._cmd_status))
+        self._app.add_handler(CommandHandler("id", self._cmd_id))
+        self._app.add_handler(CommandHandler("stop", self._cmd_stop))
+        self._app.add_handler(CallbackQueryHandler(self._on_callback))
+        self._app.add_handler(
+            MessageHandler(
+                filters.PHOTO
+                | filters.Document.ALL
+                | filters.VIDEO
+                | filters.ANIMATION
+                | filters.AUDIO
+                | filters.VOICE
+                | filters.VIDEO_NOTE,
+                self._on_media,
+            )
+        )
+        self._app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text)
+        )
+        self._app.add_handler(MessageHandler(filters.COMMAND, self._cmd_unknown))
+
     def _thread_main(self) -> None:
         global _active_bot, _last_error
         try:
-            from telegram.ext import (
-                CallbackQueryHandler,
-                CommandHandler,
-                MessageHandler,
-                filters,
-            )
+            import telegram.ext  # noqa: F401
         except Exception as exc:  # noqa: BLE001
             self._start_error = f"нет пакета python-telegram-bot: {exc}"
             self._release_lock()
@@ -1108,30 +1142,7 @@ class TelegramBot:
             self._app = self._build_application()
             self._task_lock = asyncio.Lock()
             self._inbox_lock = asyncio.Lock()
-            self._app.add_handler(CommandHandler("start", self._cmd_start))
-            self._app.add_handler(CommandHandler("help", self._cmd_help))
-            self._app.add_handler(CommandHandler("skills", self._cmd_skills))
-            self._app.add_handler(CommandHandler("new", self._cmd_new))
-            self._app.add_handler(CommandHandler("status", self._cmd_status))
-            self._app.add_handler(CommandHandler("id", self._cmd_id))
-            self._app.add_handler(CommandHandler("stop", self._cmd_stop))
-            self._app.add_handler(CallbackQueryHandler(self._on_callback))
-            self._app.add_handler(
-                MessageHandler(
-                    filters.PHOTO
-                    | filters.Document.ALL
-                    | filters.VIDEO
-                    | filters.ANIMATION
-                    | filters.AUDIO
-                    | filters.VOICE
-                    | filters.VIDEO_NOTE,
-                    self._on_media,
-                )
-            )
-            self._app.add_handler(
-                MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text)
-            )
-            self._app.add_handler(MessageHandler(filters.COMMAND, self._cmd_unknown))
+            self._register_handlers()
 
             self._loop.run_until_complete(self._app.initialize())
             self._loop.run_until_complete(self._app.start())
@@ -1229,6 +1240,7 @@ class TelegramBot:
                 [
                     BotCommand("start", "Начать работу"),
                     BotCommand("skills", "Скиллы и плагины"),
+                    BotCommand("skill", "Скиллы (то же, что /skills)"),
                     BotCommand("new", "Новый диалог"),
                     BotCommand("status", "Состояние"),
                     BotCommand("id", "Мой ID"),
@@ -1466,7 +1478,8 @@ class TelegramBot:
             await self._run_task(update, text)
             return
         await update.message.reply_text(
-            "Не знаю такой команды. Список: /start, /skills, /new, /status, /id, /help."
+            "Не знаю такой команды. Список: /start, /skills (или /skill), "
+            "/new, /status, /id, /help."
         )
 
     def _is_skill_command(self, text: str) -> bool:
@@ -1610,12 +1623,22 @@ class TelegramBot:
 
     async def _handle_text(self, update: Any) -> None:
         text = (update.message.text or "").strip()
-        if text:
-            chat_id = update.effective_chat.id
-            pending, pending_images = self._take_pending_attachment(chat_id)
-            if pending:
-                text = f"{pending}\n\nЗадача пользователя: {text}"
-            await self._run_task(update, text, images=pending_images)
+        if not text:
+            return
+        chat_id = update.effective_chat.id
+        pending, pending_images = self._take_pending_attachment(chat_id)
+        if pending:
+            text = f"{pending}\n\nЗадача пользователя: {text}"
+        if not pending and not pending_images and looks_like_skills_question(text):
+            await self._send_skills(
+                chat_id,
+                reply_to=update.message.message_id,
+                reply_markup=self._keyboard(
+                    main_menu_rows(self._hints_active(chat_id))
+                ),
+            )
+            return
+        await self._run_task(update, text, images=pending_images)
 
     async def _on_media(self, update: Any, context: Any) -> None:
         if not self._authorized(update):

@@ -36,7 +36,7 @@ def start_text(full_name: str, aliases: str, hints: bool) -> str:
         ]
     lines += [
         "",
-        "**Команды:** /skills — скиллы, /new — новый диалог, "
+        "**Команды:** /skills или /skill — скиллы, /new — новый диалог, "
         "/status — состояние, /id — мой ID, /help — помощь.",
     ]
     return "\n".join(lines)
@@ -51,7 +51,7 @@ def help_text(hints: bool) -> str:
         "• обрабатывать фото, видео и голосовые;",
         "• присылать результат прямо в этот чат.",
         "",
-        "**Команды:** /skills — скиллы, /new — новый диалог, "
+        "**Команды:** /skills или /skill — скиллы, /new — новый диалог, "
         "/status — состояние, /id — мой ID, /help — помощь.",
     ]
     if hints:
@@ -156,7 +156,7 @@ def skill_details_text(
 
 def skill_not_found_text() -> str:
     """Ответ на `/skills <неизвестное имя>`."""
-    return "Не нашёл такой скилл. Список: /skills"
+    return "Не нашёл такой скилл. Список: /skills (или /skill)"
 
 
 def first_hint_text() -> str:

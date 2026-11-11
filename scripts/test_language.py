@@ -421,7 +421,11 @@ def _registry():
 
 def test_quick_replies_and_simple_requests() -> None:
     """Двуязычные короткие реплики и классификация простых запросов."""
-    from nemus.core.language import is_simple_request, quick_reply
+    from nemus.core.language import (
+        is_simple_request,
+        looks_like_skills_question,
+        quick_reply,
+    )
 
     # мгновенные ответы без модели: прямое обращение, приветствие, спасибо
     assert quick_reply("Немуся?!") == "Да, я здесь. Чем помочь?"
@@ -471,6 +475,15 @@ def test_quick_replies_and_simple_requests() -> None:
     assert not is_simple_request("Сколько места на диске?")
     assert not is_simple_request("Что запущено на компьютере?")
     assert not is_simple_request("How much disk space do I have?")
+    # вопрос о скиллах требует полного промпта со списком скиллов:
+    # быстрый путь без списка отвечает общими словами и может обрываться
+    assert not is_simple_request("Какие у тебя есть скиллы?")
+    assert not is_simple_request("What skills do you have?")
+    assert looks_like_skills_question("Какие у тебя есть скиллы?")
+    assert looks_like_skills_question("Покажи список скиллов")
+    assert looks_like_skills_question("What skills do you have?")
+    assert not looks_like_skills_question("Загрузи скилл pdf-reader")
+    assert not looks_like_skills_question("Создай скилл для отчётов")
     print("ok  короткие реплики и простые запросы: ru + en")
 
 

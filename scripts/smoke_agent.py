@@ -51,6 +51,17 @@ class FakeFastLLM:
         return LLMResponse(content=self.text, model="fake-fast")
 
 
+class TruncatedFastLLM:
+    """Лёгкая модель, упёршаяся в потолок токенов и оборвавшая фразу."""
+
+    def complete(self, messages, **overrides):
+        return LLMResponse(
+            content="Я могу искать информацию, помогать с",
+            finish_reason="length",
+            model="fake-fast",
+        )
+
+
 class PromiseLLM:
     """Модель, которая всё время обещает работу и не вызывает инструменты."""
 
@@ -115,6 +126,17 @@ def test_fast_reply_rejects_promise() -> None:
     print("ok  быстрый ответ: обещание и отказ откатываются в основной цикл")
 
 
+def test_fast_reply_rejects_truncated() -> None:
+    """Оборванный по max_tokens ответ не уходит пользователю как финал."""
+    agent = _new_agent(TruncatedFastLLM())
+    events, handled = _drain(agent._run_fast_reply())
+    assert handled is False and events == [], (events, handled)
+    assert not any(m.role == "assistant" for m in agent.history), (
+        "обрезанный ответ не должен попадать в историю и в чат"
+    )
+    print("ok  обрезанный быстрый ответ откатывается в основной цикл")
+
+
 def test_promise_nudge_we_forms() -> None:
     """Обещание в мы-форме («сейчас запустим») не закрывает задачу."""
     agent = _new_agent(PromiseLLM())
@@ -169,6 +191,7 @@ def main() -> int:
     failures = 0
     for test in (
         test_fast_reply_rejects_promise,
+        test_fast_reply_rejects_truncated,
         test_promise_nudge_we_forms,
         test_gui_suffix_about_voice,
     ):
