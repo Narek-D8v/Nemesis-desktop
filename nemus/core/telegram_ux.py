@@ -36,8 +36,8 @@ def start_text(full_name: str, aliases: str, hints: bool) -> str:
         ]
     lines += [
         "",
-        "**Команды:** /new — новый диалог, /status — состояние, "
-        "/id — мой ID, /help — помощь.",
+        "**Команды:** /skills — скиллы, /new — новый диалог, "
+        "/status — состояние, /id — мой ID, /help — помощь.",
     ]
     return "\n".join(lines)
 
@@ -51,8 +51,8 @@ def help_text(hints: bool) -> str:
         "• обрабатывать фото, видео и голосовые;",
         "• присылать результат прямо в этот чат.",
         "",
-        "**Команды:** /new — новый диалог, /status — состояние, "
-        "/id — мой ID, /help — помощь.",
+        "**Команды:** /skills — скиллы, /new — новый диалог, "
+        "/status — состояние, /id — мой ID, /help — помощь.",
     ]
     if hints:
         lines += [
@@ -93,6 +93,7 @@ def main_menu_rows(hints: bool) -> list[list[tuple[str, str]]]:
             ("🧰 Что я умею", "ux:help"),
         ],
         [
+            ("🧩 Скиллы", "ux:skills"),
             ("🆕 Новый диалог", "ux:new"),
             ("ℹ️ Статус", "ux:status"),
         ],

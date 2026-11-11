@@ -52,6 +52,9 @@ from nemus.core.telegram_ux import (
     first_hint_text,
     help_text,
     main_menu_rows,
+    skill_details_text,
+    skill_not_found_text,
+    skills_list_text,
     start_text,
 )
 from nemus.core.tools.telegram import (
@@ -1107,6 +1110,7 @@ class TelegramBot:
             self._inbox_lock = asyncio.Lock()
             self._app.add_handler(CommandHandler("start", self._cmd_start))
             self._app.add_handler(CommandHandler("help", self._cmd_help))
+            self._app.add_handler(CommandHandler("skills", self._cmd_skills))
             self._app.add_handler(CommandHandler("new", self._cmd_new))
             self._app.add_handler(CommandHandler("status", self._cmd_status))
             self._app.add_handler(CommandHandler("id", self._cmd_id))
@@ -1224,6 +1228,7 @@ class TelegramBot:
             await self._app.bot.set_my_commands(
                 [
                     BotCommand("start", "Начать работу"),
+                    BotCommand("skills", "Скиллы и плагины"),
                     BotCommand("new", "Новый диалог"),
                     BotCommand("status", "Состояние"),
                     BotCommand("id", "Мой ID"),
@@ -1461,7 +1466,7 @@ class TelegramBot:
             await self._run_task(update, text)
             return
         await update.message.reply_text(
-            "Не знаю такой команды. Список: /start, /new, /status, /id, /help."
+            "Не знаю такой команды. Список: /start, /skills, /new, /status, /id, /help."
         )
 
     def _is_skill_command(self, text: str) -> bool:
@@ -1483,6 +1488,108 @@ class TelegramBot:
                 logger.warning(f"Telegram: не удалось прочитать скиллы: {exc}")
                 self._skill_names = set()
         return token in self._skill_names
+
+    def _skills(self) -> list[Any]:
+        """Установленные скиллы; битая папка не должна ломать /skills."""
+        cfg = getattr(self.config, "skills", None)
+        try:
+            from nemus.core.skills import load_skills
+
+            return load_skills(
+                getattr(cfg, "dir", None) if cfg else None,
+                disabled=getattr(cfg, "disabled", ()) if cfg else (),
+            )
+        except OSError as exc:
+            logger.warning(f"Telegram: не удалось прочитать скиллы: {exc}")
+            return []
+
+    def _skill_plugin_name(self, skill: Any) -> str:
+        """Имя плагина скилла или пустая строка."""
+        cfg = getattr(self.config, "skills", None)
+        try:
+            from nemus.core.skills import skill_plugin
+
+            return skill_plugin(
+                getattr(skill, "path", Path()),
+                getattr(cfg, "dir", None) if cfg else None,
+            )
+        except OSError:
+            return ""
+
+    def _mcp_names(self) -> list[str]:
+        """Только включённые MCP-серверы из конфига, без сети."""
+        mcp = getattr(self.config, "mcp", None)
+        if mcp is None or not getattr(mcp, "enabled", False):
+            return []
+        return [
+            str(server.name)
+            for server in getattr(mcp, "servers", ())
+            if getattr(server, "enabled", False)
+        ]
+
+    def _find_skill(self, name: str) -> Any | None:
+        """Точное имя скилла без учёта регистра; ведущий / не мешает."""
+        wanted = (name or "").strip().lstrip("/").lower()
+        for skill in self._skills():
+            if str(getattr(skill, "name", "")).lower() == wanted:
+                return skill
+        return None
+
+    async def _send_skills(
+        self,
+        chat_id: int,
+        reply_to: int | None = None,
+        reply_markup: Any | None = None,
+    ) -> None:
+        """Список установленных скиллов и MCP-серверов."""
+        entries = [
+            (
+                skill.name,
+                self._skill_plugin_name(skill),
+                getattr(skill, "kind", "skill"),
+            )
+            for skill in self._skills()
+        ]
+        await start_message(
+            self._app.bot,
+            chat_id,
+            skills_list_text(entries, self._mcp_names()),
+            reply_to=reply_to,
+            reply_markup=reply_markup,
+        )
+
+    async def _cmd_skills(self, update: Any, context: Any) -> None:
+        """`/skills` — список; `/skills имя` — короткая справка."""
+        if not self._authorized(update):
+            await self._deny(update)
+            return
+        chat_id = update.effective_chat.id
+        args = list(getattr(context, "args", None) or ())
+        keyboard = self._keyboard(main_menu_rows(self._hints_active(chat_id)))
+        if not args:
+            await self._send_skills(
+                chat_id,
+                reply_to=update.message.message_id,
+                reply_markup=keyboard,
+            )
+            return
+        skill = self._find_skill(str(args[0]))
+        if skill is None:
+            text = skill_not_found_text()
+        else:
+            text = skill_details_text(
+                skill.name,
+                getattr(skill, "description", ""),
+                self._skill_plugin_name(skill),
+                getattr(skill, "kind", "skill"),
+            )
+        await start_message(
+            self._app.bot,
+            chat_id,
+            text,
+            reply_to=update.message.message_id,
+            reply_markup=keyboard,
+        )
 
     # ------------------------------------------------------------- приём
     async def _on_text(self, update: Any, context: Any) -> None:
@@ -1939,6 +2046,16 @@ class TelegramBot:
     async def _on_ux_callback(self, update: Any, query: Any) -> None:
         """Кнопки подсказок: действия вложений, помощь и примеры."""
         action = (query.data or "")[3:]
+        if action == "skills":
+            chat_id = query.message.chat_id
+            await query.answer()
+            await self._send_skills(
+                chat_id,
+                reply_markup=self._keyboard(
+                    main_menu_rows(self._hints_active(chat_id))
+                ),
+            )
+            return
         if action.startswith("attach:"):
             key = action.split(":", 1)[1]
             prompt = attachment_prompt(key)

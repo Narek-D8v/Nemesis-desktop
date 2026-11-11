@@ -734,11 +734,14 @@ def test_ux_texts() -> None:
     assert "Примеры" not in without_hints
     assert "Фишка" in help_text(True)
     assert "Фишка" not in help_text(False)
+    assert "/skills" in with_hints
+    assert "/skills" in without_hints
     assert "PDF" in examples_text()
     menu = main_menu_rows(True)
     assert {data for row in menu for _, data in row} == {
         "ux:examples",
         "ux:help",
+        "ux:skills",
         "ux:new",
         "ux:status",
     }
@@ -793,6 +796,160 @@ def test_skill_details_text() -> None:
 
     assert "Без описания." in skill_details_text("x", "", "", "skill")
     assert "/skills" in skill_not_found_text()
+
+
+def test_skills_command_and_callback() -> None:
+    """Команда /skills, справка, callback и меню видят установленные скиллы."""
+    import asyncio
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict]] = []
+            self.commands: list[object] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+            self.sent.append((text, kwargs))
+
+        async def set_my_commands(self, commands: list[object]) -> None:
+            self.commands = commands
+
+    class _Query:
+        data = "ux:skills"
+        from_user = SimpleNamespace(id=42)
+        message = SimpleNamespace(chat_id=42, message_id=5)
+
+        def __init__(self) -> None:
+            self.answers: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            pass
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    cfg.mcp.enabled = False
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot.config = cfg
+    bot.memory = None
+    bot._hints_shown = set()
+    bot._hints_muted = set()
+    bot._last_tasks = {}
+    bot._skill_names = set()
+    fake = _FakeBot()
+    bot._app = SimpleNamespace(bot=fake)
+
+    skill = SimpleNamespace(
+        name="pdf-reader",
+        description="Read PDFs",
+        path=Path("pdf-reader"),
+        kind="skill",
+    )
+    command = SimpleNamespace(
+        name="superpowers:review",
+        description="Review code",
+        path=Path("superpowers/commands/review.md"),
+        kind="command",
+    )
+    bot._skills = lambda: [skill, command]  # type: ignore[method-assign]
+    bot._skill_plugin_name = lambda item: (  # type: ignore[method-assign]
+        "superpowers" if item.kind == "command" else ""
+    )
+    bot._mcp_names = lambda: ["git"]  # type: ignore[method-assign]
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=42, type="private"),
+        message=SimpleNamespace(message_id=11, text="привет"),
+    )
+
+    async def _reply(text: str, **kwargs: object) -> None:
+        fake.sent.append((text, kwargs))
+
+    update.message.reply_text = _reply  # type: ignore[attr-defined]
+
+    asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=[])))
+    text, kwargs = fake.sent[-1]
+    assert "Установлено скиллов: 2" in text
+    assert "/pdf-reader" in text and "/superpowers:review" in text
+    assert "git" in text
+    assert kwargs.get("reply_markup") is not None
+
+    fake.sent.clear()
+    asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=["superpowers:review"])))
+    text, _ = fake.sent[-1]
+    assert "Тип: команда плагина" in text
+    assert "Review code" in text
+    assert "/superpowers:review" in text
+
+    fake.sent.clear()
+    asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=["pdf-reader"])))
+    text, _ = fake.sent[-1]
+    assert "Тип: скилл" in text
+    assert "Read PDFs" in text
+
+    fake.sent.clear()
+    asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=["missing"])))
+    assert "Не нашёл такой скилл" in fake.sent[-1][0]
+
+    bot._hints_muted = {42}
+    fake.sent.clear()
+    asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=[])))
+    assert fake.sent
+    assert fake.sent[-1][1].get("reply_markup") is None
+
+    cfg.telegram.hints_enabled = False
+    bot._hints_muted = set()
+    fake.sent.clear()
+    asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=[])))
+    assert fake.sent
+    assert fake.sent[-1][1].get("reply_markup") is None
+
+    fake.sent.clear()
+    query = _Query()
+    asyncio.run(
+        bot._on_callback(
+            SimpleNamespace(
+                callback_query=query,
+                effective_user=query.from_user,
+                effective_chat=SimpleNamespace(id=42, type="private"),
+            ),
+            None,
+        )
+    )
+    assert fake.sent and "/pdf-reader" in fake.sent[-1][0]
+
+    fake.sent.clear()
+    fake.commands.clear()
+    asyncio.run(bot._cmd_unknown(update, None))
+    assert "/skills" in fake.sent[-1][0]
+
+    asyncio.run(bot._set_commands())
+    assert any(getattr(item, "command", "") == "skills" for item in fake.commands)
+    print("ok  /skills, справка, callback и меню показывают скиллы")
+
+
+def test_skills_helpers_are_safe() -> None:
+    """Нет папки скиллов — пустой список; MCP не трогается по сети."""
+    from unittest.mock import patch
+
+    cfg = Config()
+    bot = object.__new__(TelegramBot)
+    bot.config = cfg
+
+    with patch("nemus.core.skills.load_skills", side_effect=OSError("denied")):
+        assert bot._skills() == []
+
+    cfg.mcp.enabled = False
+    assert bot._mcp_names() == []
+    cfg.mcp.enabled = True
+    cfg.mcp.servers = [
+        SimpleNamespace(name="git", enabled=True),
+        SimpleNamespace(name="off", enabled=False),
+    ]
+    assert bot._mcp_names() == ["git"]
 
 
 def test_start_help_respect_hints() -> None:
@@ -1730,6 +1887,8 @@ def main() -> int:
     test_ux_texts()
     test_skills_text()
     test_skill_details_text()
+    test_skills_command_and_callback()
+    test_skills_helpers_are_safe()
     test_start_help_respect_hints()
     test_muted_help_examples_and_attachment_buttons()
     test_ux_examples_callback()
