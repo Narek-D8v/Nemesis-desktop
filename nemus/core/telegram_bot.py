@@ -836,11 +836,29 @@ class TelegramBot:
             pass
 
     # ---------------------------------------------------------- поток/цикл
+    def _build_application(self) -> Any:
+        """Собирает Application с таймаутами, достаточными для видео."""
+        from telegram.ext import ApplicationBuilder
+
+        builder = (
+            ApplicationBuilder()
+            .token(self.cfg.token)
+            .connect_timeout(10)
+            .read_timeout(30)
+            .write_timeout(120)
+            .pool_timeout(5)
+        )
+        # В PTB 21 этого метода ещё нет, в 22 — есть. Без него большие
+        # медиафайлы живут на дефолтном таймауте и падают с TimedOut.
+        media_timeout = getattr(builder, "media_write_timeout", None)
+        if callable(media_timeout):
+            builder = media_timeout(120)
+        return builder.build()
+
     def _thread_main(self) -> None:
         global _active_bot, _last_error
         try:
             from telegram.ext import (
-                ApplicationBuilder,
                 CallbackQueryHandler,
                 CommandHandler,
                 MessageHandler,
@@ -855,7 +873,7 @@ class TelegramBot:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._app = ApplicationBuilder().token(self.cfg.token).build()
+            self._app = self._build_application()
             self._task_lock = asyncio.Lock()
             self._app.add_handler(CommandHandler("start", self._cmd_start))
             self._app.add_handler(CommandHandler("help", self._cmd_help))
@@ -1639,7 +1657,13 @@ class TelegramBot:
     async def _send_file(
         self, chat_id: int, path: Path, kind: str, caption: str
     ) -> tuple[bool, str]:
-        from telegram import InputFile
+        """Отправляет файл, повторяя таймауты и падая в документ.
+
+        Большие видео на медленном канале штатно упираются в write timeout.
+        Один повтор часто проходит, а если нет — документ отправляется без
+        серверной обработки видео и почти всегда доходит.
+        """
+        from telegram.error import NetworkError, TimedOut
 
         kind = (kind or "auto").strip().lower()
         if kind == "auto":
@@ -1647,53 +1671,112 @@ class TelegramBot:
         caption = (caption or "").strip()[:CAPTION_LIMIT]
         note_path: Path | None = None
         try:
-            with path.open("rb") as fh:
-                if kind == "video_note":
-                    note_path = path.with_name(f"{path.stem}_note.mp4")
+            if kind == "video_note":
+                note_path = path.with_name(f"{path.stem}_note.mp4")
+                try:
                     await asyncio.to_thread(convert_to_video_note, path, note_path)
-                    duration = int(max(1, min(59, media_duration(note_path))))
-                    with note_path.open("rb") as note:
-                        await self._app.bot.send_video_note(
-                            chat_id,
-                            video_note=InputFile(note, filename="note.mp4"),
-                            duration=duration,
-                            length=512,
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"Telegram: видео-кружок не готов: {exc}")
+                    return False, f"Не удалось отправить файл: {exc}"
+
+            for attempt in (1, 2):
+                try:
+                    await self._send_once(chat_id, path, kind, caption, note_path)
+                    return True, f"Отправлено в Telegram: {path.name}"
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == 1 and isinstance(exc, (TimedOut, NetworkError)):
+                        logger.warning(
+                            "Telegram: файл %s не отправлен (попытка 1/2): %s — "
+                            "повторяю через секунду",
+                            path.name,
+                            exc,
                         )
-                elif kind == "photo":
-                    await self._app.bot.send_photo(
-                        chat_id,
-                        photo=InputFile(fh, filename=path.name),
-                        caption=caption,
-                    )
-                elif kind == "video":
-                    await self._app.bot.send_video(
-                        chat_id,
-                        video=InputFile(fh, filename=path.name),
-                        caption=caption,
-                        supports_streaming=True,
-                    )
-                elif kind in ("audio", "voice"):
-                    await self._app.bot.send_audio(
-                        chat_id,
-                        audio=InputFile(fh, filename=path.name),
-                        caption=caption,
-                    )
-                else:
-                    await self._app.bot.send_document(
-                        chat_id,
-                        document=InputFile(fh, filename=path.name),
-                        caption=caption,
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Telegram: файл {path} не отправлен: {exc}")
-            return False, f"Не удалось отправить файл: {exc}"
+                        await asyncio.sleep(1.0)
+                        continue
+
+                    if kind != "document":
+                        # Видео/фото/аудио после таймаута часто проходит
+                        # документом: меньше серверной обработки.
+                        try:
+                            await self._send_once(
+                                chat_id, path, "document", caption, note_path
+                            )
+                            logger.info(
+                                "Telegram: %s отправлен документом после ошибки: %s",
+                                path.name,
+                                exc,
+                            )
+                            return True, (
+                                f"Отправлено документом в Telegram: {path.name}"
+                            )
+                        except Exception as fallback_exc:  # noqa: BLE001
+                            logger.warning(
+                                "Telegram: файл %s не отправлен даже документом: %s",
+                                path.name,
+                                fallback_exc,
+                            )
+                            return False, (
+                                f"Не удалось отправить файл: {fallback_exc}"
+                            )
+
+                    logger.warning(f"Telegram: файл {path} не отправлен: {exc}")
+                    return False, f"Не удалось отправить файл: {exc}"
         finally:
             if note_path is not None:
                 try:
                     note_path.unlink()
                 except OSError:
                     pass
-        return True, f"Отправлено в Telegram: {path.name}"
+
+    async def _send_once(
+        self,
+        chat_id: int,
+        path: Path,
+        kind: str,
+        caption: str,
+        note_path: Path | None,
+    ) -> None:
+        from telegram import InputFile
+
+        if kind == "video_note":
+            if note_path is None:
+                raise RuntimeError("видео-кружок не подготовлен")
+            duration = int(max(1, min(59, media_duration(note_path))))
+            with note_path.open("rb") as note:
+                await self._app.bot.send_video_note(
+                    chat_id,
+                    video_note=InputFile(note, filename="note.mp4"),
+                    duration=duration,
+                    length=512,
+                )
+            return
+
+        with path.open("rb") as fh:
+            if kind == "photo":
+                await self._app.bot.send_photo(
+                    chat_id,
+                    photo=InputFile(fh, filename=path.name),
+                    caption=caption,
+                )
+            elif kind == "video":
+                await self._app.bot.send_video(
+                    chat_id,
+                    video=InputFile(fh, filename=path.name),
+                    caption=caption,
+                    supports_streaming=True,
+                )
+            elif kind in ("audio", "voice"):
+                await self._app.bot.send_audio(
+                    chat_id,
+                    audio=InputFile(fh, filename=path.name),
+                    caption=caption,
+                )
+            else:
+                await self._app.bot.send_document(
+                    chat_id,
+                    document=InputFile(fh, filename=path.name),
+                    caption=caption,
+                )
 
 
 __all__ = [

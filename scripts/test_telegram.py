@@ -759,6 +759,51 @@ def test_download_limit_is_twenty_mb() -> None:
     print("ok  скачивание ограничено 20 МБ Bot API, 19 МБ проходит")
 
 
+def test_send_file_retries_and_falls_back() -> None:
+    """Таймаут отправки видео: один повтор, затем документ."""
+    import asyncio
+
+    from telegram.error import TimedOut
+
+    calls: list[str] = []
+
+    class _RetryBot:
+        async def send_video(self, chat_id: int, **kwargs: object) -> None:
+            calls.append("video")
+            if calls.count("video") == 1:
+                raise TimedOut("timed out")
+
+    bot = object.__new__(TelegramBot)
+    bot._app = SimpleNamespace(bot=_RetryBot())
+    with tempfile.TemporaryDirectory() as tmp:
+        video = Path(tmp) / "video.mp4"
+        video.write_bytes(b"x")
+        ok, text = asyncio.run(bot._send_file(42, video, "video", "клип"))
+    assert ok, text
+    assert calls == ["video", "video"], calls
+    assert "Отправлено" in text
+
+    calls.clear()
+
+    class _FallbackBot:
+        async def send_video(self, chat_id: int, **kwargs: object) -> None:
+            calls.append("video")
+            raise TimedOut("timed out")
+
+        async def send_document(self, chat_id: int, **kwargs: object) -> None:
+            calls.append("document")
+
+    bot._app = SimpleNamespace(bot=_FallbackBot())
+    with tempfile.TemporaryDirectory() as tmp:
+        video = Path(tmp) / "video.mp4"
+        video.write_bytes(b"x")
+        ok, text = asyncio.run(bot._send_file(42, video, "video", "клип"))
+    assert ok, text
+    assert calls == ["video", "video", "document"], calls
+    assert "документом" in text
+    print("ok  таймаут отправки: повтор, затем запасной документ")
+
+
 def test_reaction_list_complete() -> None:
     """У инструмента реакций весь согласованный список эмодзи, без потерь."""
     expected = (
@@ -872,6 +917,7 @@ def main() -> int:
     test_attachment_without_caption()
     test_stt_failure_does_not_ask_attachment()
     test_download_limit_is_twenty_mb()
+    test_send_file_retries_and_falls_back()
     test_reaction_list_complete()
     test_reaction_choice()
     test_tool_without_bot()
