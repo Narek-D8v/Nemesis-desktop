@@ -189,6 +189,10 @@ git commit -m "feat: добавить тексты списка скиллов"
 
 - [ ] **Step 1: Написать падающие тесты**
 
+> `start_message` форматирует Markdown в HTML, поэтому тесты команды и
+> callback проверяют пост-форматированный текст: без `**...**` и обратных
+> кавычек. Чистые тексты `telegram_ux` по-прежнему проверяются как Markdown.
+
 Обновить `test_ux_texts`:
 
 ```python
@@ -280,7 +284,7 @@ def test_skills_command_and_callback() -> None:
 
     asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=[])))
     text, kwargs = fake.sent[-1]
-    assert "**Установлено скиллов: 2**" in text
+    assert "Установлено скиллов: 2" in text
     assert "/pdf-reader" in text and "/superpowers:review" in text
     assert "git" in text
     assert kwargs.get("reply_markup") is not None
@@ -290,7 +294,13 @@ def test_skills_command_and_callback() -> None:
     text, _ = fake.sent[-1]
     assert "Тип: команда плагина" in text
     assert "Review code" in text
-    assert "`/superpowers:review`" in text
+    assert "/superpowers:review" in text
+
+    fake.sent.clear()
+    asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=["pdf-reader"])))
+    text, _ = fake.sent[-1]
+    assert "Тип: скилл" in text
+    assert "Read PDFs" in text
 
     fake.sent.clear()
     asyncio.run(bot._cmd_skills(update, SimpleNamespace(args=["missing"])))
