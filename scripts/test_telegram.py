@@ -308,6 +308,38 @@ def test_stt_import_without_numpy() -> None:
     print("ok  STT импортируется без numpy (облачная расшифровка в контейнере)")
 
 
+def test_cloud_stt_without_numpy() -> None:
+    """Облачное распознавание не падает из-за отсутствия numpy в контейнере."""
+    import threading
+    from unittest.mock import patch
+
+    import nemus.voice.stt as stt_module
+
+    seen: list[dict[str, object]] = []
+
+    class _FakeGemini:
+        def __init__(self, **kwargs: object) -> None:
+            seen.append(kwargs)
+
+        def transcribe(self, path: Path) -> str:
+            return "привет из облака"
+
+    cfg = Config()
+    cfg.voice.stt.engine = "gemini"
+    cfg.llm.providers["gemini"] = SimpleNamespace(api_key="test", api_base="")
+    bot = object.__new__(TelegramBot)
+    bot.config = cfg
+    bot._stt = None
+    bot._stt_lock = threading.Lock()
+    with (
+        patch.object(stt_module, "GeminiTranscriber", _FakeGemini),
+        patch.dict(sys.modules, {"numpy": None}),
+    ):
+        assert bot._transcribe(Path("voice.ogg")) == "привет из облака"
+    assert seen, "GeminiTranscriber должен быть вызван"
+    print("ok  облачное STT работает без numpy")
+
+
 def test_start_timeout_stops_hung_thread() -> None:
     """Таймаут старта не оставляет зомби-поток, который поллит без замка."""
     import time
@@ -707,6 +739,7 @@ def main() -> int:
     test_reminder_delivery()
     test_send_text_chunks()
     test_stt_import_without_numpy()
+    test_cloud_stt_without_numpy()
     test_start_timeout_stops_hung_thread()
     test_stop_watchdog_kills_zombie_loop()
     test_typing_and_reactions()

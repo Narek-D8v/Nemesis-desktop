@@ -1329,8 +1329,6 @@ class TelegramBot:
         модели. Если ключа нет или запрос не удался, локальный движок остаётся
         последним рубежом — голосовое всё равно будет расшифровано.
         """
-        import numpy as np
-
         from nemus.voice.stt import (
             GeminiTranscriber,
             OpenAITranscriber,
@@ -1400,6 +1398,13 @@ class TelegramBot:
                     beam_size=stt_cfg.beam_size,
                     hotwords=hotwords,
                 )
+        try:
+            import numpy as np
+        except ImportError as exc:
+            raise RuntimeError(
+                "Локальный faster-whisper требует numpy: установи numpy или "
+                "включи облачное распознавание (voice.stt.engine: gemini/openai)."
+            ) from exc
         pcm = _pcm_16k(path)
         audio = np.frombuffer(pcm, dtype=np.int16)
         return self._stt.transcribe(audio)
