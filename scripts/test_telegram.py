@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from nemus.config import Config  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
 from nemus.core.telegram_bot import (  # noqa: E402
+    MAX_DOWNLOAD_MB,
     SEND_LIMIT_MB,
     TelegramBot,
     _attachment_question,
@@ -714,6 +715,50 @@ def test_stt_failure_does_not_ask_attachment() -> None:
     print("ok  сбой STT не превращается в вопрос про вложение")
 
 
+def test_download_limit_is_twenty_mb() -> None:
+    """Bot API отдаёт файлы только до 20 МБ, даже если в конфиге больше."""
+    import asyncio
+
+    assert MAX_DOWNLOAD_MB == 20
+
+    class _Attachment:
+        file_name = "video.mp4"
+
+        def __init__(self, size: int) -> None:
+            self.file_size = size
+            self.downloaded = False
+
+        async def get_file(self) -> object:
+            class _File:
+                async def download_to_drive(self, custom_path: object) -> None:
+                    Path(custom_path).write_bytes(b"x")  # type: ignore[arg-type]
+
+            self.downloaded = True
+            return _File()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Config()
+        cfg.tools.workspace = tmp
+        cfg.telegram.max_download_mb = 100
+        bot = object.__new__(TelegramBot)
+        bot.config = cfg
+        bot.cfg = cfg.telegram
+
+        big = _Attachment(30 * 1024 * 1024)
+        try:
+            asyncio.run(bot._download(42, big, "video.mp4"))
+        except RuntimeError as exc:
+            assert "20 МБ" in str(exc), str(exc)
+        else:
+            raise AssertionError("30 МБ должны упираться в лимит Bot API")
+        assert not big.downloaded, "файл больше лимита не скачивается"
+
+        small = _Attachment(19 * 1024 * 1024)
+        path = asyncio.run(bot._download(42, small, "video.mp4"))
+        assert path.exists() and path.read_bytes() == b"x"
+    print("ok  скачивание ограничено 20 МБ Bot API, 19 МБ проходит")
+
+
 def test_reaction_list_complete() -> None:
     """У инструмента реакций весь согласованный список эмодзи, без потерь."""
     expected = (
@@ -826,6 +871,7 @@ def main() -> int:
     test_typing_and_reactions()
     test_attachment_without_caption()
     test_stt_failure_does_not_ask_attachment()
+    test_download_limit_is_twenty_mb()
     test_reaction_list_complete()
     test_reaction_choice()
     test_tool_without_bot()

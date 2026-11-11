@@ -53,6 +53,8 @@ CAPTION_LIMIT = 1024
 CONFIRM_TIMEOUT = 300.0
 #: больше этого Bot API не примет файл без локального сервера
 SEND_LIMIT_MB = 50
+#: больше этого облачный Bot API не отдаёт файл через get_file
+MAX_DOWNLOAD_MB = 20
 #: сколько секунд держим «живое» сообщение с прогрессом
 PROGRESS_INTERVAL = 1.5
 
@@ -441,6 +443,14 @@ class TelegramBot:
         self.config = config
         self.core = core
         self.cfg = config.telegram
+        if self.cfg.max_download_mb > MAX_DOWNLOAD_MB:
+            logger.warning(
+                "Telegram: max_download_mb=%s больше лимита Bot API (%s МБ) — "
+                "использую %s МБ.",
+                self.cfg.max_download_mb,
+                MAX_DOWNLOAD_MB,
+                MAX_DOWNLOAD_MB,
+            )
         self._loop: asyncio.AbstractEventLoop | None = None
         self._app: Any = None
         self._thread: threading.Thread | None = None
@@ -1309,10 +1319,11 @@ class TelegramBot:
     async def _download(self, chat_id: int, attachment: Any, default: str) -> Path:
         """Скачивает вложение в рабочую папку и возвращает путь."""
         size = int(getattr(attachment, "file_size", 0) or 0)
-        if size and size > self.cfg.max_download_mb * 1024 * 1024:
+        limit_mb = min(int(self.cfg.max_download_mb or MAX_DOWNLOAD_MB), MAX_DOWNLOAD_MB)
+        if size and size > limit_mb * 1024 * 1024:
             raise RuntimeError(
-                f"файл {human_size(size)} больше лимита "
-                f"{self.cfg.max_download_mb} МБ"
+                f"файл {human_size(size)} больше лимита {limit_mb} МБ "
+                f"(Telegram Bot API отдаёт файлы до {MAX_DOWNLOAD_MB} МБ)"
             )
         name = safe_filename(
             getattr(attachment, "file_name", "") or default, fallback=default

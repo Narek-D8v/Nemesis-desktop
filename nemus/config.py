@@ -314,8 +314,8 @@ class TelegramConfig(BaseModel):
     allow_groups: bool = False
     #: распознавать голосовые сообщения локальным STT
     transcribe_voice: bool = True
-    #: максимальный размер скачиваемого файла, МБ
-    max_download_mb: int = 100
+    #: максимальный размер скачиваемого файла, МБ (Bot API отдаёт до 20)
+    max_download_mb: int = 20
 
     @field_validator("allowed_users", mode="before")
     @classmethod

@@ -1619,7 +1619,7 @@ class SettingsDialog(QDialog):
         form.addRow("", self.chk_tg_voice)
 
         self.spin_tg_size = QSpinBox()
-        self.spin_tg_size.setRange(1, 2000)
+        self.spin_tg_size.setRange(1, 20)
         self.spin_tg_size.setSuffix(" " + i18n.tr("tg.mb"))
         form.addRow(i18n.tr("tg.max_file"), self.spin_tg_size)
         v.addLayout(form)
@@ -1946,7 +1946,7 @@ class SettingsDialog(QDialog):
         self.edit_tg_users.setText(", ".join(str(uid) for uid in tg.allowed_users))
         self.chk_tg_groups.setChecked(tg.allow_groups)
         self.chk_tg_voice.setChecked(tg.transcribe_voice)
-        self.spin_tg_size.setValue(max(1, int(tg.max_download_mb or 100)))
+        self.spin_tg_size.setValue(max(1, int(tg.max_download_mb or 20)))
         self.lbl_tg_status.setText(self._telegram_status_text())
 
         # Автозапуск демона: не хранится в YAML, читается из задачи и ярлыка.
