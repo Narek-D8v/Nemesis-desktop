@@ -459,7 +459,11 @@ class TelegramBot:
         self._start_error = ""
         self._pending: dict[str, tuple[asyncio.Future, str]] = {}
         self._task_lock: asyncio.Lock | None = None
+        #: сериализует приём текста/медиа, чтобы вложение и подпись не разъехались
+        self._inbox_lock: asyncio.Lock | None = None
         self._chat_id: int | None = None
+        #: автор текущей задачи — подтверждение привязано к чату и человеку
+        self._user_id: int | None = None
         #: сообщение текущей задачи — на него ставится реакция
         self._message_id: int | None = None
         #: агент уже поставил реакцию — второй раз не ставим
@@ -843,6 +847,9 @@ class TelegramBot:
         builder = (
             ApplicationBuilder()
             .token(self.cfg.token)
+            # Подтверждения — отдельные callback-апдейты: при строгой
+            # последовательной обработке они ждут конца задачи (до 300 с).
+            .concurrent_updates(4)
             .connect_timeout(10)
             .read_timeout(30)
             .write_timeout(120)
@@ -875,6 +882,7 @@ class TelegramBot:
         try:
             self._app = self._build_application()
             self._task_lock = asyncio.Lock()
+            self._inbox_lock = asyncio.Lock()
             self._app.add_handler(CommandHandler("start", self._cmd_start))
             self._app.add_handler(CommandHandler("help", self._cmd_help))
             self._app.add_handler(CommandHandler("new", self._cmd_new))
@@ -1146,6 +1154,11 @@ class TelegramBot:
         if not self._authorized(update):
             await self._deny(update)
             return
+        if self._task_lock is not None and self._task_lock.locked():
+            await update.message.reply_text(
+                "⏳ Сначала дождись завершения текущей задачи — потом /new."
+            )
+            return
         self._pending_attachment = ""
         self._pending_attachment_at = 0.0
         self._pending_images = []
@@ -1231,6 +1244,13 @@ class TelegramBot:
         if not self._authorized(update):
             await self._deny(update)
             return
+        if self._inbox_lock is None:
+            await self._handle_text(update)
+            return
+        async with self._inbox_lock:
+            await self._handle_text(update)
+
+    async def _handle_text(self, update: Any) -> None:
         text = (update.message.text or "").strip()
         if text:
             pending, pending_images = self._take_pending_attachment()
@@ -1242,6 +1262,13 @@ class TelegramBot:
         if not self._authorized(update):
             await self._deny(update)
             return
+        if self._inbox_lock is None:
+            await self._handle_media(update)
+            return
+        async with self._inbox_lock:
+            await self._handle_media(update)
+
+    async def _handle_media(self, update: Any) -> None:
         message = update.message
         chat_id = update.effective_chat.id
         await self._app.bot.send_chat_action(chat_id, "typing")
@@ -1487,6 +1514,7 @@ class TelegramBot:
             )
         async with self._task_lock:
             self._chat_id = chat_id
+            self._user_id = getattr(update.effective_user, "id", None)
             self._message_id = message_id
             self._reaction_set = False
             self._notify_chat_id = chat_id
@@ -1544,6 +1572,7 @@ class TelegramBot:
                 except asyncio.CancelledError:
                     pass
                 self._chat_id = None
+                self._user_id = None
                 self._message_id = None
 
             if error:
@@ -1571,11 +1600,12 @@ class TelegramBot:
     def _confirm(self, tool: Any, args: dict[str, Any]) -> bool:
         """Спрашивает разрешение кнопками (вызывается из потока агента)."""
         chat_id = self._chat_id
-        if chat_id is None or self._loop is None:
+        user_id = self._user_id
+        if chat_id is None or user_id is None or self._loop is None:
             return False
         try:
             future = asyncio.run_coroutine_threadsafe(
-                self._ask_confirm(chat_id, tool, args), self._loop
+                self._ask_confirm(chat_id, user_id, tool, args), self._loop
             )
             return bool(future.result(timeout=CONFIRM_TIMEOUT + 30))
         except Exception as exc:  # noqa: BLE001
@@ -1583,11 +1613,13 @@ class TelegramBot:
             return False
 
     async def _ask_confirm(
-        self, chat_id: int, tool: Any, args: dict[str, Any]
+        self, chat_id: int, user_id: int, tool: Any, args: dict[str, Any]
     ) -> bool:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        key = str(time.time_ns())
+        # Ключ привязан к чату и автору: чужую кнопку нельзя нажать из
+        # другого чата или под другой учёткой, даже если она ещё жива.
+        key = f"{chat_id}:{user_id}:{time.time_ns()}"
         future: asyncio.Future = self._loop.create_future()
         detail = json.dumps(args, ensure_ascii=False, default=str)
         if len(detail) > 2500:
@@ -1627,10 +1659,18 @@ class TelegramBot:
             await query.answer("Доступ запрещён", show_alert=True)
             return
         parts = (query.data or "").split(":")
-        if len(parts) != 3 or parts[0] != "tg":
+        if len(parts) < 5 or parts[0] != "tg":
             await query.answer()
             return
-        key, choice = parts[1], parts[2]
+        key = ":".join(parts[1:-1])
+        choice = parts[-1]
+        chat_id = getattr(query.message, "chat_id", None)
+        if chat_id is None:
+            chat_id = getattr(getattr(query.message, "chat", None), "id", None)
+        user_id = getattr(query.from_user, "id", None)
+        if not key.startswith(f"{chat_id}:{user_id}:"):
+            await query.answer("Кнопка не для этого чата", show_alert=True)
+            return
         entry = self._pending.get(key)
         if entry is None:
             await query.answer("Кнопка устарела")

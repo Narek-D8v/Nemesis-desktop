@@ -804,6 +804,156 @@ def test_send_file_retries_and_falls_back() -> None:
     print("ok  таймаут отправки: повтор, затем запасной документ")
 
 
+def test_application_concurrent_updates() -> None:
+    """Подтверждения не должны ждать конца долгой задачи в очереди."""
+    cfg = Config()
+    cfg.telegram.token = "123:test"
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    app = bot._build_application()
+    assert app.update_processor.max_concurrent_updates == 4
+    print("ok  Application обрабатывает до 4 апдейтов параллельно")
+
+
+def test_inbox_lock_serializes_text_and_media() -> None:
+    """Текст и медиа не должны перемешиваться при параллельных апдейтах."""
+    import asyncio
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=42, type="private"),
+        message=SimpleNamespace(text="привет"),
+    )
+    order: list[str] = []
+
+    async def _handle_text(update: object) -> None:
+        order.append("text-start")
+        await asyncio.sleep(0.02)
+        order.append("text-end")
+
+    async def _handle_media(update: object) -> None:
+        order.append("media-start")
+        await asyncio.sleep(0.02)
+        order.append("media-end")
+
+    bot._handle_text = _handle_text  # type: ignore[method-assign]
+    bot._handle_media = _handle_media  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        bot._inbox_lock = asyncio.Lock()
+        await asyncio.gather(
+            bot._on_text(update, None),
+            bot._on_media(update, None),
+        )
+
+    asyncio.run(scenario())
+    assert order in (
+        ["text-start", "text-end", "media-start", "media-end"],
+        ["media-start", "media-end", "text-start", "text-end"],
+    ), order
+    print("ok  текст и медиа обрабатываются по очереди")
+
+
+def test_new_blocked_during_task() -> None:
+    """/new не сбрасывает контекст, пока агент ещё работает."""
+    import asyncio
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+
+    class _Agent:
+        def __init__(self) -> None:
+            self.resets = 0
+
+        def reset(self) -> None:
+            self.resets += 1
+
+    bot.agent = _Agent()
+    replies: list[str] = []
+
+    async def _reply(text: str, **_: object) -> None:
+        replies.append(text)
+
+    message = SimpleNamespace(reply_text=_reply)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=42, type="private"),
+        message=message,
+    )
+
+    async def scenario() -> None:
+        bot._task_lock = asyncio.Lock()
+        await bot._task_lock.acquire()
+        await bot._cmd_new(update, None)
+
+    asyncio.run(scenario())
+    assert replies and "дождись" in replies[0]
+    assert bot.agent.resets == 0
+    print("ok  /new ждёт завершения текущей задачи")
+
+
+def test_confirmation_bound_to_chat_user() -> None:
+    """Кнопка подтверждения работает только в своём чате и у своего автора."""
+    import asyncio
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [7]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot._pending = {}
+
+    class _Query:
+        def __init__(self, data: str, user_id: int, chat_id: int) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=user_id)
+            self.message = SimpleNamespace(chat_id=chat_id)
+            self.answers: list[str] = []
+            self.edits: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_text(self, text: str, **_: object) -> None:
+            self.edits.append(text)
+
+        async def edit_message_reply_markup(self, **_: object) -> None:
+            pass
+
+    def _update(query: _Query) -> SimpleNamespace:
+        return SimpleNamespace(
+            callback_query=query,
+            effective_user=query.from_user,
+            effective_chat=SimpleNamespace(id=query.message.chat_id, type="private"),
+        )
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        good: asyncio.Future = loop.create_future()
+        good_key = "42:7:1"
+        bot._pending[good_key] = (good, "вопрос")
+        good_query = _Query(f"tg:{good_key}:y", 7, 42)
+        await bot._on_callback(_update(good_query), None)
+        assert good.result() is True
+        assert good_query.answers[-1] == "Разрешено"
+
+        bad: asyncio.Future = loop.create_future()
+        bad_key = "42:8:2"
+        bot._pending[bad_key] = (bad, "вопрос")
+        bad_query = _Query(f"tg:{bad_key}:y", 7, 42)
+        await bot._on_callback(_update(bad_query), None)
+        assert not bad.done()
+        assert "не для этого чата" in bad_query.answers[-1]
+
+    asyncio.run(scenario())
+    print("ok  подтверждение привязано к чату и пользователю")
+
+
 def test_reaction_list_complete() -> None:
     """У инструмента реакций весь согласованный список эмодзи, без потерь."""
     expected = (
@@ -918,6 +1068,10 @@ def main() -> int:
     test_stt_failure_does_not_ask_attachment()
     test_download_limit_is_twenty_mb()
     test_send_file_retries_and_falls_back()
+    test_application_concurrent_updates()
+    test_inbox_lock_serializes_text_and_media()
+    test_new_blocked_during_task()
+    test_confirmation_bound_to_chat_user()
     test_reaction_list_complete()
     test_reaction_choice()
     test_tool_without_bot()
