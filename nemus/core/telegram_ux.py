@@ -99,6 +99,65 @@ def main_menu_rows(hints: bool) -> list[list[tuple[str, str]]]:
     ]
 
 
+def skills_list_text(
+    entries: list[tuple[str, str, str]], mcp_servers: list[str]
+) -> str:
+    """Компактный список установленных скиллов и MCP-серверов.
+
+    ``entries`` — ``(имя, плагин, kind)``; пустой плагин попадает в группу
+    «Без плагина». Команды плагинов приходят уже с именем ``плагин:команда``.
+    """
+    groups: dict[str, list[str]] = {}
+    for name, plugin, _kind in entries:
+        group = (plugin or "").strip() or "Без плагина"
+        groups.setdefault(group, []).append(name)
+
+    lines = [f"**Установлено скиллов: {len(entries)}**", ""]
+    if not entries:
+        lines.append("Скиллы не установлены")
+    else:
+        ordered = sorted(
+            (group for group in groups if group != "Без плагина"),
+            key=str.lower,
+        )
+        if "Без плагина" in groups:
+            ordered.append("Без плагина")
+        for group in ordered:
+            names = sorted(groups[group], key=str.lower)
+            lines.append(f"**{group}**")
+            lines.append(", ".join(f"/{name}" for name in names))
+            lines.append("")
+        lines.append("Подробнее: /skills <имя>")
+
+    lines += [
+        "",
+        "**MCP-серверы**",
+        ", ".join(mcp_servers) or "не подключены",
+    ]
+    return "\n".join(lines)
+
+
+def skill_details_text(
+    name: str, description: str, plugin: str, kind: str
+) -> str:
+    """Короткая справка по одному скиллу или команде плагина."""
+    plugin_text = (plugin or "").strip() or "нет"
+    description_text = (description or "").strip()[:300] or "Без описания."
+    kind_text = "команда плагина" if kind == "command" else "скилл"
+    return (
+        f"**/{name}**\n\n"
+        f"Плагин: {plugin_text}\n"
+        f"Тип: {kind_text}\n\n"
+        f"{description_text}\n\n"
+        f"Как запустить: `/{name}`"
+    )
+
+
+def skill_not_found_text() -> str:
+    """Ответ на `/skills <неизвестное имя>`."""
+    return "Не нашёл такой скилл. Список: /skills"
+
+
 def first_hint_text() -> str:
     """Короткая подсказка после первой успешной задачи."""
     return "💡 Я умею ещё работать с файлами и медиа. Показать примеры?"

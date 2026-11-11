@@ -41,6 +41,9 @@ from nemus.core.telegram_ux import (  # noqa: E402
     examples_text,
     help_text,
     main_menu_rows,
+    skill_details_text,
+    skill_not_found_text,
+    skills_list_text,
     start_text,
 )
 from nemus.core.tools.registry import ToolRegistry  # noqa: E402
@@ -741,6 +744,55 @@ def test_ux_texts() -> None:
     }
     assert main_menu_rows(False) == []
     print("ok  тексты первого экрана и примеров зависят от подсказок")
+
+
+def test_skills_text() -> None:
+    """Список скиллов группируется по плагинам, MCP идёт отдельно."""
+    entries = [
+        ("brainstorming", "superpowers", "skill"),
+        ("hyperframes", "hyperframes", "skill"),
+        ("pdf-reader", "", "skill"),
+        ("superpowers:review", "superpowers", "command"),
+    ]
+    text = skills_list_text(entries, ["git", "time"])
+    assert "**Установлено скиллов: 4**" in text
+    assert text.index("**hyperframes**") < text.index("**superpowers**")
+    assert text.index("**superpowers**") < text.index("**Без плагина**")
+    assert "/brainstorming, /superpowers:review" in text
+    assert "/pdf-reader" in text
+    assert "git, time" in text
+    assert "Подробнее: /skills <имя>" in text
+
+    empty = skills_list_text([], [])
+    assert "Скиллы не установлены" in empty
+    assert "не подключены" in empty
+    assert "Подробнее" not in empty
+
+    many = skills_list_text(
+        [(f"skill-{i:03d}-" + "x" * 40, "", "skill") for i in range(120)],
+        [],
+    )
+    assert len(split_message(many)) > 1, "длинный список должен резаться"
+
+
+def test_skill_details_text() -> None:
+    """Справка показывает имя, плагин, тип, описание и команду запуска."""
+    text = skill_details_text("pdf-reader", "Read PDFs", "", "skill")
+    assert "**/pdf-reader**" in text
+    assert "Плагин: нет" in text
+    assert "Тип: скилл" in text
+    assert "Read PDFs" in text
+    assert "Как запустить: `/pdf-reader`" in text
+
+    command = skill_details_text(
+        "superpowers:review", "Review code", "superpowers", "command"
+    )
+    assert "Плагин: superpowers" in command
+    assert "Тип: команда плагина" in command
+    assert "`/superpowers:review`" in command
+
+    assert "Без описания." in skill_details_text("x", "", "", "skill")
+    assert "/skills" in skill_not_found_text()
 
 
 def test_start_help_respect_hints() -> None:
@@ -1676,6 +1728,8 @@ def main() -> int:
     test_retry_and_new_callbacks()
     test_status_context_lines()
     test_ux_texts()
+    test_skills_text()
+    test_skill_details_text()
     test_start_help_respect_hints()
     test_muted_help_examples_and_attachment_buttons()
     test_ux_examples_callback()
