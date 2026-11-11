@@ -1521,11 +1521,17 @@ class TelegramBot:
         mcp = getattr(self.config, "mcp", None)
         if mcp is None or not getattr(mcp, "enabled", False):
             return []
-        return [
-            str(server.name)
-            for server in getattr(mcp, "servers", ())
-            if getattr(server, "enabled", False)
-        ]
+        names: list[str] = []
+        for server in getattr(mcp, "servers", ()):
+            if not getattr(server, "enabled", False):
+                continue
+            name = str(getattr(server, "name", "") or "").strip()
+            if not name:
+                command = str(getattr(server, "command", "") or "").strip()
+                name = Path(command).name if command else ""
+            if name:
+                names.append(name)
+        return names
 
     def _find_skill(self, name: str) -> Any | None:
         """Точное имя скилла без учёта регистра; ведущий / не мешает."""

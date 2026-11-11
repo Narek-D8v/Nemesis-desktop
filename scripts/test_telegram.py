@@ -952,6 +952,53 @@ def test_skills_helpers_are_safe() -> None:
     assert bot._mcp_names() == ["git"]
 
 
+def test_skills_use_real_plugin_and_mcp_config() -> None:
+    """Реальная папка плагина группируется, MCP берёт имена из конфига."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plugin = root / "acme"
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin" / "plugin.json").write_text(
+            '{"name": "Acme Tools"}', encoding="utf-8"
+        )
+        (plugin / "commands").mkdir()
+        (plugin / "commands" / "x.md").write_text(
+            "---\ndescription: Do X\n---\nBody", encoding="utf-8"
+        )
+
+        cfg = Config()
+        cfg.skills.dir = str(root)
+        cfg.mcp.enabled = True
+        cfg.mcp.servers = [
+            SimpleNamespace(name="", command="node", enabled=True),
+            SimpleNamespace(name="git", command="npx", enabled=True),
+            SimpleNamespace(name="off", command="python", enabled=False),
+        ]
+        bot = object.__new__(TelegramBot)
+        bot.config = cfg
+
+        skills = bot._skills()
+        command = next(skill for skill in skills if skill.name == "acme-tools:x")
+        assert bot._skill_plugin_name(command) == "Acme Tools"
+        found = bot._find_skill("Acme-Tools:X")
+        assert found is not None and found.name == "acme-tools:x"
+
+        entries = [
+            (skill.name, bot._skill_plugin_name(skill), skill.kind)
+            for skill in skills
+        ]
+        text = skills_list_text(entries, bot._mcp_names())
+        assert "**Acme Tools**" in text
+        assert "/acme-tools:x" in text
+        assert "node, git" in text
+        assert ", python" not in text
+
+        cfg.mcp.enabled = False
+        assert bot._mcp_names() == []
+
+
 def test_start_help_respect_hints() -> None:
     """При выключенных подсказках нет примеров и кнопок-подсказок."""
     import asyncio
@@ -1889,6 +1936,7 @@ def main() -> int:
     test_skill_details_text()
     test_skills_command_and_callback()
     test_skills_helpers_are_safe()
+    test_skills_use_real_plugin_and_mcp_config()
     test_start_help_respect_hints()
     test_muted_help_examples_and_attachment_buttons()
     test_ux_examples_callback()
