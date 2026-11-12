@@ -399,9 +399,9 @@ class _Progress:
         self._notes = self._notes[-6:]
         await self._flush()
 
-    async def tail(self, text: str) -> None:
+    async def tail(self, text: str, *, force: bool = False) -> None:
         self._tail = (text or "").strip()
-        await self._flush()
+        await self._flush(force=force)
 
     async def _flush(self, force: bool = False) -> None:
         if self.message_id is None:
@@ -1969,6 +1969,11 @@ class TelegramBot:
                     if event.kind == "assistant_delta":
                         final_text += event.text
                         await progress.tail(final_text)
+                    elif event.kind == "assistant_reset":
+                        # провайдер оборвал ответ после части текста — не
+                        # склеиваем черновик с ответом после повтора
+                        final_text = ""
+                        await progress.tail("", force=True)
                     elif event.kind == "assistant_text":
                         final_text = final_text or event.text
                     elif event.kind == "tool_call":

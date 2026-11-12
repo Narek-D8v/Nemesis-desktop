@@ -304,7 +304,7 @@ def test_reasoning_filter() -> None:
 
 
 def test_stream_hides_reasoning() -> None:
-    from nemus.core.llm import LLMClient
+    from nemus.core.llm import LLMClient, StreamEvent
 
     def chunk(content=None, reasoning=None, finish=None):
         delta = SimpleNamespace(
@@ -344,8 +344,10 @@ def test_stream_hides_reasoning() -> None:
     from nemus.core.permissions import PermissionManager  # noqa: PLC0415
     from nemus.core.tools.registry import ToolRegistry  # noqa: PLC0415
 
+    # событие reset (черновик оборванного стрима) доходит до интерфейса
+    with_reset = [*events[:-1], StreamEvent(kind="reset"), events[-1]]
     stub = SimpleNamespace(
-        stream=lambda messages, tools=None, **kw: iter(events),
+        stream=lambda messages, tools=None, **kw: iter(with_reset),
     )
     agent = Agent(
         config=get_config(),  # type: ignore[arg-type]
@@ -356,7 +358,8 @@ def test_stream_hides_reasoning() -> None:
     kinds = [e.kind for e in agent._stream_response(None)]
     assert "assistant_thought" in kinds, kinds
     assert "assistant_delta" in kinds, kinds
-    print("ok  LLM-стрим: рассуждения скрыты из ответа и отданы как мысли")
+    assert "assistant_reset" in kinds, kinds
+    print("ok  LLM-стрим: рассуждения скрыты, reset доходит до интерфейса")
 
 
 def test_i18n() -> None:

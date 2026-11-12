@@ -1272,6 +1272,18 @@ class ChatView(QTextBrowser):
         self._blocks.append(self._assistant_block(name, ""))
         self._render()
 
+    def stream_reset(self) -> None:
+        """Стирает черновик оборванного стрима перед повтором запроса."""
+        if self._stream_idx is None:
+            return
+        self._stream_buf = ""
+        self._stream_dirty = False
+        self._last_stream_render = 0.0
+        self._blocks[self._stream_idx] = self._assistant_block(
+            self._stream_name, ""
+        )
+        self._render()
+
     def stream_delta(self, text: str) -> None:
         """Добавляет текст в потоковое сообщение (перерисовка не чаще 10 раз/с)."""
         if not text:

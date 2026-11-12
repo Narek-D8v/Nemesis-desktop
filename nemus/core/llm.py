@@ -24,7 +24,7 @@ from nemus.core.providers import (
 from nemus.utils.logger import logger
 from nemus.utils.redact import redact_secrets
 
-StreamKind = Literal["content", "thought", "final"]
+StreamKind = Literal["content", "thought", "reset", "final"]
 
 #: попыток на одном провайдере, прежде чем уйти в фолбэк. Секундный обрыв
 #: связи — не повод менять модель: смена провайдера означает повторную
@@ -398,7 +398,7 @@ class _ReasoningFilter:
 
 @dataclass
 class StreamEvent:
-    """Событие стрима: текстовый фрагмент или финальный ответ."""
+    """Событие стрима: фрагмент, сброс черновика или финальный ответ."""
 
     kind: StreamKind
     text: str = ""
@@ -652,24 +652,30 @@ class LLMClient:
                 emitted = False
                 try:
                     for event in self._iter_stream(stream, target.model):
-                        # повторять можно только пока пользователю не ушёл
-                        # видимый текст; «мысли» модели дублировать не страшно
+                        # «мысли» модели можно не сбрасывать, а вот видимый
+                        # текст придётся очистить перед повтором, иначе
+                        # пользователь увидит черновик дважды
                         if event.kind == "content":
                             emitted = True
                         yield event
                     return
                 except Exception as exc:  # noqa: BLE001
-                    # Ошибка уже открытого стрима. Пока не отдано ни одной дельты —
-                    # безопасно повторить; если частичный ответ ушёл пользователю,
-                    # повтор его продублирует, поэтому возвращаем понятную ошибку
-                    # вместо молчаливого сбоя.
+                    # Ошибка уже открытого стрима. Если пользователь успел
+                    # увидеть часть ответа, сначала просим интерфейс стереть
+                    # черновик — и только потом повторяем запрос или уходим
+                    # на резервную модель.
                     message = f"{target.model}: стрим прерван: {redact_secrets(str(exc))}"
                     logger.warning(message)
                     failures[target.model] = (
                         f"{message[:600]} (попытка {attempt}/{MAX_ATTEMPTS})"
                     )
                     if emitted:
-                        raise ProviderError(message) from None
+                        logger.info(
+                            f"{target.model}: после частичного ответа сбрасываю "
+                            "черновик перед повтором"
+                        )
+                        yield StreamEvent(kind="reset")
+                        emitted = False
                     delay = next_delay(
                         error_kind(exc),
                         attempt,

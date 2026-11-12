@@ -1533,6 +1533,10 @@ class Agent:
             elif event.kind == "thought":
                 # скрытые рассуждения модели — в отдельный поток «мыслей»
                 yield AgentEvent(kind="assistant_thought", text=event.text)
+            elif event.kind == "reset":
+                # провайдер оборвал стрим после части текста — интерфейс
+                # должен стереть черновик, иначе повтор его продублирует
+                yield AgentEvent(kind="assistant_reset")
             elif event.kind == "final":
                 final = event.response
         if final is None:

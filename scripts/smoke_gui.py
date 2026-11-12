@@ -193,6 +193,18 @@ def main() -> int:
     assert dup._bm_seq == 1, dup._bm_seq
     print("ok  повторный final не дублирует ответ и панель")
 
+    # сброс черновика перед повтором: частичный ответ исчезает, новый — без дублей
+    reset = ChatView()
+    reset.stream_start("Немуся")
+    reset.stream_delta("частичный ")
+    reset.stream_reset()
+    assert "частичный" not in reset.toPlainText(), reset.toPlainText()
+    reset.stream_delta("полный ответ")
+    reset.stream_end("полный ответ")
+    assert "полный ответ" in reset.toPlainText(), reset.toPlainText()
+    assert "частичный" not in reset.toPlainText(), reset.toPlainText()
+    print("ok  сброс стрима убирает черновик перед повтором")
+
     # свободный ответ («второй вариант», «давай B») тоже сопоставляется с вариантами
     from nemus.gui.widgets.chat import parse_freeform_answer
 

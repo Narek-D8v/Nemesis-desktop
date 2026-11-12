@@ -736,6 +736,9 @@ class MainWindow(QMainWindow):
             # скрытые рассуждения модели — отдельным блоком «мыслей»
             self.chat.thought_delta(event.text)
             self.set_state(AssistState.THINKING)
+        elif event.kind == "assistant_reset":
+            # провайдер оборвал ответ после части текста — убираем черновик
+            self.chat.stream_reset()
         elif event.kind == "assistant_delta":
             self.chat.stream_delta(event.text)
             self.set_state(AssistState.SPEAKING)

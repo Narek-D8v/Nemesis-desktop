@@ -1988,6 +1988,82 @@ def test_gui_hints_toggle() -> None:
     print("ok  галочка подсказок Telegram читается и сохраняется")
 
 
+def test_agent_reset_clears_partial_answer() -> None:
+    """Сброс стрима убирает черновик из живого прогресса до повтора."""
+    import asyncio
+
+    import nemus.core.telegram_bot as telegram_bot
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.edits: list[str] = []
+            self.deleted: list[int] = []
+
+        async def send_message(self, chat_id: int, text: str, **_: object):
+            self.sent.append(text)
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def edit_message_text(
+            self, text: str, chat_id: int, message_id: int, **_: object
+        ) -> None:
+            self.edits.append(text)
+
+        async def delete_message(self, chat_id: int, message_id: int) -> None:
+            self.deleted.append(message_id)
+
+    def run_agent(text: str, images: list[str] | None = None):
+        yield SimpleNamespace(kind="assistant_delta", text="черновик ")
+        yield SimpleNamespace(kind="assistant_reset")
+        yield SimpleNamespace(kind="assistant_delta", text="полный ответ")
+        yield SimpleNamespace(kind="final", text="полный ответ")
+
+    cfg = Config()
+    bot = TelegramBot(
+        cfg,
+        SimpleNamespace(
+            llm=None,
+            registry=ToolRegistry(),
+            permissions=PermissionManager(cfg),
+            telegram_memory=None,
+        ),
+    )
+    fake = _FakeBot()
+    bot._app = SimpleNamespace(bot=fake)
+    bot.agent = SimpleNamespace(run=run_agent)
+    bot._prepare_session = lambda chat_id: None
+
+    async def _typing(chat_id: int) -> None:
+        return None
+
+    async def _hint(chat_id: int) -> None:
+        return None
+
+    bot._keep_typing = _typing  # type: ignore[method-assign]
+    bot._maybe_show_first_hint = _hint  # type: ignore[method-assign]
+
+    old_interval = telegram_bot.PROGRESS_INTERVAL
+    telegram_bot.PROGRESS_INTERVAL = 0
+    try:
+        asyncio.run(
+            bot._run_task_for(
+                chat_id=42, user_id=7, message_id=None, text="вопрос"
+            )
+        )
+    finally:
+        telegram_bot.PROGRESS_INTERVAL = old_interval
+
+    assert "черновик" not in fake.sent[-1], fake.sent
+    assert "полный ответ" in fake.sent[-1], fake.sent
+    draft_edits = [index for index, text in enumerate(fake.edits) if "черновик" in text]
+    assert draft_edits, fake.edits
+    after_draft = fake.edits[draft_edits[-1] + 1 :]
+    assert after_draft and all("черновик" not in text for text in after_draft), (
+        fake.edits
+    )
+    print("ok  assistant_reset очищает черновик в прогрессе Telegram")
+
+
 def test_status() -> None:
     status = telegram_status()
     assert status["running"] is False, status
@@ -2042,6 +2118,7 @@ def main() -> int:
     test_factory_registration()
     test_user_ids_parsing()
     test_gui_hints_toggle()
+    test_agent_reset_clears_partial_answer()
     test_status()
     print("\nTELEGRAM TESTS PASSED")
     return 0

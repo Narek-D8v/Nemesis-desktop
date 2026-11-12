@@ -392,24 +392,88 @@ def test_backoff_is_bounded() -> None:
     print(f"ok  бэкофф растёт и ограничен {MAX_BACKOFF} с (макс. {max(delays):.1f} с)")
 
 
-def test_midstream_error_after_text_raises() -> None:
-    """После отправленной части ответа повторный стрим её продублирует — ошибка."""
+def test_midstream_after_text_resets_and_retries() -> None:
+    """503 после части текста: черновик сбрасывается, запрос повторяется.
+
+    Регресс к жалобе «ошибка, хотя через секунду тот же вопрос отвечает»:
+    Gemini успевал отдать первую дельту, падал с 503, а клиент не повторял
+    запрос, потому что боялся продублировать уже показанный текст.
+    """
+    calls: list[str] = []
     original = litellm.completion
 
     class _BrokenAfterText:
         def __iter__(self):
             yield _chunk("частичный ")
-            raise RuntimeError("connection reset mid-stream")
+            raise RuntimeError(
+                "litellm.MidStreamFallbackError: litellm.ServiceUnavailableError: "
+                "503 UNAVAILABLE - This model is currently experiencing high demand"
+            )
 
-    litellm.completion = lambda **kwargs: _BrokenAfterText()
+    def fake_completion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) == 1:
+            return _BrokenAfterText()
+        return iter([_chunk("полный ответ", finish="stop")])
+
+    litellm.completion = fake_completion
     try:
-        list(_client().stream(_messages()))
-        raise AssertionError("ожидался ProviderError")
-    except ProviderError as exc:
-        assert "стрим прерван" in str(exc), exc
+        with mock.patch("nemus.core.llm.time.sleep"):
+            events = list(_client().stream(_messages()))
     finally:
         litellm.completion = original
-    print("ok  обрыв после дельты → понятная ProviderError, без тихого сбоя")
+
+    assert calls == ["gemini/primary", "gemini/primary"], calls
+    kinds = [event.kind for event in events]
+    assert "reset" in kinds, events
+    reset_at = kinds.index("reset")
+    before = "".join(
+        event.text for event in events[:reset_at] if event.kind == "content"
+    )
+    after = "".join(
+        event.text for event in events[reset_at + 1 :] if event.kind == "content"
+    )
+    assert before == "частичный ", before
+    assert after == "полный ответ", after
+    final = [event for event in events if event.kind == "final"]
+    assert final and final[-1].response.content == "полный ответ", events
+    print("ok  обрыв после дельты → reset черновика и успешный повтор")
+
+
+def test_midstream_after_text_resets_before_fallback() -> None:
+    """Если повтор после части текста не помог, перед fallback тоже сброс."""
+    calls: list[str] = []
+    original = litellm.completion
+
+    class _BrokenAfterText:
+        def __iter__(self):
+            yield _chunk("черновик ")
+            raise RuntimeError("connection reset mid-stream")
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "gemini/primary":
+            return _BrokenAfterText()
+        return iter([_chunk("ответ резерва", finish="stop")])
+
+    litellm.completion = fake_completion
+    try:
+        with mock.patch("nemus.core.llm.time.sleep"):
+            events = list(_client().stream(_messages()))
+    finally:
+        litellm.completion = original
+
+    assert calls == ["gemini/primary"] * MAX_ATTEMPTS + ["openai/backup"], calls
+    kinds = [event.kind for event in events]
+    assert kinds.count("reset") >= MAX_ATTEMPTS, kinds
+    last_reset = len(kinds) - 1 - kinds[::-1].index("reset")
+    after = "".join(
+        event.text for event in events[last_reset + 1 :] if event.kind == "content"
+    )
+    assert after == "ответ резерва", after
+    final = [event for event in events if event.kind == "final"]
+    assert final and final[-1].response.content == "ответ резерва", events
+    print("ok  обрыв после дельты → reset и fallback без дублей")
 
 
 def test_all_targets_fail() -> None:
@@ -519,7 +583,8 @@ def main() -> int:
     test_midstream_after_thoughts_retries()
     test_rate_limit_falls_back_immediately()
     test_fatal_error_falls_back_immediately()
-    test_midstream_error_after_text_raises()
+    test_midstream_after_text_resets_and_retries()
+    test_midstream_after_text_resets_before_fallback()
     test_all_targets_fail()
     test_complete_retries_then_falls_back()
     test_redact_headers()
