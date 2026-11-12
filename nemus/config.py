@@ -318,6 +318,8 @@ class TelegramConfig(BaseModel):
     transcribe_voice: bool = True
     #: показывать в чате примеры и контекстные подсказки
     hints_enabled: bool = True
+    #: drafts, rich-сообщения, виджеты и ephemeral-ответы (Bot API 10.3+)
+    advanced_ui: bool = True
     #: максимальный размер скачиваемого файла, МБ (Bot API отдаёт до 20)
     max_download_mb: int = 20
 

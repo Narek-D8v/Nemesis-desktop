@@ -35,12 +35,15 @@ from nemus.config import Config
 from nemus.core.agent import Agent, AgentEvent
 from nemus.core.language import looks_like_skills_question
 from nemus.core.providers import Message
+from nemus.core.telegram_api import TelegramAdvancedAPI
 from nemus.core.telegram_format import (
     TEXT_LIMIT,
     html_chunks,
     split_message,
     strip_html,
+    to_html,
 )
+from nemus.core.telegram_rich import RichTextTooLong, build_rich_markdown
 from nemus.core.telegram_ux import (
     HINT_MUTED_PREFIX,
     HINT_SHOWN_PREFIX,
@@ -57,6 +60,12 @@ from nemus.core.telegram_ux import (
     skill_not_found_text,
     skills_list_text,
     start_text,
+)
+from nemus.core.telegram_widgets import (
+    PANEL_DELAY,
+    WidgetPanel,
+    make_state,
+    parse_widget_action,
 )
 from nemus.core.tools.telegram import (
     _ALLOWED_REACTIONS,
@@ -75,6 +84,10 @@ SEND_LIMIT_MB = 50
 MAX_DOWNLOAD_MB = 20
 #: сколько секунд держим «живое» сообщение с прогрессом
 PROGRESS_INTERVAL = 1.5
+#: как часто повторяем нативный draft, чтобы он не истёк (30 с у Telegram)
+DRAFT_KEEPALIVE = 10.0
+#: сколько подряд сбоев keepalive терпим до отката на обычный прогресс
+DRAFT_KEEPALIVE_FAILS = 2
 
 #: активный экземпляр бота: инструмент send_telegram находит его отсюда
 _active_bot: TelegramBot | None = None
@@ -144,6 +157,16 @@ def safe_filename(name: str, fallback: str = "file") -> str:
         ch if (ch.isalnum() or ch in "._-") else "_" for ch in raw
     ).strip("._")
     return cleaned or fallback
+
+
+def _clip_utf8(text: str, limit: int) -> str:
+    """Обрезает строку по байтам UTF-8, не ломая символ."""
+    raw = (text or "").encode("utf-8")
+    if len(raw) <= limit:
+        return text or ""
+    if limit <= 3:
+        return raw[: max(0, limit)].decode("utf-8", "ignore")
+    return raw[: limit - 3].decode("utf-8", "ignore") + "…"
 
 
 def human_size(size: int) -> str:
@@ -448,6 +471,136 @@ class _Progress:
             )
 
 
+class _DraftProgress:
+    """Нативный draft-прогресс с кнопкой «Стоп»; умеет откатиться.
+
+    Черновик живёт около 30 секунд, поэтому раз в ``DRAFT_KEEPALIVE``
+    повторяем текущий рендер, даже если событий нет. Первый сбой обычного
+    обновления сразу переводит на ``_Progress``; keepalive терпит два сбоя
+    подряд, чтобы случайная гонка не ломала нативный стрим.
+    """
+
+    def __init__(self, api: Any, bot: Any, chat_id: int) -> None:
+        self.api = api
+        self.bot = bot
+        self.chat_id = chat_id
+        self.draft_id = time.time_ns() & 0x7FFFFFFF or 1
+        self._base = ""
+        self._notes: list[str] = []
+        self._tail = ""
+        self._last = 0.0
+        self._fails = 0
+        self._fallback: _Progress | None = None
+        self._keepalive: asyncio.Task | None = None
+        self._closed = False
+
+    def _render(self) -> str:
+        parts = [self._base, *self._notes]
+        if self._tail:
+            parts.append("…" + self._tail[-700:])
+        text = "\n".join(p for p in parts if p)
+        return text[-3900:]
+
+    async def _send(self, text: str) -> bool:
+        try:
+            return await self.api.send_message_draft(
+                chat_id=self.chat_id, draft_id=self.draft_id, text=text
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Telegram: draft не обновился: {exc}")
+            return False
+
+    async def start(self, text: str) -> None:
+        self._base = text
+        if not await self._send(""):
+            await self._to_progress()
+            return
+        self._keepalive = asyncio.create_task(self._keepalive_loop())
+
+    async def note(self, text: str) -> None:
+        if self._fallback is not None:
+            await self._fallback.note(text)
+            return
+        self._notes.append(text)
+        self._notes = self._notes[-6:]
+        await self._flush()
+
+    async def tail(self, text: str, *, force: bool = False) -> None:
+        if self._fallback is not None:
+            await self._fallback.tail(text, force=force)
+            return
+        self._tail = (text or "").strip()
+        await self._flush(force=force)
+
+    async def _flush(self, *, force: bool = False) -> None:
+        if self._closed or self._fallback is not None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last < PROGRESS_INTERVAL:
+            return
+        if await self._send(self._render()):
+            self._last = now
+            self._fails = 0
+        else:
+            await self._to_progress()
+
+    async def _keepalive_loop(self) -> None:
+        try:
+            while not self._closed:
+                await asyncio.sleep(DRAFT_KEEPALIVE)
+                await self._keepalive_tick()
+        except asyncio.CancelledError:
+            pass
+
+    async def _keepalive_tick(self) -> None:
+        """Один тик удержания черновика (тесты зовут напрямую)."""
+        if self._closed or self._fallback is not None:
+            return
+        if await self._send(self._render()):
+            self._fails = 0
+            return
+        self._fails += 1
+        if self._fails >= DRAFT_KEEPALIVE_FAILS:
+            await self._to_progress()
+
+    def _cancel_keepalive(self) -> None:
+        if self._keepalive is not None and not self._keepalive.done():
+            self._keepalive.cancel()
+        self._keepalive = None
+
+    async def _to_progress(self) -> None:
+        """Переводит объект на обычное сообщение, переиграв состояние."""
+        if self._fallback is not None:
+            return
+        self._cancel_keepalive()
+        progress = _Progress(self.bot, self.chat_id)
+        await progress.start(self._base or "⏳ Думаю…")
+        for note in self._notes:
+            await progress.note(note)
+        if self._tail:
+            await progress.tail(self._tail, force=True)
+        self._fallback = progress
+
+    async def close(self) -> None:
+        self._closed = True
+        self._cancel_keepalive()
+        if self._fallback is not None:
+            await self._fallback.close()
+
+    async def fail(self, text: str, reply_markup: Any | None = None) -> None:
+        self._closed = True
+        self._cancel_keepalive()
+        if self._fallback is not None:
+            await self._fallback.fail(text, reply_markup=reply_markup)
+            return
+        await start_message(
+            self.bot,
+            self.chat_id,
+            f"❌ {text}",
+            reply_markup=reply_markup,
+        )
+
+
 async def start_message(
     bot: Any,
     chat_id: int,
@@ -499,6 +652,8 @@ class TelegramBot:
             )
         self._loop: asyncio.AbstractEventLoop | None = None
         self._app: Any = None
+        #: raw-адаптер Bot API 10.3/10.4 (создаётся в потоке бота)
+        self._api: TelegramAdvancedAPI | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._stopping = threading.Event()
@@ -526,6 +681,18 @@ class TelegramBot:
         self._last_tasks: dict[
             int, tuple[str, list[str] | None, int | None, int | None]
         ] = {}
+        #: задача, которую можно повторить, и счётчик задач на чат
+        self._last_task_ids: dict[int, int] = {}
+        self._task_seq: dict[int, int] = {}
+        #: отмена текущей задачи и её номера в чате
+        self._stop_event: threading.Event | None = None
+        self._current_task_id: int | None = None
+        self._current_task_chat: int | None = None
+        self._draft_id: int | None = None
+        self._draft_chat_id: int | None = None
+        self._active_progress: Any | None = None
+        #: живые панели задач (не переживают перезапуск бота)
+        self._panels: dict[int, Any] = {}
         #: чат для фоновых уведомлений (напоминания): не сбрасывается после
         #: ответа, в отличие от _chat_id текущей задачи
         self._notify_chat_id: int | None = (
@@ -1093,13 +1260,20 @@ class TelegramBot:
 
     def _register_handlers(self) -> None:
         """Подключает команды, кнопки и медиа к текущему Application."""
+        from telegram import Update
         from telegram.ext import (
             CallbackQueryHandler,
             CommandHandler,
             MessageHandler,
+            TypeHandler,
             filters,
         )
 
+        # Раньше остальных: stopped_message_generation и widget_query — это
+        # неизвестные PTB поля Update, их надо успеть прочитать до fallback'ов.
+        self._app.add_handler(
+            TypeHandler(Update, self._on_raw_update), group=-1
+        )
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         for name in SKILL_COMMANDS:
@@ -1108,6 +1282,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("id", self._cmd_id))
         self._app.add_handler(CommandHandler("stop", self._cmd_stop))
+        self._app.add_handler(CommandHandler("panel", self._cmd_panel))
         self._app.add_handler(CallbackQueryHandler(self._on_callback))
         self._app.add_handler(
             MessageHandler(
@@ -1140,6 +1315,7 @@ class TelegramBot:
         asyncio.set_event_loop(self._loop)
         try:
             self._app = self._build_application()
+            self._api = TelegramAdvancedAPI(self._app.bot)
             self._task_lock = asyncio.Lock()
             self._inbox_lock = asyncio.Lock()
             self._register_handlers()
@@ -1189,6 +1365,7 @@ class TelegramBot:
         loop = self._loop
         self._loop = None
         self._app = None
+        self._api = None
         if loop is not None and not loop.is_closed():
             try:
                 pending = asyncio.all_tasks(loop)
@@ -1243,6 +1420,7 @@ class TelegramBot:
                     BotCommand("skill", "Скиллы (то же, что /skills)"),
                     BotCommand("new", "Новый диалог"),
                     BotCommand("status", "Состояние"),
+                    BotCommand("panel", "Панель задачи"),
                     BotCommand("id", "Мой ID"),
                     BotCommand("help", "Помощь"),
                     BotCommand("stop", "Остановить бота"),
@@ -1554,13 +1732,8 @@ class TelegramBot:
                 return skill
         return None
 
-    async def _send_skills(
-        self,
-        chat_id: int,
-        reply_to: int | None = None,
-        reply_markup: Any | None = None,
-    ) -> None:
-        """Список установленных скиллов и MCP-серверов."""
+    def _skills_text(self) -> str:
+        """Текст списка скиллов — один и тот же для чата и ephemeral."""
         entries = [
             (
                 skill.name,
@@ -1569,10 +1742,19 @@ class TelegramBot:
             )
             for skill in self._skills()
         ]
+        return skills_list_text(entries, self._mcp_names())
+
+    async def _send_skills(
+        self,
+        chat_id: int,
+        reply_to: int | None = None,
+        reply_markup: Any | None = None,
+    ) -> None:
+        """Список установленных скиллов и MCP-серверов."""
         await start_message(
             self._app.bot,
             chat_id,
-            skills_list_text(entries, self._mcp_names()),
+            self._skills_text(),
             reply_to=reply_to,
             reply_markup=reply_markup,
         )
@@ -1904,6 +2086,58 @@ class TelegramBot:
             message_id=getattr(update.message, "message_id", None),
             text=text,
             images=images,
+            chat_type=getattr(update.effective_chat, "type", None),
+        )
+
+    async def _send_final(
+        self,
+        chat_id: int,
+        message_id: int | None,
+        text: str,
+        *,
+        stopped: bool = False,
+        rich: bool = True,
+    ) -> None:
+        """Финальный ответ: rich-сообщение, иначе текущий HTML-путь.
+
+        Rich-кнопки повторяют обычные «Повторить / Новый / Помощь», поэтому
+        привычное восстановление после ошибки не меняется.
+        """
+        rows = error_rows(True)
+        api = self._api
+        advanced = bool(getattr(self.cfg, "advanced_ui", True))
+        if rich and advanced and api is not None and api.available("sendRichMessage"):
+            try:
+                markdown = build_rich_markdown(text, rows)
+                reply_parameters = None
+                if message_id:
+                    reply_parameters = {
+                        "message_id": message_id,
+                        "allow_sending_without_reply": True,
+                    }
+                sent = await api.send_rich_message(
+                    chat_id=chat_id,
+                    rich_message={"markdown": markdown},
+                    reply_parameters=reply_parameters,
+                )
+                if sent is not None:
+                    return
+                logger.info(
+                    "Telegram: rich-ответ не принят — отправляю HTML-чанками"
+                )
+            except RichTextTooLong as exc:
+                logger.info("Telegram: %s — отправляю HTML-чанками", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "Telegram: rich-ответ не отправлен (%s) — HTML-чанками",
+                    self._mask(str(exc)),
+                )
+        await start_message(
+            self._app.bot,
+            chat_id,
+            text,
+            reply_to=message_id,
+            reply_markup=self._keyboard(rows),
         )
 
     async def _run_task_for(
@@ -1913,8 +2147,9 @@ class TelegramBot:
         message_id: int | None,
         text: str,
         images: list[str] | None = None,
+        chat_type: str | None = None,
+        retry: bool = False,
     ) -> None:
-        self._last_tasks[chat_id] = (text, list(images or []), message_id, user_id)
         if self._task_lock is None:
             self._task_lock = asyncio.Lock()
         if self._task_lock.locked():
@@ -1929,13 +2164,50 @@ class TelegramBot:
                 logger.exception(
                     "Telegram: не удалось переключить сессию чата %s", chat_id
                 )
+            # Номер задачи и «что повторять» обновляем только когда задача
+            # реально вошла в lock: queued-сообщение не должно перетирать
+            # кнопку «Повторить» у ещё работающей задачи.
+            task_id = self._task_seq.get(chat_id, 0) + 1
+            self._task_seq[chat_id] = task_id
+            self._last_tasks[chat_id] = (
+                text,
+                list(images or []),
+                message_id,
+                user_id,
+            )
+            self._last_task_ids[chat_id] = task_id
+            self._current_task_id = task_id
+            self._current_task_chat = chat_id
+            stop_event = threading.Event()
+            self._stop_event = stop_event
             self._chat_id = chat_id
             self._user_id = user_id
             self._message_id = message_id
             self._reaction_set = False
             self._notify_chat_id = chat_id
-            progress = _Progress(self._app.bot, chat_id)
+            advanced = bool(getattr(self.cfg, "advanced_ui", True))
+            use_draft = (
+                chat_type == "private"
+                and advanced
+                and not retry
+                and self._api is not None
+                and self._api.available("sendMessageDraft")
+            )
+            progress: Any
+            if use_draft:
+                progress = _DraftProgress(self._api, self._app.bot, chat_id)
+                self._draft_id = progress.draft_id
+                self._draft_chat_id = chat_id
+            else:
+                progress = _Progress(self._app.bot, chat_id)
+            self._active_progress = progress
             await progress.start("⏳ Думаю…")
+            panel_task: asyncio.Task | None = None
+            if chat_type == "private" and advanced and self._api is not None:
+                panel_task = asyncio.create_task(
+                    self._ensure_panel(chat_id, task_id, text, chat_type)
+                )
+            steps: list[str] = []
             typing = asyncio.create_task(self._keep_typing(chat_id))
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -1948,7 +2220,9 @@ class TelegramBot:
 
             def work() -> None:
                 try:
-                    for event in self.agent.run(text, images=images):
+                    for event in self.agent.run(
+                        text, images=images, stop=stop_event
+                    ):
                         push(event)
                 except Exception as exc:  # noqa: BLE001
                     push(AgentEvent(kind="error", error=str(exc)))
@@ -1961,6 +2235,7 @@ class TelegramBot:
 
             final_text = ""
             error = ""
+            stopped = False
             try:
                 while True:
                     event = await queue.get()
@@ -1978,11 +2253,27 @@ class TelegramBot:
                         final_text = final_text or event.text
                     elif event.kind == "tool_call":
                         await progress.note(f"🔧 {event.tool_name}")
+                        steps = [*steps, event.tool_name][-6:]
+                        panel = self._panels.get(chat_id)
+                        if (
+                            panel is not None
+                            and panel.state.get("id") == task_id
+                            and self._api is not None
+                        ):
+                            await panel.update(
+                                self._api,
+                                chat_id=chat_id,
+                                steps=steps,
+                                s="working",
+                            )
                     elif event.kind == "tool_result":
                         if event.result is not None and not event.result.ok:
                             detail = event.result.content.replace("\n", " ")[:160]
                             await progress.note(f"⚠️ {event.tool_name}: {detail}")
                     elif event.kind == "final":
+                        final_text = event.text or final_text
+                    elif event.kind == "stopped":
+                        stopped = True
                         final_text = event.text or final_text
                     elif event.kind == "error":
                         error = event.error or event.text
@@ -1992,11 +2283,50 @@ class TelegramBot:
                     await typing
                 except asyncio.CancelledError:
                     pass
+                if panel_task is not None and not panel_task.done():
+                    panel_task.cancel()
+                    try:
+                        await panel_task
+                    except asyncio.CancelledError:
+                        pass
                 self._chat_id = None
                 self._user_id = None
                 self._message_id = None
+                self._active_progress = None
+                self._draft_id = None
+                self._draft_chat_id = None
+                self._stop_event = None
+                self._current_task_id = None
+                self._current_task_chat = None
 
+            retry_ok = self._last_task_ids.get(chat_id) == task_id
+            if stopped:
+                await progress.close()
+                await self._finish_panel(
+                    chat_id, task_id, "stopped", retry=retry_ok
+                )
+                final_text = (final_text or "").strip()
+                stopped_text = (
+                    f"{final_text}\n\n⏹ Остановлено."
+                    if final_text
+                    else "⏹ Остановила задачу."
+                )
+                await self._send_final(
+                    chat_id,
+                    message_id,
+                    stopped_text,
+                    stopped=True,
+                    rich=chat_type == "private",
+                )
+                return
             if error:
+                await self._finish_panel(
+                    chat_id,
+                    task_id,
+                    "error",
+                    error=self._mask(error)[:200],
+                    retry=retry_ok,
+                )
                 await progress.fail(
                     error_text(self._mask(error)),
                     reply_markup=self._error_keyboard(chat_id),
@@ -2004,14 +2334,18 @@ class TelegramBot:
                 return
             final_text = (final_text or "").strip()
             if not final_text:
+                await self._finish_panel(
+                    chat_id, task_id, "error", error="пустой ответ", retry=retry_ok
+                )
                 await progress.fail(
                     error_text("Пустой ответ модели. Попробуйте переформулировать задачу."),
                     reply_markup=self._error_keyboard(chat_id),
                 )
                 return
+            await self._finish_panel(chat_id, task_id, "done", retry=retry_ok)
             await progress.close()
-            await start_message(
-                self._app.bot, chat_id, final_text, reply_to=message_id
+            await self._send_final(
+                chat_id, message_id, final_text, rich=chat_type == "private"
             )
             await self._maybe_show_first_hint(chat_id)
             # Агент в общем наборе инструментов часто отвечает эмодзи в тексте,
@@ -2021,6 +2355,366 @@ class TelegramBot:
                 asyncio.create_task(
                     self._auto_react(text, final_text, chat_id, message_id)
                 )
+
+    # --------------------------------------------------------------- панель
+    async def _ensure_panel(
+        self, chat_id: int, task_id: int, title: str, chat_type: str | None
+    ) -> None:
+        """Создаёт или переиспользует панель, если задача ещё идёт."""
+        if chat_type != "private" or not bool(
+            getattr(self.cfg, "advanced_ui", True)
+        ):
+            return
+        api = self._api
+        if api is None or not api.available("sendWidget"):
+            return
+        await asyncio.sleep(PANEL_DELAY)
+        if self._current_task_id != task_id:
+            return  # короткая задача уже закончилась
+        panel = self._panels.get(chat_id)
+        try:
+            if panel is not None and not panel.broken:
+                await panel.update(
+                    api,
+                    chat_id=chat_id,
+                    force=True,
+                    id=task_id,
+                    s="working",
+                    t=title[:120],
+                    steps=[],
+                    start=time.time(),
+                    end=0,
+                    err="",
+                    retry=False,
+                )
+                return
+            panel = await WidgetPanel.create(
+                api, chat_id=chat_id, task_id=task_id, title=title
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "Telegram: панель не создана (%s) — работаю без неё",
+                self._mask(str(exc)),
+            )
+            return
+        if panel is not None:
+            self._panels[chat_id] = panel
+
+    async def _answer_widget(self, query_id: str, text: str) -> None:
+        """Ответ виджету; текст обрезан до 1024 байт, ошибки только логируем."""
+        api = self._api
+        if api is None:
+            return
+        data = _clip_utf8(text or "", 1024)
+        try:
+            await api.answer_widget_query(widget_query_id=query_id, data=data)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Telegram: ответ виджету не отправлен: %s",
+                self._mask(str(exc)),
+            )
+
+    def _short_status(self, chat_id: int) -> str:
+        """Короткий статус для виджета: без разметки, ≤1024 байта."""
+        try:
+            text = self._status_text(chat_id)
+        except Exception:  # noqa: BLE001
+            text = "Статус недоступен."
+        plain = re.sub(r"[*_`]", "", text or "")
+        return _clip_utf8(plain.strip(), 1024)
+
+    def _short_help(self) -> str:
+        """Короткая справка для виджета; полная — /help."""
+        return _clip_utf8(help_text(False), 1024)
+
+    async def _on_widget_query(self, query: Any) -> None:
+        """Действия кнопок HTML-панели (недоверенный widget_query)."""
+        if not isinstance(query, dict):
+            return
+        query_id = str(query.get("id") or "")
+        if not query_id:
+            return
+        if query.get("type") != "data":
+            await self._answer_widget(query_id, "Неизвестное действие")
+            return
+        sender = query.get("from")
+        chat = query.get("chat")
+        user_id = sender.get("id") if isinstance(sender, dict) else None
+        chat_id = chat.get("id") if isinstance(chat, dict) else None
+        chat_type = chat.get("type") if isinstance(chat, dict) else None
+        message_id = query.get("message_id")
+        if user_id is None or chat_id is None or message_id is None:
+            await self._answer_widget(query_id, "Неизвестное действие")
+            return
+        try:
+            user_id = int(user_id)
+            chat_id = int(chat_id)
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            await self._answer_widget(query_id, "Неизвестное действие")
+            return
+        allowed = {int(uid) for uid in self.cfg.allowed_users}
+        if user_id not in allowed:
+            await self._answer_widget(query_id, "Доступ запрещён")
+            return
+        if chat_type not in (None, "private"):
+            await self._answer_widget(query_id, "Панель доступна только в личке")
+            return
+        panel = self._panels.get(chat_id)
+        if panel is None or panel.message_id != message_id:
+            await self._answer_widget(
+                query_id, "Панель устарела, откройте /panel"
+            )
+            return
+        action, task_id = parse_widget_action(str(query.get("data") or ""))
+        panel_id = panel.state.get("id")
+        api = self._api
+        if api is None:
+            await self._answer_widget(query_id, "Панель недоступна")
+            return
+
+        if action == "stop":
+            if task_id != panel_id or task_id != self._current_task_id:
+                await self._answer_widget(query_id, "Панель устарела")
+                return
+            if not self._request_stop(chat_id, task_id=task_id):
+                await self._answer_widget(query_id, "Задача уже завершена")
+                return
+            await panel.update(api, chat_id=chat_id, force=True, s="stopping")
+            await self._answer_widget(query_id, "Останавливаю…")
+            return
+
+        if action == "status":
+            await self._answer_widget(query_id, self._short_status(chat_id))
+            return
+
+        if action == "help":
+            await self._answer_widget(query_id, self._short_help())
+            return
+
+        if action == "new":
+            lock = getattr(self, "_task_lock", None)
+            if lock is not None and lock.locked():
+                await self._answer_widget(
+                    query_id, "Сначала дождитесь завершения задачи"
+                )
+                return
+            self._clear_pending_attachments(chat_id)
+            self._new_session_for_chat(chat_id)
+            self._last_tasks.pop(chat_id, None)
+            self._last_task_ids.pop(chat_id, None)
+            await panel.update(
+                api,
+                chat_id=chat_id,
+                force=True,
+                **make_state(
+                    task_id=0,
+                    status="idle",
+                    title="",
+                    steps=[],
+                    start=0.0,
+                ),
+            )
+            await self._answer_widget(query_id, "Контекст очищен")
+            return
+
+        if action == "retry":
+            lock = getattr(self, "_task_lock", None)
+            if lock is not None and lock.locked():
+                await self._answer_widget(
+                    query_id, "Сначала дождитесь завершения задачи"
+                )
+                return
+            last = self._last_tasks.get(chat_id)
+            if (
+                task_id is None
+                or task_id != self._last_task_ids.get(chat_id)
+                or last is None
+            ):
+                await self._answer_widget(query_id, "Повторять нечего")
+                return
+            text, images, message_id, user_id = last
+            await self._answer_widget(query_id, "Повторяю")
+            asyncio.create_task(
+                self._run_task_for(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    message_id=message_id,
+                    text=text,
+                    images=images,
+                    chat_type=chat_type,
+                    retry=True,
+                )
+            )
+            return
+
+        await self._answer_widget(query_id, "Неизвестное действие")
+
+    async def _panel_help(self, chat_id: int) -> None:
+        """Обычная справка, если панель в этом чате недоступна."""
+        await start_message(
+            self._app.bot,
+            chat_id,
+            help_text(self._hints_active(chat_id)),
+            reply_markup=self._keyboard(
+                main_menu_rows(self._hints_active(chat_id))
+            ),
+        )
+
+    async def _cmd_panel(self, update: Any, context: Any) -> None:
+        """`/panel` — открыть или переиспользовать панель задачи."""
+        if not self._authorized(update):
+            await self._deny(update)
+            return
+        chat = update.effective_chat
+        chat_id = chat.id
+        chat_type = getattr(chat, "type", None)
+        advanced = bool(getattr(self.cfg, "advanced_ui", True))
+        api = self._api
+        if (
+            chat_type != "private"
+            or not advanced
+            or api is None
+            or not api.available("sendWidget")
+        ):
+            await self._panel_help(chat_id)
+            return
+
+        lock = getattr(self, "_task_lock", None)
+        working = (
+            lock is not None
+            and lock.locked()
+            and self._current_task_chat == chat_id
+        )
+        panel = self._panels.get(chat_id)
+        try:
+            if panel is not None and not panel.broken:
+                if working:
+                    await panel.update(api, chat_id=chat_id, force=True)
+                else:
+                    await panel.update(
+                        api,
+                        chat_id=chat_id,
+                        force=True,
+                        **make_state(
+                            task_id=0,
+                            status="idle",
+                            title="",
+                            steps=[],
+                            start=0.0,
+                            retry=bool(self._last_tasks.get(chat_id)),
+                        ),
+                    )
+                return
+            panel = await WidgetPanel.create(
+                api, chat_id=chat_id, task_id=0, title=""
+            )
+            if panel is None:
+                await self._panel_help(chat_id)
+                return
+            self._panels[chat_id] = panel
+            await panel.update(
+                api,
+                chat_id=chat_id,
+                force=True,
+                s="idle",
+                retry=bool(self._last_tasks.get(chat_id)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "Telegram: /panel не открылась (%s) — показываю справку",
+                self._mask(str(exc)),
+            )
+            await self._panel_help(chat_id)
+
+    async def _finish_panel(
+        self,
+        chat_id: int,
+        task_id: int,
+        status: str,
+        *,
+        error: str = "",
+        retry: bool = False,
+    ) -> None:
+        """Переводит панель в финальное состояние; сломанную выбрасывает."""
+        panel = self._panels.get(chat_id)
+        if panel is None or panel.state.get("id") != task_id:
+            return
+        api = self._api
+        if api is None:
+            self._panels.pop(chat_id, None)
+            return
+        try:
+            await panel.close(
+                api, chat_id=chat_id, status=status, error=error, retry=retry
+            )
+        except Exception:  # noqa: BLE001
+            panel.broken = True
+        if panel.broken:
+            self._panels.pop(chat_id, None)
+
+    # -------------------------------------------------------------- отмена
+    def _request_stop(
+        self,
+        chat_id: int,
+        *,
+        draft_id: int | None = None,
+        task_id: int | None = None,
+    ) -> bool:
+        """Ставит отмену текущей задачи, если сигнал относится именно к ней."""
+        event = self._stop_event
+        if (
+            event is None
+            or self._current_task_chat != chat_id
+            or self._current_task_id is None
+        ):
+            return False
+        if task_id is not None and task_id != self._current_task_id:
+            return False
+        if draft_id is not None and draft_id != self._draft_id:
+            return False
+        if event.is_set():
+            return True
+        event.set()
+        self._deny_pending_confirmations(chat_id)
+        progress = self._active_progress
+        if progress is not None:
+            try:
+                asyncio.get_running_loop().create_task(
+                    progress.note("⏹ Останавливаю…")
+                )
+            except RuntimeError:
+                pass  # задача уже завершилась
+        return True
+
+    def _deny_pending_confirmations(self, chat_id: int) -> None:
+        """Отклоняет все ждущие подтверждения этого чата."""
+        prefix = f"{chat_id}:"
+        for key, (future, _text) in list(self._pending.items()):
+            if key.startswith(prefix) and not future.done():
+                future.set_result(False)
+
+    async def _on_raw_update(self, update: Any, context: Any) -> None:
+        """Неизвестные PTB поля Update: остановка генерации и widget_query."""
+        kwargs = getattr(update, "api_kwargs", None) or {}
+        widget_query = kwargs.get("widget_query")
+        if isinstance(widget_query, dict):
+            await self._on_widget_query(widget_query)
+        stopped = kwargs.get("stopped_message_generation")
+        if isinstance(stopped, dict):
+            chat = stopped.get("chat")
+            chat_id = chat.get("id") if isinstance(chat, dict) else None
+            if chat_id is None:
+                chat_id = getattr(
+                    getattr(update, "effective_chat", None), "id", None
+                )
+            if chat_id is not None:
+                draft_id = stopped.get("draft_id")
+                if isinstance(draft_id, str) and draft_id.isdigit():
+                    draft_id = int(draft_id)
+                if not isinstance(draft_id, int):
+                    draft_id = None
+                self._request_stop(int(chat_id), draft_id=draft_id)
 
     # -------------------------------------------------------- подтверждение
     def _confirm(self, tool: Any, args: dict[str, Any]) -> bool:
@@ -2033,7 +2727,19 @@ class TelegramBot:
             future = asyncio.run_coroutine_threadsafe(
                 self._ask_confirm(chat_id, user_id, tool, args), self._loop
             )
-            return bool(future.result(timeout=CONFIRM_TIMEOUT + 30))
+            # Ждём короткими шагами: Stop должен освободить агентский поток
+            # сразу, а не через CONFIRM_TIMEOUT.
+            deadline = time.monotonic() + CONFIRM_TIMEOUT + 30
+            while True:
+                if self._stop_event is not None and self._stop_event.is_set():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                try:
+                    return bool(future.result(timeout=min(0.25, remaining)))
+                except TimeoutError:
+                    continue
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Telegram: подтверждение не получено: {exc}")
             return False
@@ -2063,8 +2769,32 @@ class TelegramBot:
             chat_id, text[:3900], reply_markup=keyboard
         )
         self._pending[key] = (future, text[:3500])
+        stopped = False
         try:
-            return bool(await asyncio.wait_for(future, timeout=CONFIRM_TIMEOUT))
+            deadline = self._loop.time() + CONFIRM_TIMEOUT
+            while True:
+                if self._stop_event is not None and self._stop_event.is_set():
+                    stopped = True
+                    if not future.done():
+                        future.set_result(False)
+                    return False
+                remaining = deadline - self._loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    allowed = bool(
+                        await asyncio.wait_for(
+                            asyncio.shield(future),
+                            timeout=min(0.25, remaining),
+                        )
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if not allowed and (
+                    self._stop_event is not None and self._stop_event.is_set()
+                ):
+                    stopped = True
+                return allowed
         except asyncio.TimeoutError:
             await self._app.bot.send_message(
                 chat_id, "⌛ Время на подтверждение истекло — действие отменено."
@@ -2076,18 +2806,66 @@ class TelegramBot:
             return False
         finally:
             self._pending.pop(key, None)
+            if stopped:
+                try:
+                    await message.edit_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    async def _callback_message(
+        self, query: Any, text: str, reply_markup: Any | None = None
+    ) -> None:
+        """Ответ на кнопку: в группе — ephemeral, иначе обычное сообщение.
+
+        Telegram требует отдельно ответить на callback query. В группе
+        сначала отправляем ephemeral и только при успехе отвечаем на
+        callback; при ошибке — один alert, без публичного спама.
+        """
+        message = getattr(query, "message", None)
+        chat = getattr(message, "chat", None)
+        chat_type = getattr(chat, "type", None)
+        chat_id = getattr(message, "chat_id", None) or getattr(chat, "id", None)
+        api = getattr(self, "_api", None)
+        advanced = bool(getattr(self.cfg, "advanced_ui", True))
+        if (
+            chat_type in ("group", "supergroup")
+            and advanced
+            and api is not None
+            and api.available("sendMessage")
+            and chat_id is not None
+        ):
+            try:
+                sent = await api.send_ephemeral(
+                    chat_id=int(chat_id),
+                    callback_query_id=str(getattr(query, "id", "")),
+                    html=to_html(text),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "Telegram: ephemeral не отправлен (%s) — отвечаю alert'ом",
+                    self._mask(str(exc)),
+                )
+                await query.answer(text[:200], show_alert=True)
+                return
+            if sent is not None:
+                await query.answer()
+                return
+            await query.answer(text[:200], show_alert=True)
+            return
+        await query.answer()
+        await start_message(
+            self._app.bot, int(chat_id), text, reply_markup=reply_markup
+        )
 
     async def _on_ux_callback(self, update: Any, query: Any) -> None:
         """Кнопки подсказок: действия вложений, помощь и примеры."""
         action = (query.data or "")[3:]
         if action == "skills":
             chat_id = query.message.chat_id
-            await query.answer()
-            await self._send_skills(
-                chat_id,
-                reply_markup=self._keyboard(
-                    main_menu_rows(self._hints_active(chat_id))
-                ),
+            await self._callback_message(
+                query,
+                self._skills_text(),
+                self._keyboard(main_menu_rows(self._hints_active(chat_id))),
             )
             return
         if action.startswith("attach:"):
@@ -2133,6 +2911,9 @@ class TelegramBot:
                 message_id=message_id,
                 text=text,
                 images=images,
+                chat_type=getattr(
+                    getattr(query.message, "chat", None), "type", None
+                ),
             )
             return
         if action == "mute":
@@ -2157,20 +2938,16 @@ class TelegramBot:
             self._clear_pending_attachments(chat_id)
             self._new_session_for_chat(chat_id)
             self._last_tasks.pop(chat_id, None)
-            await query.answer("Контекст очищен")
-            await start_message(
-                self._app.bot,
-                chat_id,
+            self._last_task_ids.pop(chat_id, None)
+            await self._callback_message(
+                query,
                 "🧹 Контекст очищен — начинаем заново.",
-                reply_markup=self._keyboard(
-                    main_menu_rows(self._hints_active(chat_id))
-                ),
+                self._keyboard(main_menu_rows(self._hints_active(chat_id))),
             )
             return
         if action == "status":
             chat_id = query.message.chat_id
-            await query.answer()
-            await start_message(self._app.bot, chat_id, self._status_text(chat_id))
+            await self._callback_message(query, self._status_text(chat_id))
             return
         if action == "retry":
             chat_id = query.message.chat_id
@@ -2186,17 +2963,19 @@ class TelegramBot:
                 message_id=message_id,
                 text=text,
                 images=images,
+                chat_type=getattr(
+                    getattr(query.message, "chat", None), "type", None
+                ),
+                retry=True,
             )
             return
         if action == "help":
             chat_id = query.message.chat_id
             hints = self._hints_active(chat_id)
-            await query.answer()
-            await start_message(
-                self._app.bot,
-                chat_id,
+            await self._callback_message(
+                query,
                 help_text(hints),
-                reply_markup=self._keyboard(main_menu_rows(hints)),
+                self._keyboard(main_menu_rows(hints)),
             )
             return
         if action == "examples":
@@ -2206,12 +2985,10 @@ class TelegramBot:
                     "Подсказки выключены в этом чате", show_alert=True
                 )
                 return
-            await query.answer()
-            await start_message(
-                self._app.bot,
-                chat_id,
+            await self._callback_message(
+                query,
                 examples_text(),
-                reply_markup=self._keyboard(main_menu_rows(True)),
+                self._keyboard(main_menu_rows(True)),
             )
             return
         await query.answer("Кнопка устарела")

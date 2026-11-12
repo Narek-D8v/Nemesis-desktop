@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,8 +36,23 @@ if TYPE_CHECKING:
     from nemus.core.memory import Memory
 
 EventKind = Literal[
-    "assistant_delta", "assistant_text", "assistant_thought", "tool_call", "tool_result", "final", "error"
+    "assistant_delta",
+    "assistant_text",
+    "assistant_thought",
+    "tool_call",
+    "tool_result",
+    "final",
+    "error",
+    "stopped",
 ]
+
+
+class GenerationStopped(Exception):
+    """Внутренний сигнал отмены: несёт уже полученный частичный текст."""
+
+    def __init__(self, partial: str = "") -> None:
+        super().__init__("generation stopped")
+        self.partial = partial
 
 #: callback подтверждения: (tool, args) -> разрешено?
 ConfirmCallback = Callable[[Tool, dict[str, Any]], bool]
@@ -720,6 +736,47 @@ class Agent:
         load_messages_into(restored, rows)
         self.history.extend(pair_tool_messages(restored))
 
+    def _finalize_stopped(self, partial: str) -> str:
+        """Сохраняет частичный ответ и закрывает висящие tool-calls.
+
+        После отмены история должна оставаться валидной для провайдера:
+        каждый объявленный ``tool_calls`` обязан иметь ``tool``-ответ,
+        иначе следующий запрос получит «missing corresponding tool call».
+        """
+        text = (partial or "").strip()
+        last = self.history[-1] if self.history else None
+        already = (
+            last is not None
+            and last.role == "assistant"
+            and (last.content or "").strip() == text
+        )
+        if text and not already:
+            message = Message(role="assistant", content=text)
+            self.history.append(message)
+            self._persist(message)
+
+        for index in range(len(self.history) - 1, -1, -1):
+            message = self.history[index]
+            if message.role != "assistant" or not message.tool_calls:
+                continue
+            answered = {
+                later.tool_call_id
+                for later in self.history[index + 1 :]
+                if later.role == "tool" and later.tool_call_id
+            }
+            missing = [
+                call for call in message.tool_calls if call.id not in answered
+            ]
+            for offset, call in enumerate(missing):
+                tool_msg = Message(
+                    role="tool",
+                    tool_call_id=call.id,
+                    content="Выполнение остановлено пользователем.",
+                )
+                self.history.insert(index + 1 + offset, tool_msg)
+                self._persist(tool_msg)
+        return text
+
     def _persist(self, message: Message) -> None:
         if self.memory is None:
             return
@@ -1223,7 +1280,10 @@ class Agent:
             self.history[0].content = f"{self.history[0].content}\n\n{block}"
 
     def run(
-        self, user_text: str, images: list[str] | None = None
+        self,
+        user_text: str,
+        images: list[str] | None = None,
+        stop: threading.Event | None = None,
     ) -> Iterator[AgentEvent]:
         """Обрабатывает запрос пользователя, отдавая события по мере работы.
 
@@ -1272,6 +1332,10 @@ class Agent:
                 if handled:
                     return
 
+        if stop is not None and stop.is_set():
+            yield AgentEvent(kind="stopped", text=self._finalize_stopped(""))
+            return
+
         self._refresh_system_prompt()
         self._apply_language_hint(user_text)
         self._apply_skill_context(user_text)
@@ -1289,6 +1353,9 @@ class Agent:
         #: жёсткий потолок одного запроса с учётом всех продлений
         hard_deadline = started + self.run_budget * self.budget_streak
         while step < self.max_steps:
+            if stop is not None and stop.is_set():
+                yield AgentEvent(kind="stopped", text=self._finalize_stopped(""))
+                return
             if self.max_run_tokens and self._run_tokens >= self.max_run_tokens:
                 yield AgentEvent(
                     kind="error",
@@ -1328,7 +1395,11 @@ class Agent:
             # create_tool, сразу попадает в список и доступен модели
             tools = self.registry.schemas() if len(self.registry) else None
             try:
-                response = yield from self._stream_response(tools)
+                response = yield from self._stream_response(tools, stop=stop)
+            except GenerationStopped as exc:
+                text = self._finalize_stopped(exc.partial)
+                yield AgentEvent(kind="stopped", text=text)
+                return
             except ProviderError as exc:
                 yield AgentEvent(kind="error", error=redact_secrets(str(exc)))
                 return
@@ -1418,6 +1489,11 @@ class Agent:
             self.history.append(assistant_msg)
             self._persist(assistant_msg)
 
+            if stop is not None and stop.is_set():
+                text = self._finalize_stopped(response.content or "")
+                yield AgentEvent(kind="stopped", text=text)
+                return
+
             if not response.tool_calls:
                 # Выдуманный отказ «нет доступа к устройству» — тоже не
                 # результат. У агента есть инструменты и доступ к компьютеру:
@@ -1506,6 +1582,10 @@ class Agent:
 
             tool_images: list[str] = []
             for call in response.tool_calls:
+                if stop is not None and stop.is_set():
+                    text = self._finalize_stopped(response.content or "")
+                    yield AgentEvent(kind="stopped", text=text)
+                    return
                 yield from self._handle_tool_call(call, tool_images)
             if tool_images:
                 self._add_vision_message(tool_images)
@@ -1521,14 +1601,22 @@ class Agent:
         )
 
     # --------------------------------------------------------------- internal
-    def _stream_response(self, tools: list[dict] | None):
+    def _stream_response(
+        self,
+        tools: list[dict] | None,
+        stop: threading.Event | None = None,
+    ):
         """Стримит ответ, отдавая дельты, и возвращает финальный ответ."""
         from nemus.core.llm import LLMResponse  # локальный импорт во избежание цикла
 
         final: LLMResponse | None = None
+        partial = ""
         history = self._history_for_model()
         for event in self.llm.stream(history, tools=tools):
+            if stop is not None and stop.is_set():
+                raise GenerationStopped(partial)
             if event.kind == "content":
+                partial += event.text
                 yield AgentEvent(kind="assistant_delta", text=event.text)
             elif event.kind == "thought":
                 # скрытые рассуждения модели — в отдельный поток «мыслей»
@@ -1536,9 +1624,12 @@ class Agent:
             elif event.kind == "reset":
                 # провайдер оборвал стрим после части текста — интерфейс
                 # должен стереть черновик, иначе повтор его продублирует
+                partial = ""
                 yield AgentEvent(kind="assistant_reset")
             elif event.kind == "final":
                 final = event.response
+        if stop is not None and stop.is_set():
+            raise GenerationStopped(partial)
         if final is None:
             raise ProviderError("Провайдер не вернул ответ.")
         usage = final.usage or {}

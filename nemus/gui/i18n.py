@@ -164,6 +164,12 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Примеры задач, первая подсказка и кнопки действий под вложениями. "
             "/help остаётся доступной всегда."
         ),
+        "tg.advanced_ui": "Живой ответ и панель задач",
+        "tg.advanced_ui_tip": (
+            "Нативный стрим ответа с кнопкой «Стоп», rich-сообщения и HTML-панель "
+            "задачи в личке, ephemeral-ответы в группах. При любой ошибке Bot API "
+            "бот сам вернётся к обычному прогрессу."
+        ),
         "tg.max_file": "Максимальный файл",
         "tg.mb": "МБ",
         "tg.check": "Проверить токен",
@@ -714,6 +720,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "tg.hints_tip": (
             "Task examples, a first-run hint and action buttons under attachments. "
             "/help always remains available."
+        ),
+        "tg.advanced_ui": "Live answer and task panel",
+        "tg.advanced_ui_tip": (
+            "Native answer streaming with a Stop button, rich messages and an HTML "
+            "task panel in private chats, ephemeral replies in groups. On any Bot "
+            "API error the bot falls back to the usual progress message."
         ),
         "tg.max_file": "Maximum file",
         "tg.mb": "MB",

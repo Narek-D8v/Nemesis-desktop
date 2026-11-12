@@ -1620,6 +1620,9 @@ class SettingsDialog(QDialog):
         self.chk_tg_hints = QCheckBox(i18n.tr("tg.hints"))
         self.chk_tg_hints.setToolTip(i18n.tr("tg.hints_tip"))
         form.addRow("", self.chk_tg_hints)
+        self.chk_tg_advanced_ui = QCheckBox(i18n.tr("tg.advanced_ui"))
+        self.chk_tg_advanced_ui.setToolTip(i18n.tr("tg.advanced_ui_tip"))
+        form.addRow("", self.chk_tg_advanced_ui)
 
         self.spin_tg_size = QSpinBox()
         self.spin_tg_size.setRange(1, 20)
@@ -1950,6 +1953,7 @@ class SettingsDialog(QDialog):
         self.chk_tg_groups.setChecked(tg.allow_groups)
         self.chk_tg_voice.setChecked(tg.transcribe_voice)
         self.chk_tg_hints.setChecked(tg.hints_enabled)
+        self.chk_tg_advanced_ui.setChecked(tg.advanced_ui)
         self.spin_tg_size.setValue(max(1, int(tg.max_download_mb or 20)))
         self.lbl_tg_status.setText(self._telegram_status_text())
 
@@ -2068,6 +2072,7 @@ class SettingsDialog(QDialog):
         tg.allow_groups = self.chk_tg_groups.isChecked()
         tg.transcribe_voice = self.chk_tg_voice.isChecked()
         tg.hints_enabled = self.chk_tg_hints.isChecked()
+        tg.advanced_ui = self.chk_tg_advanced_ui.isChecked()
         tg.max_download_mb = self.spin_tg_size.value()
         set_secret("telegram/token", tg.token)
 

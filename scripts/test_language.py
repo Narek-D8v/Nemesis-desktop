@@ -553,6 +553,92 @@ def test_access_denial_is_detected() -> None:
     print("ok  отказ «нет доступа к устройству» распознаётся отдельно")
 
 
+def test_agent_stop_after_delta() -> None:
+    """Stop после первого куска: лишний текст не попадает, история валидна."""
+    import threading
+
+    from nemus.core.agent import Agent
+    from nemus.core.llm import StreamEvent
+    from nemus.core.permissions import PermissionManager
+    from nemus.core.providers import LLMResponse
+    from nemus.core.tools.registry import ToolRegistry
+
+    stop = threading.Event()
+
+    class _LLM:
+        def stream(self, messages, tools=None, **kwargs):
+            yield StreamEvent(kind="content", text="частичный")
+            stop.set()
+            yield StreamEvent(kind="content", text=" лишний")
+            yield StreamEvent(
+                kind="final", response=LLMResponse(content="частичный лишний")
+            )
+
+    cfg = get_config()
+    agent = Agent(
+        config=cfg,
+        llm=_LLM(),  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+    )
+    events = list(agent.run("Найди самый свежий отчёт и пришли его в чат.", stop=stop))
+    kinds = [event.kind for event in events]
+    assert "assistant_delta" in kinds, kinds
+    assert kinds[-1] == "stopped", kinds
+    assert "final" not in kinds, kinds
+    deltas = "".join(e.text for e in events if e.kind == "assistant_delta")
+    assert deltas == "частичный", repr(deltas)
+    assert agent.history[-1].role == "assistant", agent.history[-1]
+    assert agent.history[-1].content == "частичный"
+    assert not agent.history[-1].tool_calls
+    assert not [m for m in agent.history if m.role == "tool"]
+    print("ok  Agent.run: stop после delta не пускает лишний текст")
+
+
+def test_agent_stop_finalizes_tool_calls() -> None:
+    """Stop закрывает висящие tool-calls синтетическими результатами."""
+    from nemus.core.agent import Agent, pair_tool_messages
+    from nemus.core.permissions import PermissionManager
+    from nemus.core.providers import Message, ToolCall
+    from nemus.core.tools.registry import ToolRegistry
+
+    cfg = get_config()
+    agent = Agent(
+        config=cfg,
+        llm=None,  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+    )
+    agent.history.append(
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(id="call-1", name="read_file", arguments={}),
+                ToolCall(id="call-2", name="run_shell", arguments={}),
+            ],
+        )
+    )
+    agent.history.append(
+        Message(role="tool", tool_call_id="call-1", content="готово")
+    )
+    agent._finalize_stopped("")
+    synthetic = [
+        m
+        for m in agent.history
+        if m.role == "tool" and m.tool_call_id == "call-2"
+    ]
+    assert len(synthetic) == 1, agent.history
+    assert "остановлено" in (synthetic[0].content or "").lower()
+    pairs = pair_tool_messages(agent.history)
+    announced = {
+        call.id for m in pairs if m.role == "assistant" for call in (m.tool_calls or [])
+    }
+    answered = {m.tool_call_id for m in pairs if m.role == "tool"}
+    assert announced <= answered, (announced, answered)
+    print("ok  Agent._finalize_stopped закрывает висящие tool-calls")
+
+
 def _permissions():
     from nemus.core.permissions import PermissionManager
 
@@ -577,6 +663,8 @@ def main() -> int:
         test_quick_replies_and_simple_requests,
         test_promise_and_deferral,
         test_access_denial_is_detected,
+        test_agent_stop_after_delta,
+        test_agent_stop_finalizes_tool_calls,
     )
     failures = 0
     for test in tests:
