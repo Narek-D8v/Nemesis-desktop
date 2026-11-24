@@ -20,6 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nemus.config import Config  # noqa: E402
 from nemus.core.diary import DiaryBook  # noqa: E402
+from nemus.core.download_events import (  # noqa: E402
+    DownloadEvent,
+    subscribe_download,
+    unsubscribe_download,
+)
 from nemus.core.emotions import EmotionState, EmotionStore  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
 from nemus.core.proactive import (  # noqa: E402
@@ -3576,6 +3581,219 @@ D) Свой вариант: _________
     print("ok  брейншторм: вопросы по одному, свой вариант и запуск задачи")
 
 
+def test_torrent_tool_publishes_progress(tmp_path: Path) -> None:
+    """Торрент-заглушка сохраняет файл, хеш и события kind='torrent'."""
+    import hashlib
+    from types import SimpleNamespace
+
+    from nemus.core.tools import torrents as torrent_mod
+
+    payload = b"torrent-fake-bytes"
+    name = "setup.exe"
+
+    class _FakeHandle:
+        def __init__(self, save_path: Path) -> None:
+            self._save_path = save_path
+            self._status_calls = 0
+            (self._save_path / name).write_bytes(payload)
+
+        def status(self) -> SimpleNamespace:
+            self._status_calls += 1
+            done = len(payload) if self._status_calls >= 2 else len(payload) // 2
+            return SimpleNamespace(
+                total_done=done, total_want=len(payload), total_size=len(payload)
+            )
+
+        def is_seed(self) -> bool:
+            return self._status_calls >= 2
+
+        def save_path(self) -> str:
+            return str(self._save_path)
+
+        def name(self) -> str:
+            return name
+
+    class _FakeSession:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.params: object = None
+
+        def add_torrent(self, params: object) -> _FakeHandle:
+            self.params = params
+            assert params.get("save_path"), params
+            return _FakeHandle(Path(params["save_path"]))
+
+    fake_lt = SimpleNamespace(
+        session=_FakeSession,
+        parse_magnet_uri=lambda uri: {"url": uri},
+    )
+    tool = torrent_mod.TorrentDownloadTool()
+    tool.root = tmp_path / "downloads"
+    seen: list[DownloadEvent] = []
+    token = subscribe_download(seen.append)
+    old_lib = torrent_mod._libtorrent
+    old_interval = torrent_mod.POLL_INTERVAL
+    torrent_mod._libtorrent = lambda: fake_lt
+    torrent_mod.POLL_INTERVAL = 0
+    try:
+        result = tool.execute(
+            magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            filename=name,
+        )
+    finally:
+        torrent_mod._libtorrent = old_lib
+        torrent_mod.POLL_INTERVAL = old_interval
+        unsubscribe_download(token)
+
+    assert result.ok, result.content
+    target = tool.root / name
+    assert target.read_bytes() == payload
+    assert (tool.root / f"{name}.sha256").read_text(encoding="ascii") == (
+        hashlib.sha256(payload).hexdigest()
+    )
+    assert seen and all(event.kind == "torrent" for event in seen), seen
+    assert {event.phase for event in seen} >= {"start", "progress", "done"}, seen
+    assert seen[-1].phase == "done" and seen[-1].done == len(payload)
+    assert {event.task_id for event in seen} == {tool.last_task_id}
+
+    from nemus.core.tools.all import all_builtin_tools
+
+    assert "torrent_download" in {item.name for item in all_builtin_tools()}
+    print("ok  торрент: файл, SHA-256 и события kind=torrent")
+
+
+def test_torrent_inline_button_gate() -> None:
+    """Торрент-согласие: чужая кнопка не работает, доступ даёт только :y."""
+    import asyncio
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [7]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot._pending = {}
+    bot._stop_event = None
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict]] = []
+
+        async def send_message(
+            self, chat_id: int, text: str, **kwargs: object
+        ) -> SimpleNamespace:
+            self.sent.append((text, kwargs))
+            return SimpleNamespace(message_id=1)
+
+    class _Query:
+        def __init__(self, data: str, user_id: int) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=user_id)
+            self.message = SimpleNamespace(chat_id=42, message_id=5)
+            self.answers: list[str] = []
+            self.edits: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            self.edits.append(text)
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            return None
+
+    def _update(query: _Query) -> SimpleNamespace:
+        return SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=42, type="private"),
+        )
+
+    def _buttons(fake: _FakeBot) -> list[object]:
+        markup = fake.sent[-1][1]["reply_markup"]
+        return [button for row in markup.inline_keyboard for button in row]
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        bot._loop = loop
+        fake = _FakeBot()
+        bot._app = SimpleNamespace(bot=fake)
+
+        future = bot._ask_torrent(42, 7, "magnet:?xt=urn:btih:test")
+        await asyncio.sleep(0.05)
+        assert isinstance(future, asyncio.Future)
+        assert not future.done()
+        text = fake.sent[0][0]
+        assert "Скачать через торрент" in text, text
+        buttons = _buttons(fake)
+        labels = [button.text for button in buttons]
+        assert any("Скачать через торрент" in label for label in labels), labels
+        yes = next(
+            button.callback_data for button in buttons
+            if button.callback_data.endswith(":y")
+        )
+        assert any(
+            button.callback_data.endswith(":n") for button in buttons
+        ), labels
+        assert yes.startswith("td:42:7:"), yes
+
+        foreign = _Query(yes, user_id=8)
+        await bot._on_callback(_update(foreign), None)
+        assert not future.done(), "чужая кнопка не должна давать согласие"
+        assert "не для этого чата" in foreign.answers[-1]
+
+        approved = _Query(yes, user_id=7)
+        await bot._on_callback(_update(approved), None)
+        assert future.done() and future.result() is True
+        assert approved.answers[-1] == "Разрешено"
+
+        future2 = bot._ask_torrent(42, 7, "magnet:?xt=urn:btih:test2")
+        await asyncio.sleep(0.05)
+        no2 = next(
+            button.callback_data for button in _buttons(fake)
+            if button.callback_data.endswith(":n")
+        )
+        cancelled = _Query(no2, user_id=7)
+        await bot._on_callback(_update(cancelled), None)
+        assert future2.done() and future2.result() is False
+
+    asyncio.run(scenario())
+    print("ok  инлайн-согласие торрента: только своя кнопка и :y даёт доступ")
+
+
+def test_torrent_input_and_dependency_guards(tmp_path: Path) -> None:
+    """Только явный-source; без libtorrent — failure с подсказкой, не crash."""
+    from nemus.core.tools import torrents as torrent_mod
+
+    tool = torrent_mod.TorrentDownloadTool()
+    tool.root = tmp_path / "downloads"
+
+    bad = tool.execute(torrent_url="http://example.test/file.torrent")
+    assert not bad.ok and "HTTPS" in bad.content, bad.content
+
+    seen: list[DownloadEvent] = []
+    token = subscribe_download(seen.append)
+    old_lib = torrent_mod._libtorrent
+
+    def _missing() -> object:
+        raise ImportError("No module named 'libtorrent'")
+
+    torrent_mod._libtorrent = _missing
+    try:
+        result = tool.execute(
+            magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            filename="setup.exe",
+        )
+    finally:
+        torrent_mod._libtorrent = old_lib
+        unsubscribe_download(token)
+
+    assert not result.ok, result.content
+    assert "pip install python-libtorrent" in result.content, result.content
+    assert any(
+        event.kind == "torrent" and event.phase == "error" for event in seen
+    ), seen
+    assert not (tool.root / "setup.exe").exists()
+    print("ok  торрент: только явный source и честная ошибка без libtorrent")
+
+
 def main() -> int:
     test_proactive_drops_repeated_greeting()
     test_proactive_angles_are_varied()
@@ -3627,6 +3845,11 @@ def main() -> int:
     test_inbox_lock_serializes_text_and_media()
     test_new_blocked_during_task()
     test_confirmation_bound_to_chat_user()
+    with tempfile.TemporaryDirectory(prefix="nemus_tg_torrent_") as tmp:
+        folder = Path(tmp)
+        test_torrent_tool_publishes_progress(folder / "ok")
+        test_torrent_input_and_dependency_guards(folder / "guards")
+    test_torrent_inline_button_gate()
     test_reaction_list_complete()
     test_reaction_choice()
     test_tool_without_bot()

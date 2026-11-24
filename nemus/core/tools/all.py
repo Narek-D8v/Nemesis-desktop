@@ -18,6 +18,7 @@ from nemus.core.tools.system import (
     system_tools,
 )
 from nemus.core.tools.todo_tool import todo_tools
+from nemus.core.tools.torrents import torrent_tools
 from nemus.core.tools.video import video_tools
 from nemus.core.tools.web import web_tools
 from nemus.core.tools.website import website_tools
@@ -37,6 +38,7 @@ def all_builtin_tools() -> list[Tool]:
     tools.extend(todo_tools())
     tools.extend(keyboard_tools())
     tools.extend(browser_tools())
+    tools.extend(torrent_tools())
     tools.extend(screen_tools())
     tools.extend(presentation_tools())
     tools.extend(video_tools())

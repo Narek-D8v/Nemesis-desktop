@@ -4774,6 +4774,108 @@ class TelegramBot:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _ask_torrent(
+        self, chat_id: int, user_id: int, text: str
+    ) -> asyncio.Future[bool]:
+        """Спрашивает согласие на торрент инлайн-кнопками ``td:``.
+
+        Возвращает future сразу, чтобы вызывающий мог ждать её в своём потоке.
+        Ключ в ``_pending`` привязан к чату и человеку; тот же ключ разбирает
+        ``_on_callback``. Таймаут и Stop обрабатывает ``_wait_torrent``.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "Нет event loop для инлайн-согласия на торрент"
+                ) from exc
+        key = f"{int(chat_id)}:{int(user_id)}:{time.time_ns()}"
+        future: asyncio.Future[bool] = loop.create_future()
+        original = f"⬇️ Скачать через торрент?\n\n{str(text or '')}"[:3500]
+        markup = self._keyboard([
+            [
+                ("⬇️ Скачать через торрент", f"td:{key}:y"),
+                ("❌ Отмена", f"td:{key}:n"),
+            ]
+        ])
+        # Регистрируем future до отправки: быстрый клик не должен видеть
+        # «кнопка устарела» и заставлять пользователя ждать таймаута.
+        self._pending[key] = (future, original)
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._wait_torrent(chat_id, key, future, original, markup, loop),
+                loop,
+            )
+        except RuntimeError:
+            self._pending.pop(key, None)
+            if not future.done():
+                future.set_result(False)
+            raise
+        return future
+
+    async def _wait_torrent(
+        self,
+        chat_id: int,
+        key: str,
+        future: asyncio.Future,
+        original: str,
+        markup: Any,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Отправляет запрос и гасит его по кнопке, Stop или таймауту."""
+        message: Any = None
+        stopped = False
+        timed_out = False
+        try:
+            try:
+                message = await self._app.bot.send_message(
+                    chat_id, original[:3900], reply_markup=markup
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Telegram: не удалось спросить согласие на торрент: {exc}")
+                if not future.done():
+                    future.set_result(False)
+                return False
+
+            deadline = loop.time() + CONFIRM_TIMEOUT
+            while True:
+                if self._stop_event is not None and self._stop_event.is_set():
+                    stopped = True
+                    if not future.done():
+                        future.set_result(False)
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    timed_out = True
+                    if not future.done():
+                        future.set_result(False)
+                    return False
+                try:
+                    return bool(
+                        await asyncio.wait_for(
+                            asyncio.shield(future), timeout=min(0.25, remaining)
+                        )
+                    )
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            self._pending.pop(key, None)
+            if timed_out:
+                try:
+                    await self._app.bot.send_message(
+                        chat_id,
+                        "⌛ Время на согласие истекло — торрент не запущен.",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            if (stopped or timed_out) and message is not None:
+                try:
+                    await message.edit_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def _callback_message(
         self, query: Any, text: str, reply_markup: Any | None = None
     ) -> None:
@@ -5110,6 +5212,9 @@ class TelegramBot:
         if data.startswith("ux:"):
             await self._on_ux_callback(update, query)
             return
+        if data.startswith("td:"):
+            await self._on_torrent_callback(query, data)
+            return
         parts = data.split(":")
         if len(parts) < 5 or parts[0] != "tg":
             await query.answer()
@@ -5140,6 +5245,47 @@ class TelegramBot:
             await query.edit_message_text(
                 f"{original}\n\n"
                 + ("✅ Разрешено" if allowed else "❌ Отклонено"),
+                reply_markup=None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _on_torrent_callback(self, query: Any, data: str) -> None:
+        """Разбирает ``td:<chat>:<user>:<ns>:y|n`` и решает future согласия."""
+        parts = data.split(":")
+        if len(parts) != 5 or parts[0] != "td" or parts[4] not in ("y", "n"):
+            await query.answer("Кнопка устарела")
+            return
+        try:
+            chat_id, user_id, namespace = (int(part) for part in parts[1:4])
+        except ValueError:
+            await query.answer("Кнопка устарела")
+            return
+        actual_chat = getattr(query.message, "chat_id", None)
+        if actual_chat is None:
+            actual_chat = getattr(getattr(query.message, "chat", None), "id", None)
+        actual_user = getattr(query.from_user, "id", None)
+        if actual_chat != chat_id or actual_user != user_id:
+            await query.answer("Кнопка не для этого чата", show_alert=True)
+            return
+        key = f"{chat_id}:{user_id}:{namespace}"
+        entry = self._pending.get(key)
+        if entry is None:
+            await query.answer("Кнопка устарела")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        future, original = entry
+        allowed = parts[4] == "y"
+        if not future.done():
+            future.set_result(allowed)
+        await query.answer("Разрешено" if allowed else "Отклонено")
+        try:
+            await query.edit_message_text(
+                f"{original}\n\n"
+                + ("✅ Скачиваем через торрент" if allowed else "❌ Отмена"),
                 reply_markup=None,
             )
         except Exception:  # noqa: BLE001
