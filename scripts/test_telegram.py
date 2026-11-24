@@ -895,6 +895,44 @@ def test_telegram_download_bar_uses_task_id() -> None:
     print("ok  Telegram: параллельные загрузки показаны по task_id")
 
 
+def test_never_started_bot_does_not_subscribe_download() -> None:
+    """Незапущенный бот не оставляет слушателя в общей шине."""
+    import nemus.core.download_events as download_events
+
+    cfg = Config()
+    cfg.telegram.enabled = True
+    cfg.telegram.allowed_users = []
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    before = len(download_events._LISTENERS)
+    bot = TelegramBot(cfg, core)
+    other = TelegramBot(cfg, core)
+    try:
+        assert bot._download_token == "", "подписка не должна создаваться в __init__"
+        assert other._download_token == ""
+        assert len(download_events._LISTENERS) == before, "появился stale listener"
+        publish_download(
+            DownloadEvent(
+                kind="file",
+                phase="progress",
+                name="setup.exe",
+                done=84,
+                total=125,
+                task_id="never-started",
+            )
+        )
+        assert len(download_events._LISTENERS) == before
+        assert bot._download_rows == {} and other._download_rows == {}
+    finally:
+        bot._unsubscribe_download()
+        other._unsubscribe_download()
+    print("ok  Telegram: незапущенный бот не подписывается на прогресс")
+
+
 def test_retry_and_new_callbacks() -> None:
     """Повтор берёт последнюю задачу, /new не сбрасывает работающий контекст."""
     import asyncio
@@ -4045,6 +4083,7 @@ def main() -> int:
     test_rich_final_fallback()
     test_progress_download_line()
     test_telegram_download_bar_uses_task_id()
+    test_never_started_bot_does_not_subscribe_download()
     test_draft_progress()
     test_draft_keepalive_fallback()
     test_run_task_uses_draft()

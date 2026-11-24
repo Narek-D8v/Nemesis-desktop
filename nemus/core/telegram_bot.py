@@ -732,7 +732,9 @@ class TelegramBot:
         self._download_listener = self._on_model_download_event
         #: единая шина прогресса: строки загрузок по (чат, task_id)
         self._download_rows: dict[tuple[int, str], str] = {}
-        self._download_token = subscribe_download(self._on_download_event)
+        # подписка создаётся в потоке бота: незапущенный экземпляр не должен
+        # оставлять слушателя в глобальной шине
+        self._download_token = ""
         self._app: Any = None
         #: raw-адаптер Bot API 10.3/10.4 (создаётся в потоке бота)
         self._api: TelegramAdvancedAPI | None = None
@@ -1876,6 +1878,7 @@ class TelegramBot:
         asyncio.set_event_loop(self._loop)
         from nemus.core.providers.hf_download import subscribe_model_download
 
+        self._subscribe_download()
         subscribe_model_download(self._download_listener)
         try:
             self._app = self._build_application()
@@ -2001,6 +2004,11 @@ class TelegramBot:
         await progress.download(text, force=force)
         if force:
             self._download_rows.pop(key, None)
+
+    def _subscribe_download(self) -> None:
+        """Подписывает работающий бот на общую шину (идемпотентно)."""
+        if not self._download_token:
+            self._download_token = subscribe_download(self._on_download_event)
 
     def _unsubscribe_download(self) -> None:
         """Снимает подписку с единой шины (идемпотентно)."""
