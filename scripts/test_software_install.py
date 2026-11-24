@@ -28,9 +28,10 @@ from nemus.core.download_events import (  # noqa: E402
 )
 from nemus.core.permissions import Decision, PermissionManager  # noqa: E402
 from nemus.core.skills import load_skills, match_skills  # noqa: E402
-from nemus.core.tools import downloads  # noqa: E402
+from nemus.core.tools import downloads, system  # noqa: E402
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult  # noqa: E402
 from nemus.core.tools.downloads import DownloadFileTool  # noqa: E402
+from nemus.core.tools.shell import CapturedRun  # noqa: E402
 
 PAYLOAD = b"installer-bytes-12345"
 
@@ -542,6 +543,212 @@ def test_segment_plan_and_manifest_helpers(tmp_path: Path) -> None:
     print("ok  helpers: план сегментов, слияние, манифест")
 
 
+def _clean_scan(**_: object) -> ToolResult:
+    return ToolResult.success("Windows Defender: угроз не найдено")
+
+
+def _threat_scan(**_: object) -> ToolResult:
+    return ToolResult.failure("Windows Defender нашёл угрозу")
+
+
+def test_verify_installer_policy(tmp_path: Path) -> None:
+    """Defender и хеш — жёсткие блоки;unsigned — только предупреждение по запросу."""
+    folder = tmp_path / "policy"
+    folder.mkdir(parents=True)
+    installer = folder / "setup.exe"
+    installer.write_bytes(PAYLOAD)
+    digest = hashlib.sha256(PAYLOAD).hexdigest()
+    downloads._write_manifest(installer, digest)
+    tool = system.VerifyInstallerTool()
+
+    with (
+        patch.object(system.ScanFileTool, "execute", side_effect=_clean_scan) as scan,
+        patch.object(system, "_authenticode", return_value=(False, "Unsigned")),
+    ):
+        blocked = tool.execute(path=str(installer), expected_sha256=digest)
+        assert blocked.ok is False, blocked.content
+        for key in ("verdict:", "defender:", "signature:", "sha256:"):
+            assert key in blocked.content, (key, blocked.content)
+        assert scan.call_count == 1
+
+        explicit = tool.execute(
+            path=str(installer), expected_sha256=digest, explicit_piracy_request=True
+        )
+        assert explicit.ok, explicit.content
+        assert "warning:" in explicit.content
+        assert "verdict: warning" in explicit.content
+        assert scan.call_count == 2
+
+        bad_hash = tool.execute(
+            path=str(installer), expected_sha256="0" * 64, explicit_piracy_request=True
+        )
+        assert bad_hash.ok is False, bad_hash.content
+        assert scan.call_count == 3, "сканирование запускается даже при плохом хеше"
+
+        malformed = tool.execute(
+            path=str(installer), expected_sha256="not-a-hash", explicit_piracy_request=True
+        )
+        assert malformed.ok is False, malformed.content
+        assert "warning:" in malformed.content, malformed.content
+
+    with (
+        patch.object(system.ScanFileTool, "execute", side_effect=_threat_scan),
+        patch.object(system, "_authenticode", return_value=(True, "CN=Vendor")),
+    ):
+        threat = tool.execute(
+            path=str(installer), expected_sha256=digest, explicit_piracy_request=True
+        )
+        assert threat.ok is False, threat.content
+        assert "defender: threat" in threat.content, threat.content
+
+    with (
+        patch.object(system.ScanFileTool, "execute", side_effect=_clean_scan) as scan,
+        patch.object(system, "_authenticode", return_value=(True, "CN=Vendor")) as signature,
+    ):
+        signed = tool.execute(path=str(installer))
+        assert signed.ok, signed.content
+        assert digest in signed.content, signed.content
+        assert "warning:" not in signed.content, signed.content
+        assert scan.call_count == 1 and signature.call_count == 1
+
+    # Явно переданный хеш важнее манифеста, но расхождение — fail closed.
+    installer.with_name("setup.exe.sha256").write_text("1" * 64, encoding="ascii")
+    with (
+        patch.object(system.ScanFileTool, "execute", side_effect=_clean_scan),
+        patch.object(system, "_authenticode", return_value=(True, "CN=Vendor")),
+    ):
+        conflict = tool.execute(
+            path=str(installer), expected_sha256=digest, explicit_piracy_request=True
+        )
+        assert conflict.ok is False, conflict.content
+        assert "manifest" in conflict.content.casefold(), conflict.content
+
+    installer.with_name("setup.exe.sha256").unlink()
+    with (
+        patch.object(system.ScanFileTool, "execute", side_effect=_clean_scan),
+        patch.object(system, "_authenticode", return_value=(True, "CN=Vendor")),
+    ):
+        unknown = tool.execute(path=str(installer))
+        assert unknown.ok is False, unknown.content
+    print("ok  verify_installer: безопасная политика проверки установщика")
+
+
+def test_authenticode_parses_powershell_status() -> None:
+    """Подпись читается из Get-AuthenticodeSignature, а не из облачных сервисов."""
+    target = Path("C:\\downloads\\setup.exe")
+    with (
+        patch.object(system.sys, "platform", "win32"),
+        patch.object(
+            system,
+            "run_capture",
+            return_value=CapturedRun(0, b"Status=Valid\r\nSigner=CN=Vendor", b"", False),
+        ) as runner,
+    ):
+        valid, detail = system._authenticode(target)
+        assert valid is True, detail
+        assert "CN=Vendor" in detail, detail
+        assert "Get-AuthenticodeSignature" in runner.call_args.args[0][-1]
+
+    with (
+        patch.object(system.sys, "platform", "win32"),
+        patch.object(
+            system,
+            "run_capture",
+            return_value=CapturedRun(0, b"Status=NotSigned", b"", False),
+        ),
+    ):
+        valid, detail = system._authenticode(target)
+        assert valid is False, detail
+        assert "NotSigned" in detail, detail
+    print("ok  _authenticode: статус подписи из локального PowerShell")
+
+
+def test_install_verified_requires_confirmation(tmp_path: Path) -> None:
+    """Без подтверждения и при проваленной проверке установщик не запускается."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    installer = tmp_path / "setup.exe"
+    installer.write_bytes(PAYLOAD)
+    tool = system.InstallVerifiedTool()
+    verified = ToolResult.success("verdict: pass\ndefender: clean")
+
+    with (
+        patch.object(system.VerifyInstallerTool, "execute", return_value=verified) as verify,
+        patch.object(
+            system,
+            "run_capture",
+            return_value=CapturedRun(0, b"installed", b"", False),
+        ) as runner,
+    ):
+        unconfirmed = tool.execute(path=str(installer))
+        assert unconfirmed.ok is False, unconfirmed.content
+        assert "confirmed=True" in unconfirmed.content, unconfirmed.content
+        assert verify.call_count == 1
+        assert runner.call_count == 0
+
+        done = tool.execute(path=str(installer), confirmed=True)
+        assert done.ok, done.content
+        assert "installed" in done.content, done.content
+        assert runner.call_count == 1
+        argv = runner.call_args.args[0]
+        assert "powershell" in argv[0].casefold(), argv
+        assert "Start-Process" in argv[-1] and "-Wait" in argv[-1], argv
+        assert str(installer) in argv[-1], argv
+
+    with (
+        patch.object(
+            system.VerifyInstallerTool,
+            "execute",
+            return_value=ToolResult.failure("verdict: blocked"),
+        ),
+        patch.object(system, "run_capture") as runner,
+    ):
+        blocked = tool.execute(path=str(installer), confirmed=True)
+        assert blocked.ok is False, blocked.content
+        assert runner.call_count == 0
+
+    msi = tmp_path / "setup.msi"
+    msi.write_bytes(PAYLOAD)
+    with (
+        patch.object(system.VerifyInstallerTool, "execute", return_value=verified),
+        patch.object(
+            system,
+            "run_capture",
+            return_value=CapturedRun(
+                0, b"x" * (system.INSTALL_OUTPUT_LIMIT + 100), b"", False
+            ),
+        ) as runner,
+    ):
+        installed_msi = tool.execute(path=str(msi), confirmed=True)
+        assert installed_msi.ok, installed_msi.content
+        argv = runner.call_args.args[0]
+        assert "msiexec" in argv[0].casefold(), argv
+        assert "/i" in argv and str(msi) in argv, argv
+        assert "x" * system.INSTALL_OUTPUT_LIMIT in installed_msi.content
+        assert "x" * (system.INSTALL_OUTPUT_LIMIT + 1) not in installed_msi.content
+
+    with (
+        patch.object(system.VerifyInstallerTool, "execute", return_value=verified),
+        patch.object(
+            system,
+            "run_capture",
+            return_value=CapturedRun(-1, b"partial", b"", True),
+        ),
+    ):
+        timed_out = tool.execute(path=str(installer), confirmed=True)
+        assert timed_out.ok is False, timed_out.content
+        assert "таймаут" in timed_out.content.casefold(), timed_out.content
+    print("ok  install_verified: подтверждение, верификация и запуск процессов")
+
+
+def test_install_tools_are_registered() -> None:
+    """Оба инструмента доступны агенту через общий реестр."""
+    from nemus.core.tools.all import all_builtin_tools  # noqa: PLC0415
+
+    names = {item.name for item in all_builtin_tools()}
+    assert {"verify_installer", "install_verified"} <= names, names
+    print("ok  all_builtin_tools: verify_installer и install_verified зарегистрированы")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="nemus_install_") as tmp:
         root = Path(tmp)
@@ -561,6 +768,10 @@ def main() -> None:
         test_oversize_cleans_up(root / "j")
         test_download_controls_register_cancel_forget()
         test_segment_plan_and_manifest_helpers(root / "k")
+        test_verify_installer_policy(root / "verify")
+        test_authenticode_parses_powershell_status()
+        test_install_verified_requires_confirmation(root / "install")
+        test_install_tools_are_registered()
     print("все тесты установки прошли")
 
 
