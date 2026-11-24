@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Callable
 
 from nemus.config import PROJECT_ROOT
+from nemus.core.download_events import DownloadEvent, publish_download
 from nemus.core.providers.gguf_split import (
     GGUFMergeCancelled,
     GGUFMergeError,
@@ -120,6 +121,17 @@ def _publish(event: ModelDownloadEvent) -> None:
             listener(event)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"Подписчик прогресса модели упал: {exc}")
+    publish_download(
+        DownloadEvent(
+            kind="model",
+            phase=event.phase,
+            name=event.name,
+            done=event.done,
+            total=event.total,
+            path=event.path,
+            message=event.message,
+        )
+    )
 
 
 def _clean_part(text: str) -> str:
