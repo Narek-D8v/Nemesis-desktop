@@ -307,6 +307,38 @@ def test_changed_etag_restarts_download(tmp_path: Path) -> None:
     print("ok  download_file: смена ETag сбрасывает части")
 
 
+def test_invalid_meta_discards_stale_parts(tmp_path: Path) -> None:
+    """Отсутствие/порча meta.json не должно подмешивать чужие части."""
+    payload = b"0123456789"
+    url = "https://example.test/setup.exe"
+    cases = (("missing", None), ("corrupt", "{broken"), ("non-dict", "[]"))
+    for label, meta in cases:
+        root = _root(tmp_path / label)
+        parts_dir = downloads._parts_dir(root, "setup.exe", url)
+        parts_dir.mkdir(parents=True)
+        (parts_dir / "part-00").write_bytes(b"XXXX")
+        if meta is not None:
+            (parts_dir / "meta.json").write_text(meta, encoding="utf-8")
+
+        ranges: list[str] = []
+        tool = downloads.DownloadFileTool()
+        tool.root = root
+        with patch(
+            "nemus.core.tools.downloads._http_client",
+            return_value=_client(_range_handler(payload, ranges)),
+        ):
+            result = tool.execute(url, "setup.exe")
+
+        assert result.ok, (label, result.content)
+        assert ranges == ["bytes=0-9"], (label, ranges)
+        assert (root / "setup.exe").read_bytes() == payload, label
+        assert (root / "setup.exe.sha256").read_text() == hashlib.sha256(
+            payload
+        ).hexdigest(), label
+        assert not (root / ".parts").exists(), label
+    print("ok  download_file: битая meta.json сбрасывает части")
+
+
 def test_segments_are_parallel_and_merge_in_order(tmp_path: Path) -> None:
     """Файл больше 8 МБ делится на сегменты и собирается в исходном порядке."""
     size = 2 * downloads.SEGMENT_SIZE_MB * 1024 * 1024
@@ -521,6 +553,7 @@ def main() -> None:
         test_download_sanitizes_filename(root / "d")
         test_segmented_download_resumes_and_publishes(root / "e")
         test_changed_etag_restarts_download(root / "e2")
+        test_invalid_meta_discards_stale_parts(root / "e3")
         test_segments_are_parallel_and_merge_in_order(root / "f")
         test_range_ignored_falls_back_to_single_stream(root / "g")
         test_200_instead_of_206_falls_back_and_cleans_parts(root / "h")

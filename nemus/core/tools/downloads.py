@@ -352,30 +352,40 @@ class DownloadFileTool(Tool):
     def _prepare_parts(
         parts_dir: Path, total: int, validator: tuple[str, str], count: int
     ) -> list[Path]:
-        """Готовит папку частей; при смене размера/версии начинаем заново."""
+        """Готовит части; без читаемой meta.json любые старые части не годятся."""
         parts_dir.mkdir(parents=True, exist_ok=True)
         meta_path = parts_dir / "meta.json"
         try:
             previous = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             previous = None
+        # Отсутствие/порча meta.json означает неизвестную версию файла:
+        # продолжать с чужих частей небезопасно — начинаем заново.
+        mismatch = not isinstance(previous, dict)
         if isinstance(previous, dict):
             mismatch = previous.get("total") != total
             for key, current in zip(("etag", "last-modified"), validator, strict=True):
                 stored = previous.get(key)
                 if stored and current and stored != current:
                     mismatch = True
-            if mismatch:
-                for old in parts_dir.glob("part-*"):
-                    old.unlink(missing_ok=True)
-        meta_path.write_text(
-            json.dumps({
-                "total": total,
-                "etag": validator[0],
-                "last-modified": validator[1],
-            }),
-            encoding="utf-8",
-        )
+        if mismatch:
+            for old in parts_dir.glob("part-*"):
+                old.unlink(missing_ok=True)
+
+        # Атомарная замена: прерванная запись не оставит полузаписанную meta.json.
+        tmp_meta = meta_path.with_name(meta_path.name + ".tmp")
+        try:
+            tmp_meta.write_text(
+                json.dumps({
+                    "total": total,
+                    "etag": validator[0],
+                    "last-modified": validator[1],
+                }),
+                encoding="utf-8",
+            )
+            tmp_meta.replace(meta_path)
+        finally:
+            tmp_meta.unlink(missing_ok=True)
         return [parts_dir / f"part-{index:02d}" for index in range(count)]
 
     def _download_segments(
