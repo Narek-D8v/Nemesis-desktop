@@ -30,8 +30,12 @@ from nemus.utils.logger import logger
 PAGE_LOAD_TIMEOUT_MS = 30_000
 #: таймаут ожидания скачивания и навигации загрузчика, мс
 DOWNLOAD_TIMEOUT_MS = int(TIMEOUT * 1000)
-#: размер чанка при чтении сохранённого файла
+#: размер чанка при копировании файла из временной папки Playwright
 _HASH_CHUNK_SIZE = 64 * 1024
+
+
+class _TooLarge(Exception):
+    """Скачанный файл больше лимита: копирование остановлено."""
 
 
 class PlaywrightOpenTool(Tool):
@@ -226,10 +230,25 @@ class BrowserDownloadFileTool(Tool):
                         if selector:
                             page.click(selector, timeout=DOWNLOAD_TIMEOUT_MS)
                     download = info.value
-                    # Пишем во временный файл: неполная загрузка не станет файлом.
-                    download.save_as(str(partial))
+                    source_raw = download.path()
+                    if not source_raw:
+                        raise OSError("Playwright не предоставил путь к файлу")
+                    # Копируем из временного файла Playwright порциями: лимит
+                    # проверяется до создания .part и на каждом чанке.
+                    size, sha256 = self._copy_bounded(
+                        Path(source_raw), partial, limit
+                    )
                 finally:
                     browser.close()
+        except _TooLarge:
+            partial.unlink(missing_ok=True)
+            manifest.unlink(missing_ok=True)
+            message = (
+                f"Файл больше лимита {limit_mb} МБ — копирование остановлено, "
+                "частичный файл удалён."
+            )
+            emit("error", message=message)
+            return ToolResult.failure(message)
         except Exception as exc:  # noqa: BLE001
             partial.unlink(missing_ok=True)
             manifest.unlink(missing_ok=True)
@@ -245,22 +264,6 @@ class BrowserDownloadFileTool(Tool):
             return ToolResult.failure(message)
 
         try:
-            size = partial.stat().st_size
-            if size > limit:
-                partial.unlink(missing_ok=True)
-                manifest.unlink(missing_ok=True)
-                message = (
-                    f"Файл больше лимита {limit_mb} МБ — загрузка прервана, "
-                    "частичный файл удалён."
-                )
-                emit("error", message=message)
-                return ToolResult.failure(message)
-
-            digest = hashlib.sha256()
-            with partial.open("rb") as source:
-                while chunk := source.read(_HASH_CHUNK_SIZE):
-                    digest.update(chunk)
-            sha256 = digest.hexdigest()
             _write_manifest(target, sha256)
             partial.replace(target)
         except OSError as exc:
@@ -278,6 +281,24 @@ class BrowserDownloadFileTool(Tool):
             f"SHA-256: {sha256}\n"
             f"Источник: {raw_url}"
         )
+
+    @staticmethod
+    def _copy_bounded(source: Path, target: Path, limit: int) -> tuple[int, str]:
+        """Копирует временный файл Playwright в .part, не превышая лимит."""
+        declared = source.stat().st_size
+        if declared > limit:
+            raise _TooLarge
+        digest = hashlib.sha256()
+        done = 0
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as incoming, target.open("wb") as outgoing:
+            while chunk := incoming.read(_HASH_CHUNK_SIZE):
+                done += len(chunk)
+                if done > limit:
+                    raise _TooLarge
+                digest.update(chunk)
+                outgoing.write(chunk)
+        return done, digest.hexdigest()
 
 
 def browser_tools() -> list[Tool]:

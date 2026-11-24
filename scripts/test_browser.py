@@ -96,16 +96,26 @@ def _remove_fake_playwright() -> None:
 
 
 class _FakeDownload:
-    """Заглушка ``Download``: save_as пишет заданные байты в .part."""
+    """Заглушка ``Download``: path() отдаёт файл для потокового копирования."""
 
     def __init__(self, payload: bytes) -> None:
-        self.payload = payload
         self.suggested_filename = "setup.exe"
-        self.saved: list[str] = []
+        self.path_calls = 0
+        self._tmp = tempfile.TemporaryDirectory()
+        self._source = Path(self._tmp.name) / "download.bin"
+        self._source.write_bytes(payload)
+
+    def path(self) -> str:
+        self.path_calls += 1
+        return str(self._source)
 
     def save_as(self, path: str) -> None:
-        self.saved.append(path)
-        Path(path).write_bytes(self.payload)
+        raise AssertionError(
+            "save_as копирует весь файл до проверки лимита — использовать path()"
+        )
+
+    def cleanup(self) -> None:
+        self._tmp.cleanup()
 
 
 class _FakeDownloadInfo:
@@ -227,16 +237,16 @@ def test_browser_download_saves_file_and_publishes(tmp_path: Path) -> None:
     finally:
         unsubscribe_download(token)
         _remove_fake_playwright()
+        download.cleanup()
 
     assert result.ok, result.content
     assert page.calls == ["expect_download", "goto"], page.calls
+    assert download.path_calls == 1, download.path_calls
     target = tool.root / "setup.exe"
     assert target.read_bytes() == payload
     assert (tool.root / "setup.exe.sha256").read_text() == (
         hashlib.sha256(payload).hexdigest()
     )
-    assert len(download.saved) == 1, download.saved
-    assert download.saved[0] == str(tool.root / "setup.exe.part")
     assert not (tool.root / "setup.exe.part").exists()
     assert seen and all(event.kind == "browser" for event in seen)
     assert {event.phase for event in seen} >= {"start", "done"}
@@ -303,6 +313,7 @@ def test_browser_download_uses_selector_and_reports_progress(tmp_path: Path) -> 
     finally:
         unsubscribe_download(token)
         _remove_fake_playwright()
+        download.cleanup()
     assert result.ok, result.content
     assert page.calls == ["expect_download", "goto", "click:#download"], page.calls
     assert [event.phase for event in seen] == ["start", "done"], seen
@@ -323,12 +334,17 @@ def test_browser_download_rejects_http_and_oversize(tmp_path: Path) -> None:
         big = tool.execute("https://example.test/setup.exe", "setup.exe", max_mb=1)
     finally:
         _remove_fake_playwright()
+        download.cleanup()
     assert not big.ok, big.content
     assert "лимит" in big.content.lower(), big.content
+    assert "копирован" in big.content.lower(), big.content
+    assert download.path_calls == 1, download.path_calls
+    # Лимит проверяется до копирования: в data/downloads нет даже .part.
     assert not (tool.root / "setup.exe").exists()
     assert not (tool.root / "setup.exe.part").exists()
     assert not (tool.root / "setup.exe.sha256").exists()
-    print("ok  http запрещён, файл больше лимита удалён")
+    assert not list(tool.root.iterdir()), list(tool.root.iterdir())
+    print("ok  http запрещён, лимит проверен до копирования в data/downloads")
 
 
 def test_browser_download_registered() -> None:
