@@ -16,12 +16,21 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nemus.config import Config  # noqa: E402
 from nemus.core.diary import DiaryBook  # noqa: E402
 from nemus.core.download_events import (  # noqa: E402
     DownloadEvent,
+    publish_download,
+    render_progress_bar,
     subscribe_download,
     unsubscribe_download,
 )
@@ -813,6 +822,77 @@ def test_progress_download_line() -> None:
     assert bot.edits and "50%" in bot.edits[-1], bot.edits
     assert bot.edits[-1].count("model.gguf") == 1, bot.edits[-1]
     print("ok  Telegram: прогресс модели заменяет строку статуса")
+
+
+def test_telegram_download_bar_uses_task_id() -> None:
+    """Параллельные загрузки получают отдельные строки в одном статусе."""
+    import asyncio
+
+    class _ProgressStub:
+        def __init__(self) -> None:
+            self.chat_id = 7
+            self.lines: list[tuple[str, bool]] = []
+
+        async def download(self, text: str, *, force: bool = False) -> None:
+            self.lines.append((text, force))
+
+    loop = asyncio.new_event_loop()
+    progress = _ProgressStub()
+    bot = object.__new__(TelegramBot)
+    bot._loop = loop
+    bot._active_progress = progress
+    bot._download_rows = {}
+    bot._chat_id = progress.chat_id
+    bot._notify_chat_id = progress.chat_id
+    token = subscribe_download(bot._on_download_event)
+    try:
+        publish_download(
+            DownloadEvent(
+                kind="file",
+                phase="progress",
+                name="setup.exe",
+                done=84,
+                total=125,
+                task_id="t1",
+            )
+        )
+        publish_download(
+            DownloadEvent(
+                kind="file",
+                phase="progress",
+                name="driver.zip",
+                done=10,
+                total=100,
+                task_id="t2",
+            )
+        )
+        loop.run_until_complete(asyncio.sleep(0.01))
+        assert set(bot._download_rows) == {
+            (7, "t1"),
+            (7, "t2"),
+        }, bot._download_rows
+        assert progress.lines, "событие должно дойти до progress.download()"
+        text = progress.lines[-1][0]
+        assert len(text.splitlines()) == 2, text
+        assert "setup.exe" in text and "driver.zip" in text, text
+        assert render_progress_bar(67) in text, text
+
+        publish_download(
+            DownloadEvent(
+                kind="file",
+                phase="done",
+                name="setup.exe",
+                done=125,
+                total=125,
+                task_id="t1",
+            )
+        )
+        loop.run_until_complete(asyncio.sleep(0.01))
+        assert progress.lines[-1][1] is True, "финальный рендер не должен троттлиться"
+    finally:
+        unsubscribe_download(token)
+        loop.close()
+    print("ok  Telegram: параллельные загрузки показаны по task_id")
 
 
 def test_retry_and_new_callbacks() -> None:
@@ -3964,6 +4044,7 @@ def main() -> int:
     test_rich_markdown()
     test_rich_final_fallback()
     test_progress_download_line()
+    test_telegram_download_bar_uses_task_id()
     test_draft_progress()
     test_draft_keepalive_fallback()
     test_run_task_uses_draft()

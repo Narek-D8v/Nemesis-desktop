@@ -51,6 +51,12 @@ from nemus.core.cleanup import (
 )
 from nemus.core.diary import diary_access
 from nemus.core.document_text import SUPPORTED_SUFFIXES, document_context
+from nemus.core.download_events import (
+    DownloadEvent,
+    render_progress_bar,
+    subscribe_download,
+    unsubscribe_download,
+)
 from nemus.core.emotions import EmotionManager, EmotionState, summary_html
 from nemus.core.language import looks_like_skills_question
 from nemus.core.proactive import compose_proactive_message
@@ -465,10 +471,10 @@ class _Progress:
         self._notes = self._notes[-6:]
         await self._flush()
 
-    async def download(self, text: str) -> None:
-        """Строка прогресса скачивания модели (не дублируется в notes)."""
+    async def download(self, text: str, *, force: bool = False) -> None:
+        """Строка прогресса загрузки (не дублируется в notes)."""
         self._download = text
-        await self._flush()
+        await self._flush(force=force)
 
     async def tail(self, text: str, *, force: bool = False) -> None:
         self._tail = (text or "").strip()
@@ -576,12 +582,12 @@ class _DraftProgress:
         self._notes = self._notes[-6:]
         await self._flush()
 
-    async def download(self, text: str) -> None:
+    async def download(self, text: str, *, force: bool = False) -> None:
         if self._fallback is not None:
-            await self._fallback.download(text)
+            await self._fallback.download(text, force=force)
             return
         self._download = text
-        await self._flush()
+        await self._flush(force=force)
 
     async def tail(self, text: str, *, force: bool = False) -> None:
         if self._fallback is not None:
@@ -724,6 +730,9 @@ class TelegramBot:
             )
         self._loop: asyncio.AbstractEventLoop | None = None
         self._download_listener = self._on_model_download_event
+        #: единая шина прогресса: строки загрузок по (чат, task_id)
+        self._download_rows: dict[tuple[int, str], str] = {}
+        self._download_token = subscribe_download(self._on_download_event)
         self._app: Any = None
         #: raw-адаптер Bot API 10.3/10.4 (создаётся в потоке бота)
         self._api: TelegramAdvancedAPI | None = None
@@ -1576,6 +1585,7 @@ class TelegramBot:
         """Останавливает polling и закрывает поток бота."""
         global _active_bot, _last_error
         self._stopping.set()
+        self._unsubscribe_download()
         # Просим агентский поток завершиться, а не только глушим polling.
         stop_event = self._stop_event
         if stop_event is not None:
@@ -1914,46 +1924,90 @@ class TelegramBot:
             if not self._ready.is_set():
                 self._ready.set()
 
-    # ------------------------------------------------ прогресс моделей
+    # -------------------------------------------------- прогресс загрузок
+    @staticmethod
+    def _model_to_download(event: Any) -> DownloadEvent:
+        """Приводит legacy-событие GGUF к общей шине прогресса."""
+        return DownloadEvent(
+            kind="model",
+            phase=getattr(event, "phase", "progress"),
+            name=getattr(event, "name", "") or getattr(event, "filename", "модель"),
+            done=getattr(event, "done", 0),
+            total=getattr(event, "total", 0),
+            path=getattr(event, "path", ""),
+            message=getattr(event, "message", ""),
+        )
+
     def _on_model_download_event(self, event: Any) -> None:
         """Событие загрузчика из чужого потока → в asyncio-цикл бота."""
+        self._on_download_event(self._model_to_download(event))
+
+    async def _update_model_download(self, event: Any) -> None:
+        """Обратная совместимость: старый вызов теперь идёт через общую шину."""
+        await self._update_download(self._model_to_download(event))
+
+    def _on_download_event(self, event: DownloadEvent) -> None:
+        """Событие загрузки из чужого потока → в asyncio-цикл бота."""
         loop = self._loop
         if loop is None or loop.is_closed():
             return
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._update_model_download(event), loop
-            )
+            asyncio.run_coroutine_threadsafe(self._update_download(event), loop)
         except RuntimeError:
             pass
 
-    async def _update_model_download(self, event: Any) -> None:
-        """Обновляет статус «Думаю…» прогрессом скачивания GGUF."""
+    @staticmethod
+    def _download_line(event: DownloadEvent) -> str:
+        """Одна строка статуса с полосой из 20 символов."""
+        name = (event.name or "файл")[:90]
+        if event.phase == "start":
+            if event.kind == "model":
+                return f"⬇️ Скачиваю модель {name}"
+            return f"⬇️ {name}: {render_progress_bar(None)}"
+        if event.phase == "done":
+            if event.kind == "model":
+                return f"✅ Модель скачана: {name}"
+            return f"✅ {name}: {render_progress_bar(100)}"
+        if event.phase == "cancelled":
+            return f"⏹ {name}: загрузка отменена"
+        if event.phase == "error":
+            detail = (event.message or "ошибка загрузки")[:200]
+            return f"⚠️ {name}: {detail}"
+        from nemus.core.providers.hf_download import format_bytes
+
+        bar = render_progress_bar(event.percent)
+        if event.percent is None:
+            return f"⬇️ {name}: {bar} ({format_bytes(event.done)})"
+        return (
+            f"⬇️ {name}: {bar} "
+            f"({format_bytes(event.done)} / {format_bytes(event.total)})"
+        )
+
+    async def _update_download(self, event: DownloadEvent) -> None:
+        """Обновляет строки прогресса в текущем «живом» сообщении."""
         progress = self._active_progress
         if progress is None:
             return
-        from nemus.core.providers.hf_download import format_bytes
+        chat_id = getattr(progress, "chat_id", None)
+        if chat_id is None:
+            chat_id = self._chat_id or self._notify_chat_id or 0
+        chat_id = int(chat_id)
+        key = (chat_id, event.task_id or "model")
+        self._download_rows[key] = self._download_line(event)
+        text = "\n".join(
+            line for (cid, _), line in self._download_rows.items() if cid == chat_id
+        )
+        force = event.phase in {"done", "error", "cancelled"}
+        await progress.download(text, force=force)
+        if force:
+            self._download_rows.pop(key, None)
 
-        name = (getattr(event, "name", "") or "модель")[:90]
-        if event.phase == "start":
-            await progress.download(f"⬇️ Скачиваю модель {name}")
-        elif event.phase == "progress":
-            percent = getattr(event, "percent", None)
-            if percent is None:
-                text = f"⬇️ {name}: {format_bytes(event.done)}"
-            else:
-                text = (
-                    f"⬇️ {name}: {percent}% "
-                    f"({format_bytes(event.done)} / {format_bytes(event.total)})"
-                )
-            await progress.download(text)
-        elif event.phase == "done":
-            await progress.download(f"✅ Модель скачана: {name}")
-        elif event.phase == "cancelled":
-            await progress.download("⏹ Загрузка модели отменена")
-        elif event.phase == "error":
-            detail = (getattr(event, "message", "") or "")[:200]
-            await progress.download(f"⚠️ Не удалось скачать модель: {detail}")
+    def _unsubscribe_download(self) -> None:
+        """Снимает подписку с единой шины (идемпотентно)."""
+        token = getattr(self, "_download_token", "")
+        if token:
+            unsubscribe_download(token)
+            self._download_token = ""
 
     def _mask(self, text: str) -> str:
         """Убирает токен из текста ошибки, чтобы он не попал в лог и GUI."""
@@ -1965,6 +2019,7 @@ class TelegramBot:
         from nemus.core.providers.hf_download import unsubscribe_model_download
 
         unsubscribe_model_download(self._download_listener)
+        self._unsubscribe_download()
         self._stop_webapp()
         loop = self._loop
         self._loop = None

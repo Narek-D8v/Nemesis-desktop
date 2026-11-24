@@ -24,6 +24,7 @@ from PySide6.QtCore import QTimer, QUrl  # noqa: E402
 
 from nemus.config import get_config  # noqa: E402
 from nemus.core.agent import Agent  # noqa: E402
+from nemus.core.download_events import DownloadEvent, publish_download  # noqa: E402
 from nemus.core.factory import Core  # noqa: E402
 from nemus.core.llm import LLMClient, StreamEvent  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
@@ -93,6 +94,24 @@ def main() -> int:
     core = build_fake_core()
     window = MainWindow(core)
     window.show()
+
+    publish_download(
+        DownloadEvent(
+            kind="file",
+            phase="progress",
+            name="setup.exe",
+            done=84,
+            total=125,
+            task_id="gui-file",
+        )
+    )
+    QApplication.processEvents()
+    assert "setup.exe" in window.download_label.text(), (
+        window.download_label.text()
+    )
+    assert "67%" in window.download_label.text(), window.download_label.text()
+    assert window.download_bar.value() == 670, window.download_bar.value()
+    print("ok  GUI: прогресс файла показывает имя и проценты")
 
     window.submit_text("Сколько будет 7*6?")
     # пока агент думает, в чате должен быть статус «Думаю…», а не «Слушаю…»
