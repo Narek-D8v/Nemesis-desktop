@@ -3613,18 +3613,28 @@ def test_torrent_tool_publishes_progress(tmp_path: Path) -> None:
         def name(self) -> str:
             return name
 
+    class _AddParams:
+        """libtorrent 2.x: add_torrent_params — объект с атрибутами."""
+
+        def __init__(self, url: str = "") -> None:
+            self.url = url
+            self.save_path = ""
+            self.ti: object = None
+
     class _FakeSession:
         def __init__(self, *args: object, **kwargs: object) -> None:
             self.params: object = None
 
         def add_torrent(self, params: object) -> _FakeHandle:
             self.params = params
-            assert params.get("save_path"), params
-            return _FakeHandle(Path(params["save_path"]))
+            assert isinstance(params, _AddParams), params
+            assert params.save_path, params
+            return _FakeHandle(Path(params.save_path))
 
     fake_lt = SimpleNamespace(
         session=_FakeSession,
-        parse_magnet_uri=lambda uri: {"url": uri},
+        add_torrent_params=_AddParams,
+        parse_magnet_uri=lambda uri: _AddParams(uri),
     )
     tool = torrent_mod.TorrentDownloadTool()
     tool.root = tmp_path / "downloads"
@@ -3659,6 +3669,96 @@ def test_torrent_tool_publishes_progress(tmp_path: Path) -> None:
 
     assert "torrent_download" in {item.name for item in all_builtin_tools()}
     print("ok  торрент: файл, SHA-256 и события kind=torrent")
+
+
+def test_torrent_add_uses_libtorrent_2x_attribute_api(tmp_path: Path) -> None:
+    """Magnet и .torrent собирают add_torrent_params через атрибуты."""
+    from unittest.mock import patch
+
+    from nemus.core.tools import torrents as torrent_mod
+
+    class _Params:
+        def __init__(self) -> None:
+            self.save_path = ""
+            self.ti: object = None
+
+    class _Session:
+        def __init__(self) -> None:
+            self.seen: list[_Params] = []
+
+        def add_torrent(self, params: object) -> object:
+            assert isinstance(params, _Params), params
+            self.seen.append(params)
+            return params
+
+    info = object()
+    lt = SimpleNamespace(
+        add_torrent_params=_Params,
+        parse_magnet_uri=lambda uri: _Params(),
+        torrent_info=lambda raw: info,
+    )
+    session = _Session()
+    tool = torrent_mod.TorrentDownloadTool
+
+    magnet = tool._add(
+        session, lt, "magnet", "magnet:?xt=urn:btih:test", tmp_path, 1024
+    )
+    assert magnet.save_path == str(tmp_path), magnet
+
+    with patch.object(tool, "_fetch_metadata", staticmethod(lambda url, limit: b"meta")):
+        torrent = tool._add(
+            session,
+            lt,
+            "torrent",
+            "https://example.test/file.torrent",
+            tmp_path,
+            1024,
+        )
+    assert torrent.save_path == str(tmp_path), torrent
+    assert torrent.ti is info, torrent
+    assert len(session.seen) == 2, session.seen
+    print("ok  торрент: libtorrent 2.x использует add_torrent_params-атрибуты")
+
+
+def test_torrent_add_falls_back_to_legacy_dict_params(tmp_path: Path) -> None:
+    """Резервный dict API 1.x остаётся рабочим без add_torrent_params."""
+    from unittest.mock import patch
+
+    from nemus.core.tools import torrents as torrent_mod
+
+    class _Session:
+        def __init__(self) -> None:
+            self.seen: list[object] = []
+
+        def add_torrent(self, params: object) -> object:
+            self.seen.append(params)
+            return params
+
+    info = object()
+    lt = SimpleNamespace(
+        parse_magnet_uri=lambda uri: {"url": uri},
+        torrent_info=lambda raw: info,
+    )
+    session = _Session()
+    tool = torrent_mod.TorrentDownloadTool
+
+    magnet = tool._add(
+        session, lt, "magnet", "magnet:?xt=urn:btih:test", tmp_path, 1024
+    )
+    assert magnet == {"url": "magnet:?xt=urn:btih:test", "save_path": str(tmp_path)}
+
+    with patch.object(tool, "_fetch_metadata", staticmethod(lambda url, limit: b"meta")):
+        torrent = tool._add(
+            session,
+            lt,
+            "torrent",
+            "https://example.test/file.torrent",
+            tmp_path,
+            1024,
+        )
+    assert torrent == {"ti": info, "save_path": str(tmp_path)}
+    assert len(session.seen) == 2, session.seen
+    print("ok  торрент: резерв dict API 1.x для magnet и .torrent")
 
 
 def test_torrent_inline_button_gate() -> None:
@@ -3848,6 +3948,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="nemus_tg_torrent_") as tmp:
         folder = Path(tmp)
         test_torrent_tool_publishes_progress(folder / "ok")
+        test_torrent_add_uses_libtorrent_2x_attribute_api(folder / "api2")
+        test_torrent_add_falls_back_to_legacy_dict_params(folder / "api1")
         test_torrent_input_and_dependency_guards(folder / "guards")
     test_torrent_inline_button_gate()
     test_reaction_list_complete()

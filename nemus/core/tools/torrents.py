@@ -266,11 +266,39 @@ class TorrentDownloadTool(Tool):
         """Добавляет magnet или локально загруженный ``.torrent`` в сессию."""
         if kind == "magnet":
             params = lt.parse_magnet_uri(source)
-            params["save_path"] = str(root)
-            return session.add_torrent(params)
+            return session.add_torrent(
+                TorrentDownloadTool._set_save_path(params, root)
+            )
         metadata = TorrentDownloadTool._fetch_metadata(source, limit)
         info = lt.torrent_info(metadata)
-        return session.add_torrent({"ti": info, "save_path": str(root)})
+        return session.add_torrent(
+            TorrentDownloadTool._params_with_info(lt, info, root)
+        )
+
+    @staticmethod
+    def _set_save_path(params: Any, root: Path) -> Any:
+        """Пишет save_path атрибутом (2.x) или ключом dict (1.x)."""
+        try:
+            params.save_path = str(root)
+        except AttributeError:
+            if not isinstance(params, dict):
+                raise
+            params["save_path"] = str(root)
+        return params
+
+    @staticmethod
+    def _params_with_info(lt: Any, info: Any, root: Path) -> Any:
+        """Собирает add_torrent_params 2.x, при отсутствии — dict 1.x."""
+        factory = getattr(lt, "add_torrent_params", None)
+        if callable(factory):
+            try:
+                params = factory()
+                params.ti = info
+                params.save_path = str(root)
+                return params
+            except (AttributeError, TypeError):
+                pass
+        return {"ti": info, "save_path": str(root)}
 
     @staticmethod
     def _fetch_metadata(url: str, limit: int) -> bytes:
