@@ -740,6 +740,34 @@ def test_install_verified_requires_confirmation(tmp_path: Path) -> None:
     print("ok  install_verified: подтверждение, верификация и запуск процессов")
 
 
+def test_install_verified_reports_installer_failure(tmp_path: Path) -> None:
+    """Код ошибки установщика должен становиться failure, а не маскироваться нулём."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    installer = tmp_path / "setup.exe"
+    installer.write_bytes(PAYLOAD)
+    tool = system.InstallVerifiedTool()
+
+    with (
+        patch.object(
+            system.VerifyInstallerTool,
+            "execute",
+            return_value=ToolResult.success("verdict: pass"),
+        ),
+        patch.object(
+            system,
+            "run_capture",
+            return_value=CapturedRun(3, b"installer failed", b"", False),
+        ) as runner,
+    ):
+        failed = tool.execute(path=str(installer), confirmed=True)
+        assert failed.ok is False, failed.content
+        assert "Код: 3" in failed.content, failed.content
+        assert "ошибкой" in failed.content.casefold(), failed.content
+        command = runner.call_args.args[0][-1]
+        assert "-PassThru" in command and "exit $process.ExitCode" in command, command
+    print("ok  install_verified: код ошибки установщика не маскируется")
+
+
 def test_install_tools_are_registered() -> None:
     """Оба инструмента доступны агенту через общий реестр."""
     from nemus.core.tools.all import all_builtin_tools  # noqa: PLC0415
@@ -771,6 +799,7 @@ def main() -> None:
         test_verify_installer_policy(root / "verify")
         test_authenticode_parses_powershell_status()
         test_install_verified_requires_confirmation(root / "install")
+        test_install_verified_reports_installer_failure(root / "install-failure")
         test_install_tools_are_registered()
     print("все тесты установки прошли")
 

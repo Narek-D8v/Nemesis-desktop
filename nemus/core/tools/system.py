@@ -717,7 +717,10 @@ class InstallVerifiedTool(Tool):
         target = Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
         suffix = target.suffix.casefold()
         if suffix == ".exe":
-            command = f"Start-Process -FilePath {_ps_literal(str(target))} -Wait"
+            command = (
+                f"$process = Start-Process -FilePath {_ps_literal(str(target))} "
+                "-Wait -PassThru; exit $process.ExitCode"
+            )
             argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
         elif suffix == ".msi":
             argv = ["msiexec.exe", "/i", str(target), "/qb"]
