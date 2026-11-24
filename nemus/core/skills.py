@@ -504,6 +504,12 @@ SKILL_TRIGGERS: dict[str, tuple[str, ...]] = {
     "hyperframes": (
         "видео", "ролик", "клип", "анимац", "титр", "video", "motion",
     ),
+    "software-install": (
+        "установи", "установить", "установка", "поставь", "скачай прилож",
+        "скачать прилож", "скачай и установи", "обнови прилож", "удали прилож",
+        "winget", "steam", "epic games", "установщик", "install app",
+        "install game", "install ", "uninstall ",
+    ),
     "brainstorming": (
         "брейншторм", "мозговой штурм", "штурм идей", "brainstorm", "придумай идеи",
     ),

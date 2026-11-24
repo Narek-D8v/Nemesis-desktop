@@ -210,7 +210,7 @@ class BaseRealtimeSession(ABC):
         tool = self.registry.get(name)
         if tool is None:
             return ToolResult.failure(f"Инструмент '{name}' не найден.")
-        decision = self.permissions.check(tool)
+        decision = self.permissions.check(tool, args)
         if decision == Decision.DENY:
             return ToolResult.failure(f"Инструмент '{name}' запрещён политикой.")
         if decision == Decision.ASK:

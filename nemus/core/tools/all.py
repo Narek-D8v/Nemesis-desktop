@@ -5,6 +5,7 @@ from __future__ import annotations
 from nemus.core.tools.base import Tool
 from nemus.core.tools.basic import basic_tools
 from nemus.core.tools.browser import browser_tools
+from nemus.core.tools.downloads import download_tools
 from nemus.core.tools.files import file_tools
 from nemus.core.tools.keyboard import keyboard_tools
 from nemus.core.tools.presentations import presentation_tools
@@ -23,6 +24,7 @@ def all_builtin_tools() -> list[Tool]:
     tools.extend(shell_tools())
     tools.extend(python_tools())
     tools.extend(web_tools())
+    tools.extend(download_tools())
     tools.extend(system_tools())
     tools.extend(keyboard_tools())
     tools.extend(browser_tools())

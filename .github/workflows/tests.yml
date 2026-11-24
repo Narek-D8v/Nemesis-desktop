@@ -63,6 +63,7 @@ jobs:
           python scripts/test_reminders.py
           python scripts/test_notes.py
           python scripts/test_skills.py
+          python scripts/test_software_install.py
           python scripts/test_skill_store.py
           python scripts/test_content_tools.py
           python scripts/test_context_budget.py

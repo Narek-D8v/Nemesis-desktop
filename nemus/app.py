@@ -267,7 +267,7 @@ class NemusApp:
                 f"Навык «{skill.name}»: инструмент '{skill.tool}' не найден."
             )
             return False
-        if self.core.permissions.check(tool) != Decision.ALLOW:
+        if self.core.permissions.check(tool, skill.arguments) != Decision.ALLOW:
             # Опасное действие — пусть агент покажет подтверждение.
             logger.info(f"Навык «{skill.name}» требует подтверждения — отдаю агенту.")
             return False

@@ -316,6 +316,7 @@ def test_gui_tab(tmp: Path) -> None:
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
+            "software-install",
             "vtoroy-skill",
         }, list(dlg._skill_checks)
         assert dlg._skill_checks["pdf-instrumenty"].isChecked()  # не отключён
@@ -331,6 +332,7 @@ def test_gui_tab(tmp: Path) -> None:
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
+            "software-install",
             "vtoroy-skill",
         }
         # запись отключённых — ровно то, что не отмечено галочкой

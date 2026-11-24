@@ -236,6 +236,9 @@ class ToolsConfig(BaseModel):
     permission_mode: PermissionMode = "smart"
     auto_allow: list[str] = Field(default_factory=list)
     deny: list[str] = Field(default_factory=list)
+    #: команды, меняющие систему (winget/msiexec/pip и т.п.), требуют подтверждения
+    #: даже в full-auto; отключение — осознанный выбор пользователя
+    confirm_installs: bool = True
     #: рабочая папка для собственных скриптов и файлов ассистента
     workspace: str = "data/workspace"
     #: разрешить инструментам писать/удалять файлы вне рабочей папки
