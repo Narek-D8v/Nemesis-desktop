@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx  # noqa: E402
 
 from nemus.config import Config  # noqa: E402
+from nemus.core.agent import build_system_prompt  # noqa: E402
 from nemus.core.download_events import (  # noqa: E402
     DownloadEvent,
     subscribe_download,
@@ -28,7 +29,7 @@ from nemus.core.download_events import (  # noqa: E402
 )
 from nemus.core.permissions import Decision, PermissionManager  # noqa: E402
 from nemus.core.skills import load_skills, match_skills  # noqa: E402
-from nemus.core.tools import downloads, system  # noqa: E402
+from nemus.core.tools import ToolRegistry, downloads, system  # noqa: E402
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult  # noqa: E402
 from nemus.core.tools.downloads import DownloadFileTool  # noqa: E402
 from nemus.core.tools.shell import CapturedRun  # noqa: E402
@@ -777,6 +778,18 @@ def test_install_tools_are_registered() -> None:
     print("ok  all_builtin_tools: verify_installer и install_verified зарегистрированы")
 
 
+def test_install_policy_text() -> None:
+    """Скилл и промпт называют цепочку загрузок и политику пиратских файлов."""
+    skill = next(s for s in load_skills() if s.name == "software-install")
+    for phrase in ("browser_download_file", "torrent_download", "инлайн"):
+        assert phrase in skill.body, (phrase, skill.body)
+
+    prompt = build_system_prompt(Config(), ToolRegistry())
+    for phrase in ("install_verified", "предупреждение", "Сам не ищи пиратские сборки"):
+        assert phrase in prompt, (phrase, prompt)
+    print("ok  policy: скилл и промпт описывают безопасную установку")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="nemus_install_") as tmp:
         root = Path(tmp)
@@ -801,6 +814,7 @@ def main() -> None:
         test_install_verified_requires_confirmation(root / "install")
         test_install_verified_reports_installer_failure(root / "install-failure")
         test_install_tools_are_registered()
+        test_install_policy_text()
     print("все тесты установки прошли")
 
 
