@@ -12,7 +12,15 @@ Content = str | list[dict[str, Any]] | None
 
 
 class ProviderError(RuntimeError):
-    """Ошибка обращения к провайдеру LLM."""
+    """Ошибка обращения к провайдеру LLM.
+
+    ``retryable`` — стоит ли повторить весь запрос позже: временные 429/503
+    лечатся паузой, а неверный ключ или кончившиеся кредиты — нет.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass

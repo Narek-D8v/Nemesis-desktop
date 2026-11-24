@@ -168,7 +168,7 @@ def test_run_token_ceiling_stops_task() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def stream(self, history: object, tools: object = None):
+        def stream(self, history: object, tools: object = None, **_: object):
             self.calls += 1
             yield StreamEvent(
                 kind="final",
@@ -193,6 +193,7 @@ def test_run_token_ceiling_stops_task() -> None:
         memory=None,
     )
     agent.max_run_tokens = 50
+    agent.token_extensions = 0  # проверяем жёсткий потолок, без продлений
     agent.max_steps = 5
     events = list(agent.run("работай"))
     assert fake.calls == 1, f"после потолка агент продолжил звать модель: {fake.calls}"
@@ -215,7 +216,7 @@ def test_promise_is_not_final() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def stream(self, history: object, tools: object = None):
+        def stream(self, history: object, tools: object = None, **_: object):
             self.calls += 1
             if self.calls == 1:
                 yield StreamEvent(
@@ -255,7 +256,7 @@ def test_access_denial_is_not_final() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def stream(self, history: object, tools: object = None):
+        def stream(self, history: object, tools: object = None, **_: object):
             self.calls += 1
             if self.calls == 1:
                 text = "У меня нет доступа к твоему компьютеру."
@@ -332,18 +333,36 @@ def test_fast_paths() -> None:
 
     class _NoLLM:
         def complete(self, *args: object, **kwargs: object):
-            raise AssertionError("прямое обращение не должно звать модель")
+            raise AssertionError("с выключенным характером обращение не зовёт модель")
 
+    instant_cfg = Config()
+    instant_cfg.character.enabled = False
     instant = Agent(
-        cfg,
+        instant_cfg,
         llm=_NoLLM(),  # type: ignore[arg-type]
         registry=ToolRegistry(),
-        permissions=PermissionManager(cfg),
+        permissions=PermissionManager(instant_cfg),
         memory=None,
     )
     events = list(instant.run("Немуся?"))
     assert [e.kind for e in events] == ["final"], [e.kind for e in events]
-    print("ok  быстрый путь: обращение мгновенно, короткий вопрос без инструментов")
+
+    # С включённым характером даже прямое обращение генерирует ИИ, иначе
+    # настроение и обида не слышны, а ответ повторяется слово в слово.
+    live_cfg = Config()
+    live_cfg.llm.fast_model = "gemini/gemini-3.5-flash-lite"
+    live_fake = _FakeFastLLM()
+    live_agent = Agent(
+        live_cfg,
+        llm=live_fake,  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(live_cfg),
+        memory=None,
+    )
+    events = list(live_agent.run("Немуся?"))
+    assert [e.kind for e in events] == ["final"], [e.kind for e in events]
+    assert len(live_fake.calls) == 1, "живое обращение должно идти в модель"
+    print("ok  быстрый путь: обращение живо при характере, без модели — только без него")
 
 
 def test_defaults_are_frugal() -> None:

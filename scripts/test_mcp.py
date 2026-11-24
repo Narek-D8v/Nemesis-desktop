@@ -237,8 +237,65 @@ def test_parse_claude_config() -> None:
     print("ok  parse_claude_config + неймспейсы")
 
 
+def test_parse_mcp_command() -> None:
+    """Вставленная команда, включая Smithery с --client claude, даёт сервер."""
+    from nemus.core.mcp import parse_mcp_command
+
+    cfg = parse_mcp_command(
+        "npx -y @smithery/cli install @goswamig/fetch-mcp --client claude"
+    )
+    assert cfg.command == "npx", cfg
+    assert cfg.args == ["-y", "@smithery/cli", "run", "@goswamig/fetch-mcp"]
+    assert cfg.name == "fetch mcp", cfg.name
+    assert cfg.enabled
+
+    latest = parse_mcp_command(
+        "npx -y @smithery/cli@latest install @redis/mcp-redis --client claude"
+    )
+    assert latest.args[-1] == "@redis/mcp-redis", latest.args
+
+    configured = parse_mcp_command(
+        "npx -y @smithery/cli install mcp-obsidian --client claude "
+        "--config '{\"vaultPath\":\"C:/vault\"}'"
+    )
+    assert configured.args[-2:] == [
+        "--config",
+        '{"vaultPath":"C:/vault"}',
+    ], configured.args
+
+    plain = parse_mcp_command(
+        "npx -y @modelcontextprotocol/server-filesystem C:/Projects"
+    )
+    assert plain.command == "npx"
+    assert plain.args == [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:/Projects",
+    ]
+    assert plain.name == "server filesystem", plain.name
+
+    uvx = parse_mcp_command("uvx mcp-server-git --repository C:/repo")
+    assert uvx.command == "uvx"
+    assert uvx.args == ["mcp-server-git", "--repository", "C:/repo"]
+
+    bad_commands = (
+        "",
+        "npx -y @smithery/cli install --client claude",
+        "npx -y @smithery/cli mcp add https://server.smithery.ai/exa --client claude",
+    )
+    for bad in bad_commands:
+        try:
+            parse_mcp_command(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"команда должна быть отклонена: {bad!r}")
+    print("ok  вставленная команда разбирается, Smithery install → stdio run")
+
+
 def main() -> int:
     test_parse_claude_config()
+    test_parse_mcp_command()
     test_mcp_tab_gui()
 
     try:

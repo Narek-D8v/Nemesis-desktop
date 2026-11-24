@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import sys
 import threading
+import time
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -71,6 +72,25 @@ class ReminderBridge(QObject):
     fired = Signal(str)
 
 
+class AutopilotBridge(QObject):
+    """Мост событий автопилота (фоновый поток → главный поток Qt)."""
+
+    event = Signal(object)
+
+
+class EmotionBridge(QObject):
+    """Мост инициативных сообщений эмоций в главный поток Qt."""
+
+    message = Signal(str)
+
+
+def _quiet_hours(start: str, end: str) -> bool:
+    """Тихие часы для голосовых объявлений."""
+    from nemus.core.autopilot import in_quiet_hours
+
+    return in_quiet_hours(start, end)
+
+
 _STATE_MAP = {
     RealtimeState.CONNECTING: AssistState.THINKING,
     RealtimeState.READY: AssistState.LISTENING,
@@ -132,7 +152,8 @@ class NemusApp:
         self.qapp.setQuitOnLastWindowClosed(False)
         self.qapp.aboutToQuit.connect(self._shutdown)
 
-        self.core: Core = build_core(self.config)
+        # MCP подключается в фоне: окно не должно ждать stdio-серверы.
+        self.core: Core = build_core(self.config, mcp_async=True)
         self.window = MainWindow(self.core, self.config.assistant.name)
         self._apply_window_flags()
         self.window.listen_toggled.connect(self._handle_listen_toggle)
@@ -159,6 +180,16 @@ class NemusApp:
         )
         self._setup_tts()
 
+        # --- проактивный автопилот ---
+        self.autopilot: Any = None
+        self.autopilot_bridge = AutopilotBridge(self.window)
+        self.autopilot_bridge.event.connect(self._on_autopilot_event)
+
+        # --- инициатива по скуке (то же, что в Telegram) ---
+        self.emotions: Any = None
+        self.emotion_bridge = EmotionBridge(self.window)
+        self.emotion_bridge.message.connect(self._on_proactive_message)
+
         # --- режим реального времени ---
         self.realtime = None
         self.rt_bridge = RealtimeBridge(self.window, self.window)
@@ -168,6 +199,10 @@ class NemusApp:
         self.rt_bridge.state_changed.connect(self._on_realtime_state)
         self.rt_bridge.error.connect(self._on_realtime_error)
         self.window.realtime_toggled.connect(self._handle_realtime_toggle)
+        self._companion_last = time.monotonic()
+        self._companion_timer = QTimer(self.window)
+        self._companion_timer.setInterval(3000)
+        self._companion_timer.timeout.connect(self._companion_tick)
 
         self.tray: Tray | None = None
         self._setup_tray()
@@ -218,6 +253,132 @@ class NemusApp:
         self._setup_telegram()
         self._start_telegram()
 
+    def _start_autopilot(self) -> None:
+        """Поднимает watcher-сервис; выключенный режим просто спит."""
+        if self.autopilot is not None:
+            return
+        try:
+            from nemus.core.autopilot import Autopilot
+
+            self.autopilot = Autopilot(
+                self.config,
+                on_event=self.autopilot_bridge.event.emit,
+                autonomy_message=self._autonomy_message,
+            )
+            self.autopilot.start()
+        except Exception:  # noqa: BLE001
+            logger.exception("Автопилот: не удалось запустить")
+            self.autopilot = None
+
+    def _stop_autopilot(self) -> None:
+        if self.autopilot is not None:
+            try:
+                self.autopilot.close()
+            except Exception:  # noqa: BLE001
+                logger.exception("Автопилот: не удалось остановить")
+            self.autopilot = None
+
+    def _start_emotions(self) -> None:
+        """Поднимает фоновый менеджер «соскучилась» в GUI."""
+        if self.emotions is not None or not self.config.character.enabled:
+            return
+        try:
+            from nemus.core.emotions import EmotionManager
+            from nemus.core.proactive import history_excerpt
+
+            self.emotions = EmotionManager(
+                self.config,
+                on_reach_out=self._on_emotion_reach_out,
+                llm=self.core.llm,
+                history=lambda: history_excerpt(self.core.agent.history, 8),
+                diary=self.core.diary,
+            )
+            self.emotions.start()
+        except Exception:  # noqa: BLE001
+            logger.exception("Эмоции GUI: не удалось запустить менеджер")
+            self.emotions = None
+
+    def _stop_emotions(self) -> None:
+        if self.emotions is None:
+            return
+        try:
+            self.emotions.stop()
+        except Exception:  # noqa: BLE001
+            logger.exception("Эмоции GUI: не удалось остановить менеджер")
+        self.emotions = None
+
+    def _on_emotion_reach_out(self, prompt: str, state: Any) -> str | bool:
+        """Генерирует инициативу; показ в чате — через Qt-сигнал."""
+        from nemus.core.proactive import compose_proactive_message, history_excerpt
+
+        history = history_excerpt(getattr(self.core.agent, "history", []), 8)
+        text = compose_proactive_message(
+            self.config, self.core.llm, history, state, prompt
+        )
+        if not text:
+            return False
+        self.emotion_bridge.message.emit(text)
+        return text
+
+    def _on_proactive_message(self, text: str) -> None:
+        """Инициатива в главном потоке: чат, история диалога и озвучка."""
+        body = (text or "").strip()
+        if not body:
+            return
+        self.window.chat.add_assistant(body, self.config.assistant.name)
+        try:
+            self.core.agent.record_proactive(body)
+        except Exception:  # noqa: BLE001
+            logger.debug("Эмоции GUI: не удалось записать инициативу", exc_info=True)
+        companion = self.config.voice.companion
+        if companion.enabled and companion.speak_events:
+            if not _quiet_hours(companion.quiet_hours_start, companion.quiet_hours_end):
+                self._handle_speak_request(body)
+
+    def _on_autopilot_event(self, event: Any) -> None:
+        """Событие автопилота в главном потоке: чат, голос и авто-задача."""
+        if event is None:
+            return
+        companion = self.config.voice.companion
+        message = str(getattr(event, "message", "") or "").strip()
+        if not message:
+            return
+        autonomy = str(getattr(event, "kind", "")) == "autonomy"
+        if autonomy:
+            self.window.chat.add_assistant(message, self.config.assistant.name)
+            try:
+                from nemus.core.emotions import EmotionStore
+
+                EmotionStore(self.config.character.state_file).mark_proactive(
+                    text=message
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("Автономность: не удалось обновить чувства", exc_info=True)
+            try:
+                self.core.agent.record_proactive(message)
+            except Exception:  # noqa: BLE001
+                logger.debug("Автономность: не удалось записать реплику", exc_info=True)
+        else:
+            self.window.chat.add_assistant(
+                f"🤖 Автопилот: {message}", self.config.assistant.name
+            )
+        if companion.enabled and companion.speak_events:
+            quiet = _quiet_hours(
+                companion.quiet_hours_start, companion.quiet_hours_end
+            )
+            if not quiet:
+                self._handle_speak_request(message)
+        prompt = str(getattr(event, "prompt", "") or "").strip()
+        if not autonomy and bool(getattr(event, "auto_run", False)) and prompt:
+            logger.info("Автопилот: запускаю задачу %s", getattr(event, "rule_id", "?"))
+            self.window.submit_text(prompt)
+
+    def _autonomy_message(self, context: dict[str, Any]) -> str:
+        """Живая реплика по активности; вызывается из потока автопилота."""
+        from nemus.core.autonomy import compose_autonomy_message
+
+        return compose_autonomy_message(self.config, self.core.llm, context)
+
     def _setup_tts(self) -> None:
         from nemus.voice.tts import TTSEngine, resolve_openai_key
 
@@ -233,6 +394,18 @@ class NemusApp:
 
     def _handle_speak_request(self, text: str) -> None:
         if self.tts is not None:
+            # голос тоже живой: обида и усталость звучат иначе, чем радость
+            try:
+                from nemus.core.emotions import EmotionStore
+
+                state = EmotionStore(self.config.character.state_file).snapshot()
+                self.tts.apply_emotion(
+                    mood=state.mood,
+                    energy=state.energy,
+                    hurt=state.hurt,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             self.tts.speak(text, block=False)
 
     def _on_reminder_fired(self, text: str) -> None:
@@ -241,7 +414,7 @@ class NemusApp:
         self.window.chat.add_assistant(message, self.config.assistant.name)
         self._handle_speak_request(message)
         if self.telegram is not None and self.telegram.running:
-            if not self.telegram.send_text(message):
+            if not self.telegram.send_text(message, owner=True):
                 logger.warning(
                     "Напоминание показано в окне, но отправить в Telegram "
                     "не удалось."
@@ -318,6 +491,7 @@ class NemusApp:
                 self.core.reminder.clear()
             except Exception:  # noqa: BLE001
                 pass
+        self._stop_emotions()
         if self.telegram is not None:
             try:
                 self.telegram.stop()
@@ -330,6 +504,12 @@ class NemusApp:
             except Exception:  # noqa: BLE001
                 pass
             self.core.telegram_memory = None
+        self._stop_autopilot()
+        if self.core is not None:
+            try:
+                self.core.llm.close()
+            except Exception:  # noqa: BLE001
+                pass
         if self.realtime is not None:
             try:
                 self.realtime.stop()
@@ -450,11 +630,44 @@ class NemusApp:
     def _realtime_callbacks(self) -> RealtimeCallbacks:
         return RealtimeCallbacks(
             on_state=self.rt_bridge.state_changed.emit,
-            on_user_text=self.rt_bridge.user_text.emit,
-            on_assistant_text=self.rt_bridge.assistant_text.emit,
+            on_user_text=self._on_realtime_user_text,
+            on_assistant_text=self._on_realtime_assistant_text,
             on_error=self.rt_bridge.error.emit,
             on_tool=self.rt_bridge.tool.emit,
         )
+
+    def _on_realtime_user_text(self, text: str) -> None:
+        self._touch_companion()
+        self.rt_bridge.user_text.emit(text)
+
+    def _on_realtime_assistant_text(self, text: str) -> None:
+        self._touch_companion()
+        self.rt_bridge.assistant_text.emit(text)
+
+    def _touch_companion(self) -> None:
+        self._companion_last = time.monotonic()
+        if self.config.voice.companion.enabled and self.realtime is not None:
+            self._companion_timer.start()
+
+    def _start_companion_watch(self) -> None:
+        """Запускает таймер паузы после того, как сессия уже создана."""
+        self._companion_last = time.monotonic()
+        if self.config.voice.companion.enabled and self.realtime is not None:
+            self._companion_timer.start()
+
+    def _companion_tick(self) -> None:
+        """Закрывает затянувшуюся паузу и возвращает wake-word-режим."""
+        companion = self.config.voice.companion
+        if not companion.enabled or self.realtime is None:
+            self._companion_timer.stop()
+            return
+        if not self._session_from_wake:
+            return
+        if time.monotonic() - self._companion_last < max(5, companion.follow_up_seconds):
+            return
+        logger.info("Голосовой компаньон: пауза — возвращаюсь к wake word")
+        self._companion_timer.stop()
+        self._stop_realtime(rearm=True)
 
     def _start_realtime(self) -> None:
         """Кнопка «Realtime»: облачная сессия или локальный аналог по конфигу."""
@@ -516,6 +729,16 @@ class NemusApp:
                 barge_in=self.config.voice.barge_in,
                 llm=self.core.llm,
                 memory=self.core.memory,
+                ack=(
+                    self.config.voice.companion.wake_ack
+                    if self.config.voice.companion.enabled
+                    else ""
+                ),
+                idle_timeout=(
+                    self.config.voice.companion.follow_up_seconds
+                    if self.config.voice.companion.enabled
+                    else 0
+                ),
             )
             self.window.set_realtime(True)
             self.window.chat.add_system(i18n.tr("app.local_mode"))
@@ -549,6 +772,7 @@ class NemusApp:
         if self.realtime is not None:
             self.realtime.stop()
             self.realtime = None
+        self._companion_timer.stop()
         self.window.set_realtime(False)
         self.window.set_state(AssistState.IDLE)
         if rearm and from_wake:
@@ -577,12 +801,15 @@ class NemusApp:
         self._session_from_wake = True
         if rc.provider == "local":
             self._start_local_live()
+            self._start_companion_watch()
             return
         if self._realtime_available():
             self._start_realtime()
+            self._start_companion_watch()
         elif rc.offline_fallback:
             self.window.chat.add_system(i18n.tr("app.local_no_net"))
             self._start_local_live()
+            self._start_companion_watch()
         else:
             self.window.chat.add_error(i18n.tr("app.realtime_off_local"))
             self._session_from_wake = False
@@ -649,6 +876,7 @@ class NemusApp:
             from_wake = self._session_from_wake
             self.realtime = None
             self._session_from_wake = False
+            self._companion_timer.stop()
             self.window.set_realtime(False)
             self.window.set_state(AssistState.IDLE)
             if from_wake:
@@ -675,8 +903,12 @@ class NemusApp:
             )
 
     def _apply_settings(self) -> None:
+        self._stop_emotions()
         self.config = get_config(reload=True)
         self.core.reload(self.config)
+        self._stop_autopilot()
+        self._start_autopilot()
+        self._start_emotions()
         self._wake_skills = build_skills(self.config.voice.wake_word)
         self.window.core = self.core
         self.window.model_label.setText(self.window._model_text())
@@ -699,8 +931,15 @@ class NemusApp:
     def run(self) -> int:
         if not self.config.gui.start_minimized:
             self.window.show()
+        # LiteLLM (~10 с на Windows) греем после первого показа окна, а не
+        # до его создания: иначе импорт задерживает весь интерфейс.
+        from nemus.core.llm import warm_up
+
+        threading.Thread(target=warm_up, name="llm-warmup", daemon=True).start()
         # запускаем wake-слушателя уже в event loop, чтобы не блокировать старт
         QTimer.singleShot(0, self._start_wake_only)
+        QTimer.singleShot(100, self._start_autopilot)
+        QTimer.singleShot(200, self._start_emotions)
         # Telegram-бот стартует после окна: сеть не должна задерживать запуск
         QTimer.singleShot(300, self._start_telegram)
         logger.info(f"Немуся v{__version__} запущена.")
@@ -712,12 +951,6 @@ def main() -> int:
     setup_logging(config.logging.level, config.logging.file)
     _install_excepthook()
     gc.disable()
-
-    # Тяжёлый импорт LiteLLM (~10 с на Windows) греем параллельно со сборкой
-    # окна: иначе первый запрос пользователя ждёт его целиком.
-    from nemus.core.llm import warm_up
-
-    threading.Thread(target=warm_up, name="llm-warmup", daemon=True).start()
 
     try:
         app = NemusApp()

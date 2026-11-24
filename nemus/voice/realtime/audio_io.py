@@ -9,6 +9,7 @@ import numpy as np
 import sounddevice as sd
 
 from nemus.utils.logger import logger
+from nemus.voice.echo import PlaybackReference
 from nemus.voice.noise import BuiltinNoiseReducer
 
 
@@ -47,6 +48,8 @@ class MicStreamer:
         on_chunk,
         block_ms: int = 60,
         cleaner=None,
+        echo_canceller=None,
+        echo_reference: PlaybackReference | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.on_chunk = on_chunk
@@ -56,9 +59,16 @@ class MicStreamer:
             if cleaner is not None
             else BuiltinNoiseReducer(sample_rate, block_ms=block_ms)
         )
+        self._echo_canceller = echo_canceller
+        self._echo_reference = echo_reference
         self._stream: sd.InputStream | None = None
         self._running = False
         self._lock = threading.Lock()
+
+    @property
+    def aec_active(self) -> bool:
+        """AEC создан и ещё не отключился из-за ошибки."""
+        return self._echo_canceller is not None and self._echo_reference is not None
 
     def start(self) -> bool:
         if self._running:
@@ -69,6 +79,14 @@ class MicStreamer:
                 logger.debug(f"Mic status: {status}")
             try:
                 data = np.asarray(indata, dtype=np.int16).reshape(-1)
+                if self._echo_canceller is not None and self._echo_reference is not None:
+                    try:
+                        far = self._echo_reference.latest(data.size)
+                        data = self._echo_canceller.process(data, far)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"AEC отключён: {exc}")
+                        self._echo_canceller = None
+                        self._echo_reference = None
                 if self.cleaner is not None:
                     data = self.cleaner.clean(data)
                 self.on_chunk(data.tobytes())
@@ -125,16 +143,26 @@ class SpeakerPlayer:
     блоки в тайминге железа. Небольшой пре-буфер гасит джиттер сети.
     """
 
-    def __init__(self, sample_rate: int, prebuffer_ms: int = 120, block_ms: int = 20):
+    def __init__(
+        self,
+        sample_rate: int,
+        prebuffer_ms: int = 120,
+        block_ms: int = 20,
+        reference_rate: int | None = None,
+    ):
         self.sample_rate = sample_rate
+        # AEC работает на частоте микрофона, а динамик может быть на 24 кГц.
+        self._reference_rate = int(reference_rate or sample_rate)
         self._lock = threading.Lock()
         self._buf = bytearray()
         self._stream: sd.OutputStream | None = None
         self._running = False
         self._playing = False
         self._last_data_time = 0.0
+        self._output_rms = 0.0
         self._blocksize = max(1, int(sample_rate * block_ms / 1000))
         self._prebuffer_bytes = max(2, int(sample_rate * prebuffer_ms / 1000)) * 2
+        self.reference = PlaybackReference(self._reference_rate)
         self.underruns = 0
 
     @property
@@ -145,6 +173,12 @@ class SpeakerPlayer:
                 and self._playing
                 and (len(self._buf) > 0 or (time.monotonic() - self._last_data_time) < 0.15)
             )
+
+    @property
+    def output_rms(self) -> float:
+        """RMS последнего отданного в динамик блока — оценка громкости эха."""
+        with self._lock:
+            return self._output_rms
 
     def start(self) -> bool:
         if self._running:
@@ -170,6 +204,14 @@ class SpeakerPlayer:
         self._running = True
         return True
 
+    def _append_reference(self, block: np.ndarray) -> None:
+        """Сохраняет опорный сигнал в частоте микрофона для AEC."""
+        if self._reference_rate == self.sample_rate:
+            self.reference.append(block)
+            return
+        raw = resample_pcm16(block.tobytes(), self.sample_rate, self._reference_rate)
+        self.reference.append(np.frombuffer(raw, dtype=np.int16))
+
     def _callback(self, outdata, frames, time_info, status):  # noqa: ANN001
         need = frames  # в моно кадр == 1 сэмпл int16
         with self._lock:
@@ -192,19 +234,25 @@ class SpeakerPlayer:
                 self._playing = True
             if not self._playing:
                 outdata[:, 0] = 0
+                self._output_rms = 0.0
+                self._append_reference(outdata[:need, 0])
                 return
             take = min(len(self._buf) // 2, need)
             if take <= 0:
                 outdata[:, 0] = 0
+                self._output_rms = 0.0
+                self._append_reference(outdata[:need, 0])
                 self.underruns += 1
                 return
             raw = bytes(self._buf[: take * 2])
             del self._buf[: take * 2]
             data = np.frombuffer(raw, dtype=np.int16)
             outdata[:take, 0] = data
+            self._output_rms = float(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
             if take < need:
                 outdata[take:, 0] = 0
                 self.underruns += 1
+            self._append_reference(outdata[:need, 0])
 
     def play(self, chunk: bytes) -> None:
         if not self._running or not chunk:
@@ -220,6 +268,7 @@ class SpeakerPlayer:
         with self._lock:
             self._buf.clear()
             self._playing = False
+            self._output_rms = 0.0
 
     def stop(self) -> None:
         """Останавливает вывод. Идемпотентно и потокобезопасно (см. MicStreamer.stop)."""
@@ -228,6 +277,7 @@ class SpeakerPlayer:
             stream, self._stream = self._stream, None
             self._buf.clear()
             self._playing = False
+            self._output_rms = 0.0
         if stream is not None:
             try:
                 stream.stop()

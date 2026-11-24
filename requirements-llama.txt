@@ -1,0 +1,13 @@
+# Локальные GGUF-модели через llama-cpp-python.
+#
+# Ставится отдельно от основных зависимостей: пакет содержит нативные
+# библиотеки, а для GPU нужна сборка под конкретную CUDA/ROCm/Metal.
+#
+#   venv\Scripts\python.exe -m pip install -r requirements-llama.txt
+#
+# Готовое CPU-колесо (не требует Visual Studio/CMake):
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+# Если готового колеса для вашей платформы нет, официальная инструкция:
+# https://github.com/abetlen/llama-cpp-python#installation-from-pypi
+llama-cpp-python[server]>=0.3.16

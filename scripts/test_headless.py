@@ -18,10 +18,15 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from nemus import telegram_autostart  # noqa: E402
+from nemus import telegram_autostart, telegram_main  # noqa: E402
 from nemus.config import Config, TelegramConfig  # noqa: E402
 from nemus.core.telegram_bot import TelegramBot  # noqa: E402
-from nemus.telegram_main import _health_ok, _validate, _write_health  # noqa: E402
+from nemus.telegram_main import (  # noqa: E402
+    _health_ok,
+    _start_bot_with_retry,
+    _validate,
+    _write_health,
+)
 
 
 def test_allowed_users_from_env() -> None:
@@ -97,6 +102,102 @@ def test_bot_health() -> None:
     bot._start_error = "ошибка старта"
     assert not bot.healthy, "ошибка старта — не здоров"
     print("ok  health: поток, polling и ошибка старта")
+
+
+def test_start_bot_with_retry() -> None:
+    """Временный сбой сети не должен оставлять демон лежать навсегда."""
+
+    class _Stop:
+        def __init__(self, limit: int) -> None:
+            self.limit = limit
+            self.waits = 0
+
+        def is_set(self) -> bool:
+            return self.waits >= self.limit
+
+        def wait(self, timeout: float) -> bool:
+            self.waits += 1
+            return self.is_set()
+
+    class _Bot:
+        def __init__(self, succeed_on: int) -> None:
+            self.succeed_on = succeed_on
+            self.calls = 0
+            self.stops = 0
+
+        def start(self, wait: bool = True) -> bool:
+            self.calls += 1
+            return self.calls >= self.succeed_on
+
+        def stop(self) -> None:
+            self.stops += 1
+
+    old_delays = telegram_main.RETRY_DELAYS
+    telegram_main.RETRY_DELAYS = (0.0,)
+    try:
+        ok_bot = _Bot(succeed_on=2)
+        assert _start_bot_with_retry(ok_bot, _Stop(10))  # type: ignore[arg-type]
+        assert (ok_bot.calls, ok_bot.stops) == (2, 1), "вторая попытка после сбоя"
+
+        bad_bot = _Bot(succeed_on=99)
+        assert not _start_bot_with_retry(bad_bot, _Stop(4))  # type: ignore[arg-type]
+        assert (bad_bot.calls, bad_bot.stops) == (4, 3), "попытки идут до остановки"
+    finally:
+        telegram_main.RETRY_DELAYS = old_delays
+    print("ok  запуск бота: попытки не заканчиваются, пока процесс не остановят")
+
+
+def test_ping_detects_dead_api() -> None:
+    """Сторож должен видеть, что Bot API не отвечает, а не только поток."""
+    import asyncio
+    import threading
+
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _run() -> None:
+        asyncio.set_event_loop(loop)
+        ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    ready.wait(5)
+
+    class _Api:
+        down = False
+
+        async def get_me(self, **kwargs: object) -> object:
+            if self.down:
+                raise RuntimeError("api.telegram.org недоступен")
+            return SimpleNamespace(username="bot")
+
+    api = _Api()
+    bot = object.__new__(TelegramBot)
+    bot._thread = SimpleNamespace(is_alive=lambda: True)
+    bot._app = SimpleNamespace(bot=api)
+    bot._loop = loop
+    bot.cfg = SimpleNamespace(token="")
+    try:
+        assert bot.ping(timeout=1), "живой API должен отвечать"
+        api.down = True
+        assert not bot.ping(timeout=1), "молчащий API должен считаться недоступным"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+    print("ok  ping: недоступный Bot API отличается от живого")
+
+
+def test_start_resets_old_error() -> None:
+    """Старая ошибка не должна мешать успешной повторной попытке."""
+    bot = object.__new__(TelegramBot)
+    bot._start_error = "старая ошибка"
+    bot._thread = None
+    bot._app = None
+    bot.cfg = SimpleNamespace(enabled=False, token="", allowed_users=[])
+    assert not bot.start(), "выключенный бот не запускается"
+    assert bot._start_error == "", "ошибка прошлой попытки сброшена"
+    print("ok  повторный запуск: старая ошибка старта сбрасывается")
 
 
 def test_telegram_autostart_commands() -> None:
@@ -202,6 +303,9 @@ def main() -> int:
     test_lock()
     test_health_file()
     test_bot_health()
+    test_start_bot_with_retry()
+    test_ping_detects_dead_api()
+    test_start_resets_old_error()
     test_telegram_autostart_commands()
     test_stdlib_log_bridge()
     test_no_gui_import()

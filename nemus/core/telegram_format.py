@@ -34,21 +34,47 @@ _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 _TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$")
 
 
+def utf16_len(text: str) -> int:
+    """Длина в единицах UTF-16, как считает лимиты Telegram."""
+    return len((text or "").encode("utf-16-le")) // 2
+
+
+def _prefix_index(text: str, limit: int) -> int:
+    """Индекс, до которого UTF-16-длина не превышает ``limit``."""
+    total = 0
+    for index, char in enumerate(text):
+        total += 2 if ord(char) > 0xFFFF else 1
+        if total > limit:
+            return index
+    return len(text)
+
+
+def clip_utf16(text: str, limit: int) -> str:
+    """Обрезает строку по UTF-16, не разрывая суррогатную пару."""
+    raw = text or ""
+    if utf16_len(raw) <= limit:
+        return raw
+    if limit <= 1:
+        return ""
+    return raw[: _prefix_index(raw, limit - 1)] + "…"
+
+
 def split_message(text: str, limit: int = TEXT_LIMIT) -> list[str]:
     """Режет длинный текст на сообщения, не разрывая слова и строки."""
     text = (text or "").strip()
     if not text:
         return []
-    if len(text) <= limit:
+    if utf16_len(text) <= limit:
         return [text]
     chunks: list[str] = []
     rest = text
-    while len(rest) > limit:
-        cut = rest.rfind("\n", 0, limit)
-        if cut < limit // 2:
-            cut = rest.rfind(" ", 0, limit)
-        if cut < limit // 2:
-            cut = limit
+    while utf16_len(rest) > limit:
+        cut_limit = max(1, _prefix_index(rest, limit))
+        cut = rest.rfind("\n", 0, cut_limit)
+        if cut < cut_limit // 2:
+            cut = rest.rfind(" ", 0, cut_limit)
+        if cut < cut_limit // 2:
+            cut = cut_limit
         chunks.append(rest[:cut].rstrip())
         rest = rest[cut:].lstrip()
     if rest:
@@ -167,15 +193,17 @@ def html_chunks(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
     chunks: list[str] = []
     for raw in split_message(text, limit=limit):
         formatted = to_html(raw)
-        chunks.append(formatted if len(formatted) <= TEXT_LIMIT else raw)
+        chunks.append(formatted if utf16_len(formatted) <= TEXT_LIMIT else raw)
     return chunks
 
 
 __all__ = [
     "CHUNK_LIMIT",
     "TEXT_LIMIT",
+    "clip_utf16",
     "html_chunks",
     "split_message",
     "strip_html",
     "to_html",
+    "utf16_len",
 ]

@@ -243,7 +243,11 @@ class GenerateImageTool(Tool):
         detail = " | ".join(errors[-3:]) or "все провайдеры недоступны"
         return ToolResult.failure(
             "Не удалось создать изображение. Проверьте ключи и баланс: "
-            f"{detail}"
+            f"{detail}",
+            # полный список нужен вызывающему коду: по нему видно, что
+            # бесплатный Pollinations упёрся в лимит и стоит подождать,
+            # а не сдавать ролик без визуала
+            data={"errors": errors},
         )
 
     def _provider_order(self, refs: list[Path]) -> list[str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -24,7 +25,7 @@ from nemus.voice.realtime import (  # noqa: E402
     RealtimeManager,
     RealtimeState,
 )
-from nemus.voice.realtime.audio_io import resample_pcm16  # noqa: E402
+from nemus.voice.realtime.audio_io import SpeakerPlayer, resample_pcm16  # noqa: E402
 
 
 class _SafeTool(Tool):
@@ -270,6 +271,7 @@ def test_settings_dialog() -> None:
     # значения совпадают с загруженным конфигом
     assert dlg.cb_rt_provider.currentText() == cfg.provider
     assert dlg.chk_rt_audio.isChecked() == cfg.audio
+    assert dlg.chk_rt_aec.isChecked() == cfg.aec
     # рабочая папка для собственных скриптов
     assert dlg.edit_workspace.text() == dlg.config.tools.workspace
     dlg.close()
@@ -292,6 +294,35 @@ def _registry_for_prompt():
     reg = ToolRegistry()
     reg.register_many(all_builtin_tools())
     return reg
+
+
+def test_aec() -> None:
+    from nemus.voice.echo import PlaybackReference, create_echo_canceller
+
+    ref = PlaybackReference(16000, max_ms=100)
+    ref.append(np.arange(100, dtype=np.int16))
+    latest = ref.latest(50)
+    assert np.array_equal(latest, np.arange(50, 100, dtype=np.int16)), latest
+    player = SpeakerPlayer(24000, reference_rate=16000)
+    block = np.full(480, 1000, dtype=np.int16)
+    for _ in range(3):
+        player._append_reference(block)
+    assert np.array_equal(player.reference.latest(960), block.repeat(2))
+    print("ok  AEC: опорный сигнал динамика")
+
+    aec = create_echo_canceller(16000, delay_ms=40)
+    assert aec is not None, "pywebrtc-audio не установлен"
+    rng = np.random.default_rng(1)
+    far = (rng.standard_normal(16000 * 3) * 3000).astype(np.int16)
+    near = np.zeros_like(far)
+    near[800:] = (far[:-800] * 0.35).astype(np.int16)
+    out = np.concatenate(
+        [aec.process(near[i : i + 960], far[i : i + 960]) for i in range(0, len(far), 960)]
+    )
+    near_rms = float(np.sqrt(np.mean(near[16000 * 2 :].astype(np.float64) ** 2)))
+    out_rms = float(np.sqrt(np.mean(out[16000 * 2 :].astype(np.float64) ** 2)))
+    assert out_rms < near_rms * 0.5, (near_rms, out_rms)
+    print(f"ok  AEC: эхо подавлено ({near_rms:.0f} -> {out_rms:.0f} RMS)")
 
 
 def test_gemini_audio_and_latency() -> None:
@@ -322,11 +353,43 @@ def test_gemini_audio_and_latency() -> None:
     assert "mediaChunks" not in payload, "устаревшее поле игнорируется новыми моделями"
     print("ok  Gemini Live: микрофон уходит в поле audio")
 
+    # Keepalive: после паузы уходит тишина, сразу повторно — не уходит
+    session._last_send_ts = 0.0
+    asyncio.run(session._send_keepalive())
+    silence = base64.b64decode(ws.sent[-1]["realtimeInput"]["audio"]["data"])
+    assert silence == b"\x00\x00" * 1600
+    sent = len(ws.sent)
+    asyncio.run(session._send_keepalive())
+    assert len(ws.sent) == sent, "keepalive не должен спамить при свежем аудио"
+    print("ok  Gemini Live: keepalive от idle-таймаута")
+
     setup = session._setup_message()
     assert setup["model"] == "models/gemini-3.8-live"
     detection = setup["realtimeInputConfig"]["automaticActivityDetection"]
-    assert detection["silenceDurationMs"] == 400
+    assert detection["silenceDurationMs"] == 600
+    assert detection["startOfSpeechSensitivity"] == "START_SENSITIVITY_LOW"
+    assert detection["prefixPaddingMs"] == 300
     print("ok  Gemini Live: setup")
+
+    # Эхо динамика не уходит в модель, а громкое перебивание — уходит
+    class _FakeSpeaker:
+        is_playing = True
+        output_rms = 3000.0
+
+        def __init__(self) -> None:
+            self.cleared = False
+
+        def clear(self) -> None:
+            self.cleared = True
+
+    speaker = _FakeSpeaker()
+    session.barge_in = True
+    assert session._echo_guard(b"echo", 500.0, 100.0, speaker, None) is None
+    assert not speaker.cleared
+    assert session._echo_guard(b"one", 4000.0, 100.1, speaker, None) is None
+    assert session._echo_guard(b"two", 4000.0, 100.35, speaker, None) == [b"one", b"two"]
+    assert speaker.cleared
+    print("ok  Gemini Live: эхо не запускает новый ход")
 
     # Гейт тишины: тишину с самого начала не шлём (галлюцинации модели),
     # хвост после звука — шлём, затянувшуюся тишину — режем
@@ -364,6 +427,7 @@ def main() -> int:
         test_gui_button,
         test_bridge_confirm_threading,
         test_settings_dialog,
+        test_aec,
         test_gemini_audio_and_latency,
     ):
         try:

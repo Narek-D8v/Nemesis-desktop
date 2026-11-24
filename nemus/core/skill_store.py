@@ -1437,8 +1437,13 @@ def remember_local_origin(
     source: str | Path,
     name: str,
     kind: str = "plugin",
+    component: str | None = None,
 ) -> None:
-    """Запоминает локальный источник: из него же потом берётся обновление."""
+    """Запоминает локальный источник: из него же потом берётся обновление.
+
+    ``component`` — папка компонента внутри источника (для наборов): по ней
+    обновляется именно этот скилл или плагин, а не весь архив целиком.
+    """
     data = _read_origins(directory)
     data[slug] = {
         "repo": "",
@@ -1446,6 +1451,7 @@ def remember_local_origin(
         "name": name,
         "kind": kind,
         "local": str(Path(source).resolve()),
+        "component": component or "",
     }
     _write_origins(directory, data)
 
@@ -1462,6 +1468,9 @@ def origin_of(directory: str | Path | None, slug: str) -> dict[str, str] | None:
     origin = {key: str(entry.get(key) or "") for key in ("repo", "path", "name")}
     origin["local"] = str(entry.get("local") or "")
     origin["kind"] = str(entry.get("kind") or "skill")
+    component = str(entry.get("component") or "")
+    if component:  # старые источники без компонента не меняют формат
+        origin["component"] = component
     return origin
 
 
@@ -1604,6 +1613,8 @@ def update_installed(
                     key: str(entry.get(key) or "") for key in ("repo", "path", "name")
                 }
                 origin["local"] = str(entry.get("local") or "")
+                origin["kind"] = str(entry.get("kind") or "skill")
+                origin["component"] = str(entry.get("component") or "")
                 break
     if origin is None:
         raise StoreError(
@@ -1616,7 +1627,13 @@ def update_installed(
         local = Path(origin["local"])
         if not local.exists():
             raise StoreError(f"Локальный источник пропал: {local.as_posix()}")
-        return install_skill_local(local, directory, replace=True, slug=slug)
+        return install_skill_local(
+            local,
+            directory,
+            replace=True,
+            slug=slug,
+            component=origin.get("component") or None,
+        )
     fresh: StoreSkill | None = None
     found = repo_skills(client, origin["repo"])
     for skill in found:
@@ -1844,6 +1861,7 @@ def install_plugin_local(
     *,
     replace: bool = False,
     slug: str = "",
+    component: str | None = None,
 ) -> tuple[str, bool]:
     """Ставит плагин из папки или ``.zip`` и запоминает локальный источник.
 
@@ -1854,6 +1872,20 @@ def install_plugin_local(
     src = Path(os.path.expanduser(str(source))).resolve()
     if not src.exists():
         raise StoreError(f"Файл или папка не найдены: {src.as_posix()}")
+
+    # одиночный плагин ставим по-старому; набор или смешанный источник —
+    # раскладываем на компоненты (скиллы и плагины) и ставим каждый
+    components = _local_components(src)
+    if components and (
+        component is not None
+        or len(components) != 1
+        or components[0][0] != "plugin"
+    ):
+        bundle, changed = install_local_bundle(
+            src, directory, replace=replace, slug=slug, component=component
+        )
+        primary = bundle.plugins[0] if bundle.plugins else bundle.folder
+        return primary, changed
 
     archive: zipfile.ZipFile | None = None
     root = ""
@@ -1947,8 +1979,439 @@ def install_plugin_local(
     return folder, changed
 
 
+@dataclass(frozen=True)
+class InstalledBundle:
+    """Результат установки набора: что именно легло в папку скиллов."""
+
+    #: основная папка (первый компонент) — для статуса и совместимости
+    folder: str
+    name: str
+    path: Path
+    #: все созданные/обновлённые папки верхнего уровня
+    folders: tuple[str, ...] = ()
+    #: скиллы набора
+    skills: tuple[Skill, ...] = ()
+    #: папки установленных плагинов
+    plugins: tuple[str, ...] = ()
+    changed: bool = False
+
+
+@dataclass
+class _LocalView:
+    """Содержимое локального источника относительно его общего корня."""
+
+    src: Path
+    archive: zipfile.ZipFile | None
+    #: общая папка-обёртка внутри архива (пусто — файлы уже от корня)
+    base: str
+    #: файлы относительно ``base``
+    names: tuple[str, ...]
+
+    def join(self, root: str, rel: str = "") -> str:
+        """Путь внутри архива: обёртка → корень компонента → файл."""
+        return "/".join(part for part in (self.base, root, rel) if part)
+
+    def read(self, rel: str) -> str:
+        """Текст файла относительно ``base``."""
+        path = self.join("", rel)
+        if self.archive is not None:
+            try:
+                return self.archive.read(path).decode("utf-8", "replace")
+            except KeyError as exc:
+                raise StoreError(f"В архиве нет файла {rel}.") from exc
+        try:
+            return (self.src / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise StoreError(f"Не удалось прочитать {rel}.") from exc
+
+
+def _local_zip_names(archive: zipfile.ZipFile) -> list[str]:
+    """Файлы архива без служебного мусора и папок."""
+    names: list[str] = []
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        name = info.filename.replace("\\", "/")
+        if not name or "__MACOSX" in name:
+            continue
+        parts = PurePosixPath(name).parts
+        if any(part in LOCAL_SKIP for part in parts):
+            continue
+        names.append(name)
+    return names
+
+
+def _local_folder_names(source: Path) -> list[str]:
+    """Файлы папки без служебных каталогов."""
+    names: list[str] = []
+    for path in sorted(source.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        rel = path.relative_to(source)
+        if any(part in LOCAL_SKIP for part in rel.parts):
+            continue
+        names.append(rel.as_posix())
+    return names
+
+
+def _common_wrapper(names: Iterable[str]) -> str:
+    """Общая папка-обёртка архива: ``pack-main/...`` → ``pack-main``.
+
+    Служебные каталоги вроде ``.claude-plugin``, ``skills`` или ``plugins``
+    обёрткой не считаем: иначе у архива без внешней папки пропадёт корень.
+    """
+    names = list(names)
+    if not names or not all("/" in name for name in names):
+        return ""
+    tops = {name.split("/", 1)[0] for name in names}
+    if len(tops) != 1:
+        return ""
+    top = next(iter(tops))
+    if top.startswith(".") or top in {
+        "skills",
+        "commands",
+        "agents",
+        "hooks",
+        "plugins",
+        "scripts",
+    }:
+        return ""
+    return top
+
+
+def _outer_roots(roots: Iterable[str]) -> list[str]:
+    """Оставляет только внешние корни: вложенный скилл — часть внешнего."""
+    ordered = sorted(set(roots), key=lambda root: (root.count("/"), root))
+    outer: list[str] = []
+    for root in ordered:
+        if any(
+            not parent or root.startswith(parent.rstrip("/") + "/")
+            for parent in outer
+        ):
+            continue
+        outer.append(root)
+    return outer
+
+
+def _roots_with_file(names: Iterable[str], filename: str) -> list[str]:
+    """Внешние папки, где лежит файл (пустая строка — файл в корне)."""
+    roots: list[str] = []
+    suffix = "/" + filename
+    for name in names:
+        if name == filename:
+            roots.append("")
+        elif name.endswith(suffix):
+            roots.append(name[: -len(filename) - 1])
+    return _outer_roots(roots)
+
+
+def _inside_root(path: str, root: str) -> bool:
+    """``path`` лежит внутри ``root`` (сам корень не считается вложенным)."""
+    if path == root:
+        return False
+    if not root:
+        return bool(path)  # корень пустой — это весь источник
+    return path.startswith(root + "/")
+
+
+def _view_components(view: _LocalView) -> list[tuple[str, str]]:
+    """Компоненты источника: ``("skill"|"plugin", папка относительно базы)``.
+
+    Один корневой ``SKILL.md`` означает скилл, даже если внутри него лежат
+    плагины и вложенные ``skills/``: такой набор ставится одной папкой.
+    Несколько соседних скиллов и/или плагинов ставятся каждый отдельно.
+    """
+    skills = _roots_with_file(view.names, SKILL_FILE)
+    plugins = _roots_with_file(view.names, f"{PLUGIN_DIR}/{PLUGIN_FILE}")
+    # скиллы внутри плагина — его состав, а не отдельные установки
+    skills = [root for root in skills if not any(_inside_root(root, p) for p in plugins)]
+    # плагин внутри скилла едет вместе с ним
+    plugins = [root for root in plugins if not any(_inside_root(root, s) for s in skills)]
+    return [("skill", root) for root in skills] + [
+        ("plugin", root) for root in plugins
+    ]
+
+
+def _open_local_view(source: str | Path) -> tuple[_LocalView, zipfile.ZipFile | None]:
+    """Открывает папку или архив и определяет общий корень содержимого."""
+    src = Path(os.path.expanduser(str(source))).resolve()
+    if not src.exists():
+        raise StoreError(f"Файл или папка не найдены: {src.as_posix()}")
+    if src.is_dir():
+        return _LocalView(src=src, archive=None, base="", names=tuple(_local_folder_names(src))), None
+    if src.suffix.lower() != ".zip":
+        raise StoreError("Нужен .zip или папка со скиллами/плагинами.")
+    try:
+        archive = zipfile.ZipFile(src)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise StoreError(f"Не удалось открыть архив: {exc}") from exc
+    try:
+        names = _local_zip_names(archive)
+    except Exception:
+        archive.close()
+        raise
+    base = _common_wrapper(names)
+    if base:
+        prefix = base + "/"
+        names = [name[len(prefix):] for name in names if name.startswith(prefix)]
+    return _LocalView(src=src, archive=archive, base=base, names=tuple(names)), archive
+
+
+def _local_components(source: str | Path) -> list[tuple[str, str]]:
+    """Разбирает источник, не оставляя открытым архив."""
+    view, archive = _open_local_view(source)
+    try:
+        return _view_components(view)
+    finally:
+        if archive is not None:
+            archive.close()
+
+
+def _component_name(view: _LocalView, kind: str, root: str) -> str:
+    """Имя компонента из frontmatter/манифеста или из имени папки."""
+    fallback = (
+        root.split("/")[-1]
+        if root
+        else re.sub(
+            r"[-_](main|master)$",
+            "",
+            view.src.stem if view.src.is_file() else view.src.name,
+            flags=re.IGNORECASE,
+        )
+    )
+    rel = f"{root}/{SKILL_FILE}" if root else SKILL_FILE
+    if kind == "skill":
+        try:
+            meta, _ = parse_skill(view.read(rel))
+        except (StoreError, ValueError):
+            return fallback or "skill"
+        return str(meta.get("name") or fallback or "skill").strip() or "skill"
+    rel = (
+        f"{root}/{PLUGIN_DIR}/{PLUGIN_FILE}"
+        if root
+        else f"{PLUGIN_DIR}/{PLUGIN_FILE}"
+    )
+    try:
+        data = json.loads(view.read(rel))
+    except (StoreError, ValueError):
+        return fallback or "plugin"
+    return str((data or {}).get("name") or fallback or "plugin").strip() or "plugin"
+
+
+def _validate_component(folder: Path, kind: str) -> None:
+    """Проверяет, что компонент целиком и с правильным корнем."""
+    if kind == "skill":
+        path = folder / SKILL_FILE
+        if not path.is_file():
+            raise StoreError("В скилле нет SKILL.md.")
+        try:
+            parse_skill(path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise StoreError(f"Битый SKILL.md: {exc}") from exc
+        return
+    path = folder / PLUGIN_DIR / PLUGIN_FILE
+    if not path.is_file():
+        raise StoreError("В плагине нет .claude-plugin/plugin.json.")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise StoreError("У плагина битый .claude-plugin/plugin.json.") from exc
+    if not isinstance(data, dict):
+        raise StoreError("У плагина битый .claude-plugin/plugin.json.")
+
+
+def _bundle_skill(bundle: InstalledBundle) -> Skill:
+    """Представитель набора для старого API «вернуть один скилл»."""
+    if bundle.skills:
+        return bundle.skills[0]
+    return Skill(name=bundle.name, description="", path=bundle.path)
+
+
+def install_local_bundle(
+    source: str | Path,
+    directory: str | Path | None = None,
+    *,
+    replace: bool = False,
+    slug: str = "",
+    component: str | None = None,
+) -> tuple[InstalledBundle, bool]:
+    """Ставит скилл-пак или мега-пак: все скиллы и плагины источника.
+
+    Соседние скиллы и плагины ставятся отдельными папками верхнего уровня:
+    так ими можно управлять по отдельности, а команды плагинов работают как
+    ``/плагин:команда``. Скилл с вложенными ``skills/`` и плагинами остаётся
+    одной папкой и работает целиком. ``component`` ограничивает установку
+    одним корнем (для обновления уже установленного компонента).
+    """
+    src = Path(os.path.expanduser(str(source))).resolve()
+    view, archive = _open_local_view(src)
+    try:
+        components = _view_components(view)
+        if component is not None:
+            components = [item for item in components if item[1] == component]
+        if not components:
+            raise StoreError(
+                "В источнике нет скиллов (SKILL.md) или плагинов "
+                "(.claude-plugin/plugin.json)."
+            )
+        if slug and len(components) > 1:
+            raise StoreError("Нельзя задать одно имя папки для нескольких компонентов.")
+
+        base = skills_root(directory)
+        base.mkdir(parents=True, exist_ok=True)
+        origins = _read_origins(directory)
+        plans: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for kind, root in components:
+            name = _component_name(view, kind, root)
+            desired = slug or slugify(name) or slugify(
+                root.split("/")[-1] if root else src.stem
+            )
+            folder = desired
+            suffix = 2
+            already = False
+            while folder in used or (base / folder).exists():
+                entry = origins.get(folder)
+                same = (
+                    isinstance(entry, dict)
+                    and entry.get("local") == str(src)
+                    and str(entry.get("component") or "") == root
+                    and entry.get("kind") == kind
+                )
+                if same and not replace:
+                    already = True
+                    break
+                if replace and folder not in used:
+                    break
+                folder = f"{desired}-{suffix}"
+                suffix += 1
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", folder):
+                raise StoreError(f"Неподходящее имя папки: {folder}")
+            used.add(folder)
+            plans.append(
+                {
+                    "kind": kind,
+                    "root": root,
+                    "folder": folder,
+                    "name": name,
+                    "target": base / folder,
+                    "tmp": base / f".{folder}.installing",
+                    "action": "keep" if already else "new",
+                }
+            )
+
+        # сначала готовим все компоненты во временных папках: ошибка одного
+        # не должна оставить половину набора
+        for plan in plans:
+            if plan["action"] == "keep":
+                continue
+            shutil.rmtree(plan["tmp"], ignore_errors=True)
+            try:
+                prefix = view.join(plan["root"])
+                if view.archive is not None:
+                    _archive_copy(
+                        view.archive,
+                        prefix,
+                        plan["tmp"],
+                        MAX_PLUGIN_FILES,
+                        "набор",
+                    )
+                else:
+                    source_dir = (
+                        view.src / plan["root"] if plan["root"] else view.src
+                    )
+                    _folder_copy(source_dir, plan["tmp"], MAX_PLUGIN_FILES, "набор")
+                _validate_component(plan["tmp"], plan["kind"])
+                if plan["target"].exists():
+                    plan["action"] = "replace"
+                    if _folder_digest(plan["tmp"]) == _folder_digest(
+                        plan["target"]
+                    ):
+                        plan["action"] = "keep"
+                        shutil.rmtree(plan["tmp"], ignore_errors=True)
+            except Exception:
+                for other in plans:
+                    shutil.rmtree(other["tmp"], ignore_errors=True)
+                raise
+
+        changed = any(plan["action"] != "keep" for plan in plans)
+        backups: dict[str, Path] = {}
+        installed: list[str] = []
+        try:
+            for plan in plans:
+                if plan["action"] == "keep":
+                    continue
+                target = plan["target"]
+                if plan["action"] == "replace":
+                    backup = base / f".{plan['folder']}.backup"
+                    shutil.rmtree(backup, ignore_errors=True)
+                    target.replace(backup)
+                    backups[plan["folder"]] = backup
+                plan["tmp"].replace(target)
+                installed.append(plan["folder"])
+        except Exception:
+            for folder in installed:
+                shutil.rmtree(base / folder, ignore_errors=True)
+            for folder, backup in backups.items():
+                if backup.exists():
+                    backup.replace(base / folder)
+            for plan in plans:
+                shutil.rmtree(plan["tmp"], ignore_errors=True)
+            raise
+        for backup in backups.values():
+            shutil.rmtree(backup, ignore_errors=True)
+
+        for plan in plans:
+            remember_local_origin(
+                directory,
+                plan["folder"],
+                src,
+                plan["name"],
+                kind=plan["kind"],
+                component=plan["root"],
+            )
+        installed_folders = tuple(plan["folder"] for plan in plans)
+        installed_skills: list[Skill] = []
+        for skill in load_skills(directory, builtin=False):
+            if skill.kind == "command":
+                continue
+            if skill.path.resolve() in {
+                (base / folder).resolve() for folder in installed_folders
+            }:
+                installed_skills.append(skill)
+        plugins = tuple(
+            plan["folder"] for plan in plans if plan["kind"] == "plugin"
+        )
+        primary = plans[0]
+        result = InstalledBundle(
+            folder=primary["folder"],
+            name=primary["name"],
+            path=base / primary["folder"],
+            folders=installed_folders,
+            skills=tuple(installed_skills),
+            plugins=plugins,
+            changed=changed,
+        )
+        logger.info(
+            f"Магазин: набор из {len(plans)} компонентов установлен из "
+            f"{src.as_posix()} → {', '.join(installed_folders)}"
+        )
+        return result, changed
+    finally:
+        if archive is not None:
+            archive.close()
+
+
 def _zip_skill_roots(archive: zipfile.ZipFile) -> list[str]:
-    """Папки скиллов в архиве (там, где лежит SKILL.md)."""
+    """Папки скиллов в архиве (там, где лежит SKILL.md).
+
+    Пакет может содержать копию того же скилла глубже — например,
+    ``frontend-slides/SKILL.md`` и рядом
+    ``frontend-slides/plugins/.../skills/frontend-slides/SKILL.md``. Это один
+    скилл, а не два: вложенный корень внутри другого скилла отбрасываем, как
+    и сканер готовых скиллов. Настоящие разные скиллы лежат соседними
+    папками, поэтому не теряются.
+    """
     roots: list[str] = []
     for info in archive.infolist():
         name = info.filename.replace("\\", "/")
@@ -1962,7 +2425,19 @@ def _zip_skill_roots(archive: zipfile.ZipFile) -> list[str]:
         root = "/".join(parts[:-1])
         if root not in roots:
             roots.append(root)
-    return roots
+
+    # Сначала внешние корни: всё, что лежит внутри найденного скилла, —
+    # его собственные файлы, а не ещё один скилл.
+    ordered = sorted(roots, key=lambda root: (root.count("/"), len(root)))
+    outer: list[str] = []
+    for root in ordered:
+        if any(
+            not parent or root.startswith(parent.rstrip("/") + "/")
+            for parent in outer
+        ):
+            continue
+        outer.append(root)
+    return outer
 
 
 def install_skill_local(
@@ -1971,6 +2446,7 @@ def install_skill_local(
     *,
     replace: bool = False,
     slug: str = "",
+    component: str | None = None,
 ) -> tuple[Skill, bool]:
     """Ставит скилл из папки или ``.zip`` и запоминает локальный источник.
 
@@ -1980,6 +2456,18 @@ def install_skill_local(
     src = Path(os.path.expanduser(str(source))).resolve()
     if not src.exists():
         raise StoreError(f"Файл или папка не найдены: {src.as_posix()}")
+
+    # набор или смешанный источник: несколько скиллов, плагины, мега-пак
+    components = _local_components(src)
+    if components and (
+        component is not None
+        or len(components) != 1
+        or components[0][0] != "skill"
+    ):
+        bundle, changed = install_local_bundle(
+            src, directory, replace=replace, slug=slug, component=component
+        )
+        return _bundle_skill(bundle), changed
 
     archive: zipfile.ZipFile | None = None
     root = ""
@@ -2176,7 +2664,13 @@ def update_plugin(
             raise StoreError("У плагина не записан источник — обновить его нельзя.")
         if not local.exists():
             raise StoreError(f"Локальный источник пропал: {local.as_posix()}")
-        return install_plugin_local(local, directory, replace=True, slug=slug)
+        return install_plugin_local(
+            local,
+            directory,
+            replace=True,
+            slug=slug,
+            component=origin.get("component") or None,
+        )
     root = skills_root(directory)
     target = root / slug
     if not target.is_dir():
@@ -2240,6 +2734,7 @@ __all__ = [
     "GitHubClient",
     "RECOMMENDED_REPOS",
     "RECOMMENDED_TOPICS",
+    "InstalledBundle",
     "InstalledPlugin",
     "PLUGIN_RECOMMENDED_REPOS",
     "StoreError",
@@ -2248,6 +2743,7 @@ __all__ = [
     "install",
     "forget_origin",
     "install_plugin",
+    "install_local_bundle",
     "install_plugin_local",
     "install_skill_local",
     "install_slug",

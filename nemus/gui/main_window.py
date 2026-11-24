@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -35,6 +36,12 @@ from PySide6.QtWidgets import (
 
 from nemus.config import save_config
 from nemus.core.agent import AgentEvent
+from nemus.core.providers.hf_download import (
+    ModelDownloadEvent,
+    format_bytes,
+    subscribe_model_download,
+    unsubscribe_model_download,
+)
 from nemus.core.skill_commands import parse_skill_commands
 from nemus.core.skills import load_skills, skill_highlights
 from nemus.core.state import AssistState
@@ -199,6 +206,7 @@ class SessionsDialog(QDialog):
 class MainWindow(QMainWindow):
     """Основное окно (редизайн 2025): тёмная тема, сайдбар, пилюля ввода."""
 
+    model_download_event = Signal(object)
     listen_toggled = Signal(bool)
     realtime_toggled = Signal(bool)
     settings_requested = Signal()
@@ -225,6 +233,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_sidebar(app_name), 0)
         layout.addWidget(self._build_chat_area(), 1)
         self._init_sessions()
+
+        # подписываемся после создания виджетов: прогресс может прийти сразу
+        self._download_listener = self._emit_model_download
+        self.model_download_event.connect(self._on_model_download_event)
+        subscribe_model_download(self._download_listener)
+        self.destroyed.connect(self._unsubscribe_downloads)
+        self._download_hide_timer = QTimer(self)
+        self._download_hide_timer.setSingleShot(True)
+        self._download_hide_timer.timeout.connect(self._hide_download_progress)
 
     # ---------------------------------------------------------------- brand
     @staticmethod
@@ -316,6 +333,19 @@ class MainWindow(QMainWindow):
 
         box.addWidget(self.state_label)
         box.addWidget(self.model_label)
+        self.download_bar = QProgressBar()
+        self.download_bar.setRange(0, 1000)
+        self.download_bar.setTextVisible(False)
+        self.download_bar.setFixedHeight(7)
+        self.download_bar.setVisible(False)
+        self.download_label = QLabel("")
+        self.download_label.setObjectName("SubLabel")
+        self.download_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.download_label.setWordWrap(True)
+        self.download_label.setStyleSheet(f"color: {TEXT_DIMMER};")
+        self.download_label.setVisible(False)
+        box.addWidget(self.download_bar)
+        box.addWidget(self.download_label)
         box.addStretch(2)
 
         self.listen_btn = QPushButton(i18n.tr("btn.listen"))
@@ -584,6 +614,76 @@ class MainWindow(QMainWindow):
                     self.chat.add_assistant(message.content, name)
 
     # -------------------------------------------------------------- behaviour
+    # --------------------------------------------------- загрузка модели
+    def _emit_model_download(self, event: ModelDownloadEvent) -> None:
+        """Вызывается из потока загрузчика — сигнал переводит в GUI-поток."""
+        self.model_download_event.emit(event)
+
+    def _unsubscribe_downloads(self, *_: Any) -> None:
+        unsubscribe_model_download(self._download_listener)
+
+    def _on_model_download_event(self, event: ModelDownloadEvent) -> None:
+        """Показывает прогресс скачивания GGUF в сайдбаре."""
+        if event.phase == "start":
+            self._download_hide_timer.stop()
+            self.download_bar.setRange(0, 0)
+            self.download_bar.setVisible(True)
+            self.download_label.setText(
+                i18n.tr("download.starting", name=event.name)
+            )
+            self.download_label.setVisible(True)
+            return
+        if event.phase == "progress":
+            if event.total > 0:
+                percent = event.percent or 0
+                self.download_bar.setRange(0, 1000)
+                self.download_bar.setValue(percent * 10)
+                self.download_label.setText(
+                    i18n.tr(
+                        "download.progress",
+                        name=event.filename,
+                        percent=percent,
+                        done=format_bytes(event.done),
+                        total=format_bytes(event.total),
+                    )
+                )
+            else:
+                self.download_bar.setRange(0, 0)
+                self.download_label.setText(
+                    i18n.tr(
+                        "download.progress_unknown",
+                        name=event.filename,
+                        done=format_bytes(event.done),
+                    )
+                )
+            self.download_bar.setVisible(True)
+            self.download_label.setVisible(True)
+            return
+        if event.phase == "done":
+            self.download_bar.setRange(0, 1000)
+            self.download_bar.setValue(1000)
+            self.download_label.setText(
+                i18n.tr("download.done", name=event.filename)
+            )
+            self._download_hide_timer.start(8000)
+            return
+        if event.phase == "cancelled":
+            self.download_label.setText(i18n.tr("download.cancelled"))
+            self.download_bar.setVisible(False)
+            self._download_hide_timer.start(5000)
+            return
+        if event.phase == "error":
+            self.download_bar.setVisible(False)
+            self.download_label.setText(
+                i18n.tr("download.failed", msg=event.message[:180])
+            )
+            self.download_label.setVisible(True)
+            self._download_hide_timer.start(12000)
+
+    def _hide_download_progress(self) -> None:
+        self.download_bar.setVisible(False)
+        self.download_label.setVisible(False)
+
     def _model_text(self) -> str:
         if self.core is not None:
             return i18n.tr("model.prefix", model=self.core.llm.model)

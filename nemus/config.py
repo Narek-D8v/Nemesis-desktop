@@ -29,7 +29,9 @@ else:
 CONFIG_DIR = PROJECT_ROOT / "config"
 DATA_DIR = PROJECT_ROOT / "data"
 
-ProviderName = Literal["openrouter", "gemini", "anthropic", "openai", "ollama"]
+ProviderName = Literal[
+    "openrouter", "gemini", "anthropic", "openai", "ollama", "llama_cpp"
+]
 PermissionMode = Literal["full-auto", "smart", "confirm-all"]
 
 
@@ -54,6 +56,39 @@ class AssistantConfig(BaseModel):
     )
 
 
+class CharacterConfig(BaseModel):
+    """Характер и эмоциональная модель Немуси.
+
+    Черты задают склонности, а базовые чувства — точку, к которой состояние
+    возвращается после разговоров. Текущее настроение и теплота меняются по
+    ходу общения и хранятся отдельно в ``state_file``.
+    """
+
+    enabled: bool = True
+    #: 0–100: игривость, обидчивость, привязанность, самостоятельность
+    playfulness: int = Field(default=45, ge=0, le=100)
+    sensitivity: int = Field(default=55, ge=0, le=100)
+    attachment: int = Field(default=60, ge=0, le=100)
+    independence: int = Field(default=50, ge=0, le=100)
+    curiosity: int = Field(default=65, ge=0, le=100)
+    #: базовые чувства: настроение (-100…100), энергия, доверие, обида
+    base_mood: int = Field(default=10, ge=-100, le=100)
+    base_energy: int = Field(default=60, ge=0, le=100)
+    base_trust: int = Field(default=55, ge=0, le=100)
+    base_hurt: int = Field(default=0, ge=0, le=100)
+    #: сама написать первой, если соскучилась
+    proactive_enabled: bool = True
+    quiet_hours_start: str = "23:00"
+    quiet_hours_end: str = "08:00"
+    #: расширенный режим: свободное описание характера поверх ползунков
+    advanced: bool = False
+    custom_prompt: str = Field(default="", max_length=4000)
+    state_file: str = "data/emotions.json"
+    #: личный дневник: она пишет туда сама, с датой; файл можно читать руками
+    diary: bool = True
+    diary_file: str = "data/diary.md"
+
+
 class ProviderConfig(BaseModel):
     api_key: str = ""
     api_base: str = ""
@@ -67,6 +102,40 @@ class ProviderConfig(BaseModel):
 class FallbackEntry(BaseModel):
     provider: str
     model: str
+
+
+class LlamaCppConfig(BaseModel):
+    """Локальная модель GGUF через llama-cpp-python (OpenAI-совместимый сервер)."""
+
+    #: путь к выбранному GGUF; пусто — берётся из модели ``llama_cpp/...``
+    model_path: str = ""
+    #: папка, которую GUI показывает как список локальных моделей
+    models_dir: str = "data/models"
+    #: Hugging Face: owner/model и файл внутри репозитория (или полная ссылка)
+    hf_repo: str = ""
+    hf_file: str = ""
+    hf_revision: str = "main"
+    hf_endpoint: str = "https://huggingface.co"
+    #: скачивать выбранный GGUF при первом запросе, если файла ещё нет
+    auto_download: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8081
+    #: имя модели в OpenAI-протоколе; на него переводит LiteLLM
+    model_alias: str = "nemus-local"
+    n_ctx: int = 8192
+    #: 0 — только CPU, -1 — все слои на GPU
+    n_gpu_layers: int = 0
+    #: 0 — авто (llama.cpp сам выберет число потоков)
+    n_threads: int = 0
+    n_batch: int = 512
+    #: пусто — шаблон чата из GGUF; можно указать chatml, llama-3 и т. п.
+    chat_format: str = ""
+    #: поднимать сервер при первом запросе; false — подключаться к готовому
+    auto_start: bool = True
+    #: сколько ждать загрузки модели, сек (большие GGUF грузятся долго)
+    start_timeout: float = 180.0
+    verbose: bool = False
+    extra_args: list[str] = Field(default_factory=list)
 
 
 class LLMConfig(BaseModel):
@@ -85,6 +154,7 @@ class LLMConfig(BaseModel):
     fast_timeout: int = 20
     fallback: list[FallbackEntry] = Field(default_factory=list)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    llama_cpp: LlamaCppConfig = Field(default_factory=LlamaCppConfig)
 
 
 class WakeSkillConfig(BaseModel):
@@ -189,6 +259,8 @@ class RealtimeConfig(BaseModel):
     openai_voice: str = DEFAULT_OPENAI_VOICE
     # Отправлять/принимать аудио (иначе — только текст)
     audio: bool = True
+    # Эхоподавление WebRTC AEC3: динамик не должен попадать в микрофон
+    aec: bool = True
     # Слово активации запускает диалог реального времени
     wake_activates: bool = True
     # Без интернета/ключа — переключаться на локальный аналог
@@ -207,14 +279,129 @@ class NoiseConfig(BaseModel):
     krisp_suppression: float = 100.0
 
 
+class CompanionConfig(BaseModel):
+    """Постоянный голосовой компаньон: wake word → диалог → пауза → снова слушает."""
+
+    enabled: bool = False
+    #: короткая фраза после активации; пусто — без подтверждения
+    wake_ack: str = "Слушаю"
+    #: сколько секунд ждать продолжения, прежде чем снова уйти в wake-only
+    follow_up_seconds: int = 25
+    #: озвучивать события автопилота в комнате
+    speak_events: bool = True
+    #: тихие часы для голосовых объявлений (HH:MM); пусто — не ограничивать
+    quiet_hours_start: str = "23:00"
+    quiet_hours_end: str = "08:00"
+
+
 class VoiceConfig(BaseModel):
     enabled: bool = True
     wake_word: WakeWordConfig = Field(default_factory=WakeWordConfig)
     stt: STTConfig = Field(default_factory=STTConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
+    companion: CompanionConfig = Field(default_factory=CompanionConfig)
     barge_in: bool = True
     noise: NoiseConfig = Field(default_factory=NoiseConfig)
+
+
+class AutopilotRule(BaseModel):
+    """Одно правило проактивного автопилота.
+
+    Триггеры намеренно ограничены локальными событиями: файлы, лог, время,
+    диск и батарея. Сеть и почта добавляются отдельными watcher'ами позже,
+    чтобы не тащить в ядро OAuth-инфраструктуру.
+    """
+
+    id: str = "rule"
+    enabled: bool = True
+    # file_created | file_modified | log_error | schedule | disk_low | battery_low
+    trigger: Literal[
+        "file_created",
+        "file_modified",
+        "log_error",
+        "schedule",
+        "disk_low",
+        "battery_low",
+    ] = "file_created"
+    #: файл/glob для file_* или путь к логу для log_error
+    path: str = ""
+    #: regex для log_error (пусто — ERROR/CRITICAL/Traceback)
+    pattern: str = ""
+    #: шаблон уведомления; поддерживает {path}, {line}, {percent}, {time}
+    message: str = ""
+    #: если задан — событие запускает агента с этим промптом
+    prompt: str = ""
+    auto_run: bool = False
+    cooldown_minutes: int = 30
+    #: для schedule: ежедневное время HH:MM
+    at: str = ""
+    #: для schedule: интервал в минутах (вместо at)
+    interval_minutes: int = 0
+    #: для schedule.at: сколько минут после назначенного времени ещё можно
+    #: отправить событие, если приложение было закрыто (0 — не догонять)
+    catchup_minutes: int = 120
+    #: для disk_low/battery_low: порог в процентах
+    threshold: float = 0.0
+
+
+class AutonomyConfig(BaseModel):
+    """Самостоятельность Немуси: она замечает, что человек делает за ПК.
+
+    Это не скриншоты и не кейлоггер. Наблюдатель читает только время
+    бездействия и имя активного приложения (по желанию — заголовок окна),
+    чтобы вовремя предложить перерыв или вернуться к разговору.
+    """
+
+    enabled: bool = False
+    #: сколько минут непрерывной активности до предложения перерыва
+    session_minutes: int = 90
+    #: простой, который считается перерывом
+    idle_minutes: int = 5
+    #: минимальная пауза между самостоятельными репликами
+    cooldown_minutes: int = 45
+    #: через сколько минут в одном приложении можно прокомментировать занятие
+    same_app_minutes: int = 45
+    #: встречать после долгого перерыва
+    welcome_back: bool = True
+    #: перерыв, после которого стоит встретить
+    welcome_after_minutes: int = 15
+    #: суммарное активное время за день; 0 — не следить
+    daily_limit_minutes: int = 0
+    #: читать заголовок окна (может содержать имя документа/страницы)
+    read_window_titles: bool = False
+
+
+class AutopilotConfig(BaseModel):
+    """Проактивные события и самостоятельность."""
+
+    enabled: bool = False
+    poll_seconds: int = 10
+    max_notifications_per_hour: int = 12
+    quiet_hours_start: str = "23:00"
+    quiet_hours_end: str = "08:00"
+    #: SQLite с событиями, cooldown'ами и позициями чтения
+    state_db: str = "data/autopilot.db"
+    rules: list[AutopilotRule] = Field(default_factory=list)
+    autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
+
+
+class HealingConfig(BaseModel):
+    """Самовосстановление: повторяющиеся ошибки → диагноз → патч → тесты."""
+
+    enabled: bool = False
+    #: сколько одинаковых ERROR за окно считаем инцидентом
+    error_threshold: int = 3
+    window_minutes: int = 15
+    cooldown_minutes: int = 30
+    #: генерировать патч через LLM (иначе только диагноз и контекст)
+    auto_propose: bool = True
+    #: применять патч без подтверждения (опасно; по умолчанию выключено)
+    auto_apply: bool = False
+    #: команда проверки; {python} подставляется на текущий интерпретатор
+    test_command: str = "{python} -m ruff check ."
+    max_diff_lines: int = 400
+    state_dir: str = "data/healing"
 
 
 class ImagesConfig(BaseModel):
@@ -256,6 +443,8 @@ class ToolsConfig(BaseModel):
     #: потолок токенов на одну задачу (0 — без потолка). Защита от того, что
     #: один длинный проход съест дневную квоту провайдера
     max_run_tokens: int = 500000
+    #: сколько раз задача может сама продлить потолок токенов при прогрессе
+    max_token_extensions: int = 2
 
 
 class ScreenConfig(BaseModel):
@@ -325,6 +514,24 @@ class TelegramConfig(BaseModel):
     advanced_ui: bool = True
     #: максимальный размер скачиваемого файла, МБ (Bot API отдаёт до 20)
     max_download_mb: int = 20
+    #: публичный HTTPS-адрес Mini App (например, Cloudflare/ngrok-туннель)
+    web_app_url: str = ""
+    #: локальный адрес, на котором Web App слушает внутри процесса бота
+    web_app_host: str = "127.0.0.1"
+    web_app_port: int = 8765
+    #: провайдер автоматического туннеля: cloudflared (quick) или ngrok
+    web_app_tunnel_provider: str = "cloudflared"
+    #: authtoken ngrok; на free-плане даёт постоянный *.ngrok-free.dev
+    web_app_ngrok_authtoken: str = ""
+    web_app_ngrok_bin: str = "ngrok"
+    #: сама поднимать туннель (Cloudflare quick или ngrok)
+    web_app_tunnel: bool = True
+    #: путь/имя cloudflared; пусто — искать в PATH и data/bin
+    web_app_tunnel_bin: str = "cloudflared"
+    #: скачать cloudflared в data/bin, если его нет
+    web_app_tunnel_download: bool = True
+    #: сколько секунд ждать появления публичного URL
+    web_app_tunnel_timeout: int = 45
 
     @field_validator("allowed_users", mode="before")
     @classmethod
@@ -401,6 +608,7 @@ class SkillsConfig(BaseModel):
 
 class Config(BaseModel):
     assistant: AssistantConfig = Field(default_factory=AssistantConfig)
+    character: CharacterConfig = Field(default_factory=CharacterConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     images: ImagesConfig = Field(default_factory=ImagesConfig)
@@ -411,6 +619,8 @@ class Config(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     gui: GUIConfig = Field(default_factory=GUIConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    autopilot: AutopilotConfig = Field(default_factory=AutopilotConfig)
+    healing: HealingConfig = Field(default_factory=HealingConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
 
@@ -494,9 +704,15 @@ PATH_FIELDS: tuple[tuple[str, ...], ...] = (
     ("memory", "notes_file"),
     ("logging", "file"),
     ("voice", "wake_word", "vosk_model_path"),
+    ("llm", "llama_cpp", "model_path"),
+    ("llm", "llama_cpp", "models_dir"),
     ("spotify", "cache_path"),
     ("tools", "workspace"),
     ("skills", "dir"),
+    ("autopilot", "state_db"),
+    ("healing", "state_dir"),
+    ("character", "state_file"),
+    ("character", "diary_file"),
 )
 
 
@@ -544,9 +760,17 @@ def load_config(config_path: Path | None = None) -> Config:
     cfg.voice.wake_word.vosk_model_path = _resolve_path(
         cfg.voice.wake_word.vosk_model_path
     )
+    if cfg.llm.llama_cpp.model_path:
+        cfg.llm.llama_cpp.model_path = _resolve_path(cfg.llm.llama_cpp.model_path)
+    if cfg.llm.llama_cpp.models_dir:
+        cfg.llm.llama_cpp.models_dir = _resolve_path(cfg.llm.llama_cpp.models_dir)
     cfg.spotify.cache_path = _resolve_path(cfg.spotify.cache_path)
     cfg.tools.workspace = _resolve_path(cfg.tools.workspace)
     cfg.skills.dir = _resolve_path(cfg.skills.dir)
+    cfg.autopilot.state_db = _resolve_path(cfg.autopilot.state_db)
+    cfg.healing.state_dir = _resolve_path(cfg.healing.state_dir)
+    cfg.character.diary_file = _resolve_path(cfg.character.diary_file)
+    cfg.character.state_file = _resolve_path(cfg.character.state_file)
 
     _inject_keys_from_keyring(cfg)
     return cfg

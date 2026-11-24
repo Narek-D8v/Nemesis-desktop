@@ -1,7 +1,8 @@
 """Клиент LLM: единая точка доступа к провайдерам через LiteLLM.
 
-Поддерживает OpenAI, Anthropic, Google Gemini, OpenRouter и Ollama.
-Реализует автоматический fallback между моделями и стриминг.
+Поддерживает OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama и
+локальные GGUF через llama-cpp-python. Реализует автоматический fallback
+между моделями и стриминг.
 """
 
 from __future__ import annotations
@@ -21,15 +22,19 @@ from nemus.core.providers import (
     ToolCall,
     provider_kwargs,
 )
+from nemus.core.providers.llama_cpp import (
+    LlamaCppError,
+    ensure_llama_cpp_server,
+    stop_llama_cpp_server,
+)
 from nemus.utils.logger import logger
 from nemus.utils.redact import redact_secrets
 
 StreamKind = Literal["content", "thought", "reset", "final"]
 
-#: попыток на одном провайдере, прежде чем уйти в фолбэк. Секундный обрыв
-#: связи — не повод менять модель: смена провайдера означает повторную
-#: отправку всей истории новому адресату (это и лишние потраченные лимиты,
-#: и лишнее ожидание), а 503 от Gemini приходит пачками.
+#: попыток на локальном провайдере, прежде чем уйти в фолбэк. Для облака
+#: в интерактиве действует ``INTERACTIVE_ATTEMPTS``: секундный обрыв связи —
+#: не повод менять модель, но и десять минут ожидания недопустимы.
 MAX_ATTEMPTS = 11
 #: базовая пауза между попытками, сек (растёт с номером попытки)
 RETRY_BACKOFF = 1.0
@@ -44,6 +49,18 @@ MAX_BACKOFF = 5.0
 #: (180 с) съедался одной медленной попыткой — и 503 уходил в фолбэк
 #: без единого повтора, хотя повтор был бы успешен.
 TARGET_BUDGET = 600.0
+#: интерактивный режим: пользователь ждёт ответ, а не фоновую задачу.
+#: Четыре попытки с общим бюджетом 2 минуты покрывают обрывы и 503, но
+#: зависший провайдер больше не держит диалог десять минут. Локальная
+#: модель — отдельный случай: ей нужен полный бюджет на prefill/генерацию.
+INTERACTIVE_ATTEMPTS = 4
+#: потолок одного сетевого запроса в интерактивном режиме. 120 с — это
+#: ожидание фоновой задачи; для чата четыре таких таймаута подряд уже
+#: воспринимаются как зависание.
+INTERACTIVE_TIMEOUT = 45.0
+#: общий бюджет остаётся запасным предохранителем; реальный потолок
+#: задаёт связка «4 попытки × 45 с».
+INTERACTIVE_BUDGET = TARGET_BUDGET
 
 #: причина ухода в фолбэк:
 #: ``limit`` — лимиты исчерпаны (повторять на этом же провайдере бесполезно),
@@ -80,6 +97,12 @@ _PERMANENT_LIMIT_MARKERS = (
 #: подсказка «повторите через N с» (Gemini retryDelay, Retry-After)
 _RETRY_AFTER = re.compile(
     r"(?:retry(?:delay|after)?)[^0-9]{0,24}?(\d+(?:\.\d+)?)\s*s", re.IGNORECASE
+)
+#: точное поле retryDelay важнее фразы «retry in 16h…»: в ней секунды
+#: относятся к остатку минут, а дневная квота измеряется часами
+_RETRY_DELAY_FIELD = re.compile(
+    r"['\"]?retrydelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)\s*s",
+    re.IGNORECASE,
 )
 #: потолок паузы из подсказки провайдера, сек
 MAX_RETRY_HINT = 90.0
@@ -233,15 +256,20 @@ def _strip_sampling(model: str, kwargs: dict[str, Any]) -> None:
         )
 
 
-def retry_after_seconds(text: str) -> float:
-    """Сколько секунд провайдер просит подождать перед повтором (0 — не сказал)."""
-    match = _RETRY_AFTER.search(text or "")
+def _retry_after_raw(text: str) -> float:
+    """Сколько секунд провайдер просит подождать (без потолка, 0 — не сказал)."""
+    match = _RETRY_DELAY_FIELD.search(text or "") or _RETRY_AFTER.search(text or "")
     if match is None:
         return 0.0
     try:
-        return max(0.0, min(float(match.group(1)), MAX_RETRY_HINT))
+        return max(0.0, float(match.group(1)))
     except ValueError:
         return 0.0
+
+
+def retry_after_seconds(text: str) -> float:
+    """Пауза из подсказки провайдера, не больше ``MAX_RETRY_HINT``."""
+    return min(_retry_after_raw(text), MAX_RETRY_HINT)
 
 
 def error_kind(exc: Exception) -> ErrorKind:
@@ -263,7 +291,12 @@ def error_kind(exc: Exception) -> ErrorKind:
     if "ratelimit" in name or _LIMIT_CODE.search(text) or any(
         m in text for m in _LIMIT_MARKERS
     ):
-        return "transient" if retry_after_seconds(text) else "limit"
+        # Дневная квота просит ждать часами — это не лечится паузой, сразу
+        # в фолбэк. Минутный лимит (30–60 с) и 429 без подсказки — временные:
+        # повтор через бэкофф часто проходит.
+        if _retry_after_raw(text) > MAX_RETRY_HINT:
+            return "limit"
+        return "transient"
     if name.startswith(_FATAL_CLASSES):
         return "fatal"
     if _FATAL_CODE.search(text) or any(m in text for m in _FATAL_MARKERS):
@@ -448,6 +481,18 @@ class ChatTarget:
     model: str
 
 
+#: провайдеры, у которых нет бесплатных моделей: автоматический фолбэк
+#: на них приводит к 402 «нет кредитов» вместо ответа
+_PAID_PROVIDERS = frozenset({"anthropic", "openai"})
+
+
+def _is_paid_fallback(target: ChatTarget) -> bool:
+    """Платная ли резервная модель (у OpenRouter бесплатные — с «:free»)."""
+    if target.provider == "openrouter":
+        return not target.model.lower().rstrip().endswith(":free")
+    return target.provider in _PAID_PROVIDERS
+
+
 class LLMClient:
     """Обёртка над LiteLLM с fallback-цепочкой."""
 
@@ -456,9 +501,19 @@ class LLMClient:
         self._target = ChatTarget(
             config.llm.default_provider, config.llm.default_model
         )
-        self._fallbacks: list[ChatTarget] = [
-            ChatTarget(fb.provider, fb.model) for fb in config.llm.fallback
-        ]
+        self._fallbacks: list[ChatTarget] = []
+        #: последнее предупреждение о недоступном провайдере — не повторяем его
+        #: на каждом запросе, иначе журнал превращается в спам
+        self._unavailable: dict[str, str] = {}
+        for fb in config.llm.fallback:
+            target = ChatTarget(fb.provider, fb.model)
+            if _is_paid_fallback(target):
+                logger.warning(
+                    f"Фолбэк {target.model} пропущен: платная модель не должна "
+                    "подхватываться автоматически"
+                )
+                continue
+            self._fallbacks.append(target)
 
     # ------------------------------------------------------------ properties
     @property
@@ -472,7 +527,24 @@ class LLMClient:
     def set_model(self, provider: str, model: str) -> None:
         self._target = ChatTarget(provider, model)
 
+    def close(self) -> None:
+        """Гасит локальный сервер llama.cpp, если он запускался нами."""
+        stop_llama_cpp_server()
+
     # --------------------------------------------------------------- helpers
+    def _prepare_target(self, target: ChatTarget) -> None:
+        """Поднимает локальный сервер до запроса к нему."""
+        if target.provider == "llama_cpp":
+            ensure_llama_cpp_server(self.config, target.model)
+
+    def _warn_not_ready(self, target: ChatTarget, message: str) -> None:
+        """Пишет предупреждение один раз на модель и текст ошибки."""
+        if self._unavailable.get(target.model) == message:
+            logger.debug(f"Провайдер {target.model} всё ещё не готов: {message}")
+            return
+        self._unavailable[target.model] = message
+        logger.warning(f"Провайдер {target.model} не готов: {message}")
+
     def _targets(self) -> list[ChatTarget]:
         seen: list[ChatTarget] = []
         for t in [self._target, *self._fallbacks]:
@@ -488,6 +560,11 @@ class LLMClient:
             "timeout": self.config.llm.request_timeout,
         }
         kwargs.update(provider_kwargs(target.provider, self.config))
+        if target.provider == "llama_cpp":
+            # llama-cpp-python отдаёт модель под алиасом из настроек; имя файла
+            # остаётся в конфиге, но LiteLLM должен знать OpenAI-id сервера.
+            alias = self.config.llm.llama_cpp.model_alias or "nemus-local"
+            kwargs["model"] = f"openai/{alias}"
         # Gemini 3+ по умолчанию «думает» на полную и съедает max_tokens даже
         # на односложный ответ. Просим экономный режим: это в разы меньше
         # выходных токенов и расход лимитов.
@@ -513,6 +590,7 @@ class LLMClient:
         model: str | None = None,
         attempts: int | None = None,
         budget: float | None = None,
+        fallback: bool = True,
         **overrides: Any,
     ) -> LLMResponse:
         """Синхронный запрос: повторы на провайдере, затем fallback.
@@ -520,13 +598,15 @@ class LLMClient:
         ``model`` — отдельная модель для этого запроса (быстрый путь).
         ``attempts``/``budget`` ограничивают повторы: короткая реплика не
         должна ждать многоминутный retry-цикл провайдера.
+        ``fallback=False`` — не перебирать остальных провайдеров: короткая
+        служебная реплика (быстрый ответ, реакция) не должна тратить время
+        на всю цепочку, если выбранная модель не ответила.
         """
         litellm = _import_litellm()
 
         payload = self._messages_payload(messages)
         failures: dict[str, str] = {}
-        max_attempts = max(1, int(attempts or MAX_ATTEMPTS))
-        total_budget = float(budget or TARGET_BUDGET)
+        kinds: list[ErrorKind] = []
         targets = self._targets()
         if model:
             provider = (
@@ -537,11 +617,35 @@ class LLMClient:
             targets = [ChatTarget(provider, model)] + [
                 t for t in targets if t.model != model
             ]
+        if not fallback:
+            targets = targets[:1]
 
         for target in targets:
-            kwargs = self._build_kwargs(target, tools)
+            try:
+                self._prepare_target(target)
+                kwargs = self._build_kwargs(target, tools)
+            except Exception as exc:  # noqa: BLE001
+                message = redact_secrets(str(exc))
+                failures[target.model] = f"{target.model}: {message[:600]}"
+                kinds.append("fatal" if isinstance(exc, LlamaCppError) else "transient")
+                self._warn_not_ready(target, message)
+                continue
             kwargs.update(overrides)
             _strip_sampling(target.model, kwargs)
+            local = target.provider == "llama_cpp"
+            if not local and "timeout" not in overrides:
+                current = float(kwargs.get("timeout") or INTERACTIVE_TIMEOUT)
+                kwargs["timeout"] = min(current, INTERACTIVE_TIMEOUT)
+            max_attempts = max(
+                1,
+                int(
+                    attempts
+                    or (MAX_ATTEMPTS if local else INTERACTIVE_ATTEMPTS)
+                ),
+            )
+            total_budget = float(
+                budget or (TARGET_BUDGET if local else INTERACTIVE_BUDGET)
+            )
             deadline = time.monotonic() + total_budget
             for attempt in range(1, max_attempts + 1):
                 logger.debug(
@@ -566,6 +670,7 @@ class LLMClient:
                         f"(попытка {attempt}/{max_attempts})"
                     )
                     kind = error_kind(exc)
+                    kinds.append(kind)
                     logger.warning(
                         f"Провайдер {target.model}, попытка "
                         f"{attempt}/{max_attempts} ({kind}): {message}"
@@ -584,7 +689,8 @@ class LLMClient:
                     time.sleep(delay)
 
         raise ProviderError(
-            "Все провайдеры недоступны:\n" + "\n".join(failures.values())
+            "Все провайдеры недоступны:\n" + "\n".join(failures.values()),
+            retryable="transient" in kinds,
         )
 
     # ---------------------------------------------------------------- stream
@@ -596,8 +702,10 @@ class LLMClient:
     ) -> Iterator[StreamEvent]:
         """Стриминг ответа. Отдаёт текстовые дельты и финальный ответ.
 
-        Каждый провайдер пробуется до ``MAX_ATTEMPTS`` раз с растущей паузой:
-        секундный обрыв связи не должен ронивать диалог и переключать модель.
+        Облачный провайдер в интерактиве пробуется до ``INTERACTIVE_ATTEMPTS``
+        раз с таймаутом ``INTERACTIVE_TIMEOUT``; локальная модель — до
+        ``MAX_ATTEMPTS``. Секундный обрыв связи не должен ронять диалог и
+        переключать модель.
         Фолбэк сразу — только когда лимиты исчерпаны (429/квота) либо ошибка,
         которую повтор не лечит (ключ, модель, окно контекста). Всё вместе
         ограничено бюджетом ``TARGET_BUDGET`` на один провайдер — одной
@@ -607,34 +715,50 @@ class LLMClient:
 
         payload = self._messages_payload(messages)
         failures: dict[str, str] = {}
+        kinds: list[ErrorKind] = []
 
         for target in self._targets():
-            kwargs = self._build_kwargs(target, tools)
+            try:
+                self._prepare_target(target)
+                kwargs = self._build_kwargs(target, tools)
+            except Exception as exc:  # noqa: BLE001
+                message = redact_secrets(str(exc))
+                failures[target.model] = f"{target.model}: {message[:600]}"
+                kinds.append("fatal" if isinstance(exc, LlamaCppError) else "transient")
+                self._warn_not_ready(target, message)
+                continue
             kwargs.update(overrides)
             kwargs["stream"] = True
+            local = target.provider == "llama_cpp"
+            if not local and "timeout" not in overrides:
+                current = float(kwargs.get("timeout") or INTERACTIVE_TIMEOUT)
+                kwargs["timeout"] = min(current, INTERACTIVE_TIMEOUT)
             # просим провайдера прислать расход токенов последним чанком —
             # без этого в логе не видно, сколько съел каждый запрос
             if target.provider in ("gemini", "openai"):
                 kwargs["stream_options"] = {"include_usage": True}
             _strip_sampling(target.model, kwargs)
-            deadline = time.monotonic() + TARGET_BUDGET
+            max_attempts = MAX_ATTEMPTS if local else INTERACTIVE_ATTEMPTS
+            total_budget = TARGET_BUDGET if local else INTERACTIVE_BUDGET
+            deadline = time.monotonic() + total_budget
 
-            for attempt in range(1, MAX_ATTEMPTS + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     logger.debug(
                         f"LLM (stream) → {target.model} "
-                        f"(попытка {attempt}/{MAX_ATTEMPTS})"
+                        f"(попытка {attempt}/{max_attempts})"
                     )
                     stream = litellm.completion(messages=payload, **kwargs)
                 except Exception as exc:  # noqa: BLE001
                     message = redact_secrets(str(exc))
                     failures[target.model] = (
                         f"{target.model}: {message[:600]} "
-                        f"(попытка {attempt}/{MAX_ATTEMPTS})"
+                        f"(попытка {attempt}/{max_attempts})"
                     )
                     kind = error_kind(exc)
+                    kinds.append(kind)
                     logger.warning(
-                        f"Стрим {target.model}, попытка {attempt}/{MAX_ATTEMPTS} "
+                        f"Стрим {target.model}, попытка {attempt}/{max_attempts} "
                         f"({kind}): {message}"
                     )
                     delay = next_delay(
@@ -643,6 +767,8 @@ class LLMClient:
                         deadline,
                         target.model,
                         retry_after=retry_after_seconds(message),
+                        max_attempts=max_attempts,
+                        total_budget=total_budget,
                     )
                     if delay is None:
                         break
@@ -667,7 +793,7 @@ class LLMClient:
                     message = f"{target.model}: стрим прерван: {redact_secrets(str(exc))}"
                     logger.warning(message)
                     failures[target.model] = (
-                        f"{message[:600]} (попытка {attempt}/{MAX_ATTEMPTS})"
+                        f"{message[:600]} (попытка {attempt}/{max_attempts})"
                     )
                     if emitted:
                         logger.info(
@@ -676,19 +802,24 @@ class LLMClient:
                         )
                         yield StreamEvent(kind="reset")
                         emitted = False
+                    kind = error_kind(exc)
+                    kinds.append(kind)
                     delay = next_delay(
-                        error_kind(exc),
+                        kind,
                         attempt,
                         deadline,
                         target.model,
                         retry_after=retry_after_seconds(message),
+                        max_attempts=max_attempts,
+                        total_budget=total_budget,
                     )
                     if delay is None:
                         break
                     time.sleep(delay)
 
         raise ProviderError(
-            "Все провайдеры недоступны:\n" + "\n".join(failures.values())
+            "Все провайдеры недоступны:\n" + "\n".join(failures.values()),
+            retryable="transient" in kinds,
         )
 
     def _iter_stream(self, stream: Any, model: str) -> Iterator[StreamEvent]:

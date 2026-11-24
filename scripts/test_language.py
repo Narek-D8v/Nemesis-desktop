@@ -117,7 +117,7 @@ def test_system_prompt_language() -> None:
         # слабая модель держит формат, копируя пример
         assert "ПРАВИЛО БРЕЙНШТОРМА" in prompt, prompt
         assert "D) Свой вариант: _________" in prompt, prompt
-        assert "1. Вход:" in prompt, prompt
+        assert "1. Переформулируй задачу" in prompt, prompt
         # доступ к устройству — не повод отказываться: Немуся работает на
         # компьютере пользователя и обязана вызывать инструменты
         assert "работаешь на компьютере пользователя" in prompt, prompt

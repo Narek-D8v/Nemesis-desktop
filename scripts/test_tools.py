@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,6 +48,20 @@ def main() -> int:
     schemas = [t.schema() for t in all_builtin_tools()]
     assert all("function" in s and "parameters" in s["function"] for s in schemas)
     print("\nСхемы валидны:", len(schemas))
+
+    # проверка сайта и картинки зарегистрированы
+    assert "verify_website" in tools, "verify_website должен быть в реестре"
+    assert tools["verify_website"].risk.value == "safe", "проверка не должна ждать подтверждения"
+    assert "search_images" in tools and "download_image" in tools
+    image_tool = tools["download_image"]
+    with tempfile.TemporaryDirectory() as tmp:
+        image_tool.workspace = tmp
+        image_tool.guard = PathGuard(workspace=tmp)
+        target = image_tool._target("images/hero.jpg", ".jpg")
+        assert Path(tmp).resolve() in target.resolve().parents, target
+        blocked = image_tool.execute(url="http://127.0.0.1:4173/a.png")
+        assert not blocked.ok and "внутренний" in blocked.content, blocked.content
+    print("[ok] download_image: путь в workspace, localhost отклонён")
 
     # run_python: запуск сохранённого скрипта по пути + args, cwd = workspace
     rpt = tools["run_python"]

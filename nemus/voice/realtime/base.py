@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable
@@ -71,6 +72,12 @@ class BaseRealtimeSession(ABC):
     SEND_RMS: float = 200
     #: сколько секунд тишины после звука продолжать слать (хвост реплики)
     SEND_GRACE_S: float = 1.2
+    #: минимальный RMS для локального перебивания во время речи ассистента
+    BARGE_RMS: float = 1000.0
+    #: голос пользователя должен быть громче предполагаемого эха динамика
+    ECHO_RATIO: float = 0.5
+    #: сколько секунд держать громкий звук, прежде чем счесть это перебиванием
+    BARGE_HOLD_S: float = 0.2
 
     def __init__(
         self,
@@ -82,6 +89,7 @@ class BaseRealtimeSession(ABC):
         barge_in: bool = True,
         noise_reducer: Any = None,
         reply_language: str = REPLY_AUTO,
+        aec: bool = True,
     ) -> None:
         self.cb = callbacks
         self.registry = registry
@@ -90,10 +98,16 @@ class BaseRealtimeSession(ABC):
         self.system_prompt = system_prompt
         self.barge_in = barge_in
         self.noise_reducer = noise_reducer
+        #: запрошено ли аппаратное/программное эхоподавление
+        self.aec = aec
         #: язык ответов: auto — язык собеседника, либо фиксированный тег
         self.reply_language = normalize(reply_language)
         #: последний момент с ненулевой громкостью (гейт тишины, см. _gate_audio)
         self._last_loud_ts = 0.0
+        # локальное перебивание: буфер и момент начала громкой речи
+        self._barge_since: float | None = None
+        self._barge_buf: deque[bytes] = deque(maxlen=8)
+        self._barge_active = False
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -163,6 +177,69 @@ class BaseRealtimeSession(ABC):
             self._last_loud_ts = now
             return True
         return (now - self._last_loud_ts) <= self.SEND_GRACE_S
+
+    def _echo_guard(
+        self,
+        chunk: bytes,
+        rms: float,
+        now: float,
+        speaker: Any,
+        drain,
+        aec_active: bool = False,
+    ) -> list[bytes] | None:
+        """Не пускает эхо динамика в модель, но оставляет возможность перебить.
+
+        Пока ассистент говорит, его голос попадает в микрофон и серверный VAD
+        принимает эхо за реплику пользователя. Поэтому во время воспроизведения
+        микрофон молчит, кроме случая, когда пользователь заметно громче
+        предполагаемого эха и держит голос ``BARGE_HOLD_S``.
+
+        Возвращает чанки для отправки или ``None``, если это эхо/тишина.
+        """
+        if aec_active:
+            # AEC уже вычел эхо — микрофон можно не глушить, чтобы сохранить
+            # естественное перебивание.
+            self._barge_since = None
+            self._barge_buf.clear()
+            self._barge_active = False
+            return [chunk]
+
+        if speaker is None or not speaker.is_playing:
+            self._barge_since = None
+            self._barge_buf.clear()
+            self._barge_active = False
+            return [chunk]
+
+        if not self.barge_in:
+            return None
+
+        if self._barge_active:
+            return [chunk]
+
+        echo = float(getattr(speaker, "output_rms", 0.0) or 0.0)
+        threshold = max(self.BARGE_RMS, echo * self.ECHO_RATIO)
+        if rms < threshold:
+            self._barge_since = None
+            self._barge_buf.clear()
+            return None
+
+        if self._barge_since is None:
+            self._barge_since = now
+        self._barge_buf.append(chunk)
+        if now - self._barge_since < self.BARGE_HOLD_S:
+            return None
+
+        # Пользователь действительно перебивает: останавливаем ответ локально,
+        # чтобы его голос не смешивался с остатком фразы ассистента.
+        self._barge_active = True
+        self._barge_since = None
+        speaker.clear()
+        loop = self._loop
+        if callable(drain) and loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(drain)
+        chunks = list(self._barge_buf)
+        self._barge_buf.clear()
+        return chunks
 
     def _schedule(self, coro) -> None:
         """Запускает корутину в потоке сессии."""

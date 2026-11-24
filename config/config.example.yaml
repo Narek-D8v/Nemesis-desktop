@@ -22,9 +22,38 @@ assistant:
     используй их, когда это помогает выполнить задачу. Не выдумывай результаты
     инструментов. При опасных действиях сначала объясни, что собираешься сделать.
 
+# --- Характер и чувства ---
+# Черты задают склонности, базовые чувства — точка покоя. Текущее
+# состояние (настроение, теплота, обида, скука) хранится в data/emotions.json,
+# меняется от общения и доступно командой /emotions в Telegram.
+character:
+  enabled: true
+  playfulness: 45     # игривость
+  sensitivity: 55     # обидчивость
+  attachment: 60      # привязанность
+  independence: 50    # самостоятельность
+  curiosity: 65       # любопытство
+  base_mood: 10       # настроение, -100…100
+  base_energy: 60
+  base_trust: 55
+  base_hurt: 0
+  proactive_enabled: true   # может написать первой, если соскучилась
+  # Ритм инициативы не задаётся расписанием: он растёт из скуки и обиды.
+  quiet_hours_start: "23:00" # не писать ночью
+  quiet_hours_end: "08:00"
+  # Расширенный режим: свободное описание характера поверх ползунков.
+  advanced: false
+  custom_prompt: ""
+  state_file: "data/emotions.json"
+  # Личный дневник: она пишет туда сама, когда захочет, с датой.
+  # Это её мысли, а не заметки о пользователе; файл можно читать руками.
+  # /diary присылает его только при высоком доверии и привязанности.
+  diary: true
+  diary_file: "data/diary.md"
+
 # --- LLM ---
 llm:
-  # Провайдер по умолчанию: openrouter | gemini | anthropic | openai | ollama
+  # Провайдер по умолчанию: openrouter | gemini | anthropic | openai | ollama | llama_cpp
   default_provider: "gemini"
   # Модель по умолчанию (формат зависит от провайдера)
   default_model: "gemini/gemini-3.5-flash-lite"
@@ -33,7 +62,7 @@ llm:
   # Бюджет рассуждений Gemini 3+: none|minimal|low|medium|high.
   # Для агентного цикла рекомендуем medium: при low слабая модель чаще
   # обещает работу («сейчас сделаю») вместо вызова инструментов.
-  reasoning_effort: "medium"
+  reasoning_effort: "low"
   # Быстрый путь для коротких светских реплик: пусто — default_model
   fast_model: ""
   fast_max_tokens: 300
@@ -44,8 +73,8 @@ llm:
       model: "gemini/gemini-3.5-flash"
     - provider: "openrouter"
       model: "openrouter/google/gemma-4-31b-it:free"
-    - provider: "openrouter"
-      model: "openrouter/anthropic/claude-sonnet-4.6"
+    # Платные модели в автоматический фолбэк не добавляйте: при нулевом
+    # балансе они дают 402 и обрывают задачу вместо ответа.
   providers:
     openrouter:
       api_base: "https://openrouter.ai/api/v1"
@@ -59,6 +88,34 @@ llm:
       api_base: "https://api.openai.com/v1"
     ollama:
       api_base: "http://localhost:11434"
+    llama_cpp:
+      # пусто — адрес собирается из llm.llama_cpp.host/port
+      api_base: ""
+      api_key: ""
+  # Локальная GGUF-модель через llama-cpp-python[server].
+  # Установка: pip install "llama-cpp-python[server]"
+  llama_cpp:
+    model_path: "data/models/model.gguf"
+    models_dir: "data/models"
+    # Hugging Face: owner/model и файл; можно вставить полную ссылку.
+    hf_repo: ""
+    hf_file: ""
+    hf_revision: "main"
+    hf_endpoint: "https://huggingface.co"
+    auto_download: true
+    host: "127.0.0.1"
+    port: 8081
+    model_alias: "nemus-local"
+    n_ctx: 8192
+    # 0 — CPU, -1 — все слои на GPU
+    n_gpu_layers: 0
+    n_threads: 0
+    n_batch: 512
+    chat_format: ""
+    auto_start: true
+    start_timeout: 180.0
+    verbose: false
+    extra_args: []
 
 # --- Изображения ---
 images:
@@ -129,10 +186,21 @@ voice:
     openai_model: "gpt-realtime"
     openai_voice: "marin"
     audio: true
+    # WebRTC AEC3: вычитает голос ассистента из микрофона (работа с динамиками)
+    aec: true
     # Слово активации («Немуся») запускает диалог: облако, иначе — локальный режим
     wake_activates: true
     # Если нет интернета/ключа — автоматически переходить на локальный аналог
     offline_fallback: true
+  # Постоянный голосовой компаньон: после слова активации отвечает, слушает
+  # продолжение и сам возвращается в режим ожидания. Работает в GUI.
+  companion:
+    enabled: false
+    wake_ack: "Слушаю"          # пусто — без подтверждения
+    follow_up_seconds: 25      # сколько ждать продолжения разговора
+    speak_events: true         # озвучивать события автопилота
+    quiet_hours_start: "23:00"
+    quiet_hours_end: "08:00"
   # Прерывать ассистента голосом. false — микрофон молчит, пока ассистент
   # говорит (полудуплекс): меньше самопрослушивания/эха и реакции на шум.
   barge_in: true
@@ -147,6 +215,69 @@ voice:
     krisp_model_path: ""
     krisp_frame_ms: 10
     krisp_suppression: 100.0
+
+# --- Проактивный автопилот ---
+# События дедуплицируются через SQLite, поэтому GUI и Telegram-демон могут
+# работать одновременно. Отключённый автопилот не делает ничего.
+autopilot:
+  enabled: false
+  poll_seconds: 10
+  max_notifications_per_hour: 12
+  quiet_hours_start: "23:00"
+  quiet_hours_end: "08:00"
+  state_db: "data/autopilot.db"
+  # Самостоятельность: без скриншотов и кейлоггера. Наблюдатель читает
+  # только простой и активное приложение; заголовок окна — по желанию.
+  autonomy:
+    enabled: false             # true — замечает активность и говорит первой
+    session_minutes: 90        # непрерывная работа до предложения перерыва
+    idle_minutes: 5            # простой, который считается перерывом
+    cooldown_minutes: 45       # пауза между её самостоятельными репликами
+    same_app_minutes: 45       # через сколько заметить засиживание в приложении
+    welcome_back: true         # встречать после перерыва
+    welcome_after_minutes: 15
+    daily_limit_minutes: 480   # 0 — не следить за суммой за день
+    read_window_titles: false  # true — читать заголовок активного окна
+  # Правила можно добавлять вручную. auto_run: true запускает агента с prompt.
+  rules:
+    - id: "new-invoice"
+      enabled: false
+      trigger: "file_created"       # file_created | file_modified | log_error |
+                                    # schedule | disk_low | battery_low
+      path: "data/workspace/Downloads/*.pdf"
+      message: "Новый PDF: {name}"
+      prompt: "Разбери новый документ {path} и скажи, что это и что с ним делать"
+      auto_run: false
+      cooldown_minutes: 30
+    - id: "disk-space"
+      enabled: false
+      trigger: "disk_low"
+      threshold: 90                 # процент занятости
+      message: "Мало места: свободно {free} ГБ ({percent}% занято)"
+      cooldown_minutes: 120
+    - id: "morning-brief"
+      enabled: false
+      trigger: "schedule"
+      at: "09:00"                  # или interval_minutes: 60
+      message: "Доброе утро. Пора собрать план дня."
+      prompt: "Сделай короткую сводку: что важно сегодня, какие файлы менялись вчера"
+      auto_run: false
+      cooldown_minutes: 30
+
+# --- Самовосстановление ---
+# Следит за ERROR/CRITICAL в logging.file. Патч генерируется LLM, применяется
+# только после подтверждения /heal apply, проверяется test_command и при
+# ошибке автоматически откатывается.
+healing:
+  enabled: false
+  error_threshold: 3
+  window_minutes: 15
+  cooldown_minutes: 30
+  auto_propose: true
+  auto_apply: false
+  test_command: "{python} -m ruff check ."
+  max_diff_lines: 400
+  state_dir: "data/healing"
 
 # --- Инструменты и разрешения ---
 tools:
@@ -303,12 +434,31 @@ telegram:
   transcribe_voice: true
   # Показывать примеры задач и контекстные подсказки в чате
   hints_enabled: true
-  # Bot API 10.3+: нативный стрим с кнопкой «Стоп», rich-ответы, HTML-панель
-  # задачи в личке и ephemeral-ответы в группах. Выключите для точно такого
-  # же поведения, как раньше: одно редактируемое сообщение прогресса.
+  # Bot API 10.3+: нативный стрим с кнопкой «Стоп», rich-ответы и
+  # ephemeral-ответы в группах. Выключите для точно такого же поведения,
+  # как раньше: одно редактируемое сообщение прогресса.
   advanced_ui: true
   # Максимальный размер скачиваемого файла, МБ (Bot API отдаёт до 20)
   max_download_mb: 20
+  # Публичный HTTPS-адрес Mini App с настройками (Cloudflare Tunnel, ngrok
+  # или ваш reverse proxy). Пусто — /panel покажет inline-резерв.
+  # Для Tailscale Funnel: https://<machine>.<tailnet>.ts.net
+  web_app_url: ""
+  # Локальный адрес сервера Mini App внутри процесса бота. Наружу его
+  # отдаёт HTTPS-туннель; не открывайте порт в интернет напрямую.
+  web_app_host: "127.0.0.1"
+  web_app_port: 8765
+  # Автоматический туннель: cloudflared (временный trycloudflare.com) или
+  # ngrok (постоянный dev-домен на free-плане).
+  web_app_tunnel_provider: "cloudflared"
+  # Для ngrok: authtoken с https://dashboard.ngrok.com/get-started/your-authtoken
+  web_app_ngrok_authtoken: ""
+  web_app_ngrok_bin: "ngrok"
+  # false — использовать только web_app_url / локальный сервер.
+  web_app_tunnel: true
+  web_app_tunnel_bin: "cloudflared"
+  web_app_tunnel_download: true
+  web_app_tunnel_timeout: 45
 
 # --- GUI ---
 gui:

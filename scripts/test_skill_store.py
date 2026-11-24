@@ -48,6 +48,7 @@ from nemus.core.skills import (  # noqa: E402
     SKILL_FILE,
     load_skills,
     remove_skill,
+    skill_pack,
     skill_plugin,
 )
 
@@ -593,10 +594,17 @@ def test_local_plugin(tmp: Path) -> None:
     assert "zip-skill" in {s.name for s in load_skills(root, builtin=False)}
     assert origin_of(root, "zip-pack")["local"] == str(archive_path.resolve())
 
-    # архив без манифеста и архив с двумя плагинами
+    # архив без манифеста
     bad = tmp / "bad.zip"
     with zipfile.ZipFile(bad, "w") as archive:
         archive.writestr("readme.txt", "нет манифеста")
+    try:
+        install_plugin_local(bad, root)
+        raise AssertionError("bad.zip не должен ставиться")
+    except StoreError as exc:
+        assert "нет плагина" in str(exc).lower(), exc
+
+    # скилл-пак из двух плагинов ставится целиком, а не отвергается
     two = tmp / "two.zip"
     with zipfile.ZipFile(two, "w") as archive:
         for name in ("a", "b"):
@@ -604,12 +612,12 @@ def test_local_plugin(tmp: Path) -> None:
                 f"{name}/.claude-plugin/plugin.json",
                 json.dumps({"name": name}),
             )
-    for path, needle in ((bad, "нет плагина"), (two, "несколько плагинов")):
-        try:
-            install_plugin_local(path, root)
-            raise AssertionError(f"{path.name} не должен ставиться")
-        except StoreError as exc:
-            assert needle in str(exc).lower(), exc
+    two_root = tmp / "two-installed"
+    folder, changed = install_plugin_local(two, two_root)
+    assert (folder, changed) == ("a", True), (folder, changed)
+    assert (two_root / "a" / PLUGIN_DIR / PLUGIN_FILE).is_file()
+    assert (two_root / "b" / PLUGIN_DIR / PLUGIN_FILE).is_file()
+    assert {p.folder for p in installed_plugins(two_root)} == {"a", "b"}
 
     assert remove_plugin("local-pack", root) and remove_plugin("zip-pack", root)
     assert installed_plugins(root) == [], "локальные плагины остались после удаления"
@@ -674,26 +682,271 @@ def test_local_skill(tmp: Path) -> None:
     assert not (root / "zipped-skill" / "README.md").exists()
     assert origin_of(root, "zipped-skill")["local"] == str(archive_path.resolve())
 
-    # архив без SKILL.md и архив с двумя скиллами
+    # пакет с плагином: тот же скилл лежит ещё и внутри plugins/.../skills/.
+    # Это одна установка, а не «в архиве несколько скиллов».
+    nested = tmp / "skill-with-plugin.zip"
+    with zipfile.ZipFile(nested, "w") as archive:
+        archive.writestr(
+            "pack/SKILL.md",
+            "---\nname: Nested Skill\ndescription: Скилл с плагином\n---\n\n# Pack\n",
+        )
+        archive.writestr(
+            "pack/plugins/p/skills/copy/SKILL.md",
+            "---\nname: Nested Skill\n---\n\n# Копия\n",
+        )
+        archive.writestr("pack/.claude-plugin/marketplace.json", "{}")
+    skill, changed = install_skill_local(nested, root)
+    assert (skill.name, changed) == ("Nested Skill", True), (skill.name, changed)
+    assert (root / "nested-skill" / "plugins" / "p" / "skills" / "copy").is_dir()
+    nested_skills = [
+        item
+        for item in load_skills(root, builtin=False)
+        if item.path.resolve() == (root / "nested-skill").resolve()
+    ]
+    assert len(nested_skills) == 1, "вложенная копия снова считается отдельным скиллом"
+
+    # архив без SKILL.md
     bad = tmp / "bad-skill.zip"
     with zipfile.ZipFile(bad, "w") as archive:
         archive.writestr("readme.txt", "нет скилла")
+    try:
+        install_skill_local(bad, root)
+        raise AssertionError("bad-skill.zip не должен ставиться")
+    except StoreError as exc:
+        assert "нет skill.md" in str(exc).lower(), exc
+
+    # скилл-пак из двух скиллов ставится целиком, а не отвергается
     two = tmp / "two-skills.zip"
     with zipfile.ZipFile(two, "w") as archive:
         for name in ("a", "b"):
             archive.writestr(
                 f"{name}/SKILL.md", f"---\nname: {name}\n---\n\n# {name}\n"
             )
-    for path, needle in ((bad, "нет skill.md"), (two, "несколько скиллов")):
-        try:
-            install_skill_local(path, root)
-            raise AssertionError(f"{path.name} не должен ставиться")
-        except StoreError as exc:
-            assert needle in str(exc).lower(), exc
+    two_root = tmp / "two-skills-installed"
+    skill, changed = install_skill_local(two, two_root)
+    assert (skill.name, changed) == ("a", True), (skill.name, changed)
+    assert (two_root / "a" / SKILL_FILE).is_file()
+    assert (two_root / "b" / SKILL_FILE).is_file()
+    assert {s.name for s in load_skills(two_root, builtin=False)} == {"a", "b"}
+    assert origin_of(two_root, "a")["component"] == "a"
 
     assert remove_skill("Local Skill", root), "локальный скилл не удалился"
     assert not disk.exists()
     print("ok  скилл из файла: папка, .zip, источник, обновление, ошибки архивов")
+
+
+def test_nested_skill_and_plugin(tmp: Path) -> None:
+    """Один скилл может содержать другие скиллы и плагин целиком."""
+    source = tmp / "src" / "meta-pack"
+    (source / "skills" / "child").mkdir(parents=True)
+    (source / "examples" / "demo").mkdir(parents=True)
+    (source / "plugins" / "p").mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: meta-pack\ndescription: Набор внутри скилла\n---\n\n# Мета\n",
+        encoding="utf-8",
+    )
+    (source / "skills" / "child" / "SKILL.md").write_text(
+        "---\nname: child-skill\ndescription: Вложенный скилл\n---\n\n# Дочерний\n",
+        encoding="utf-8",
+    )
+    # пример в документации — не скилл, его нельзя отдавать модели
+    (source / "examples" / "demo" / "SKILL.md").write_text(
+        "---\nname: example-only\ndescription: Пример\n---\n\n# Пример\n",
+        encoding="utf-8",
+    )
+    (source / "plugins" / "p" / ".claude-plugin").mkdir(parents=True)
+    (source / "plugins" / "p" / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "P"}), encoding="utf-8"
+    )
+    (source / "plugins" / "p" / "commands").mkdir()
+    (source / "plugins" / "p" / "commands" / "hi.md").write_text(
+        "---\ndescription: Приветствие\n---\n\nСкажи привет.", encoding="utf-8"
+    )
+
+    root = tmp / "skills"
+    skill, changed = install_skill_local(source, root)
+    assert (skill.name, changed) == ("meta-pack", True), (skill.name, changed)
+    found = {item.name: item for item in load_skills(root, builtin=False)}
+    assert set(found) == {"meta-pack", "child-skill", "p:hi"}, sorted(found)
+    assert "example-only" not in found, "пример из документации стал скиллом"
+    assert skill_pack(found["child-skill"].path, root) == "meta-pack"
+    assert found["p:hi"].path.name == "commands"
+    assert not remove_skill("child-skill", root), "вложенный скилл удалился отдельно"
+    assert (root / "meta-pack" / "skills" / "child" / SKILL_FILE).is_file()
+
+    # правка вложенного скилла доезжает обновлением всего набора
+    (source / "skills" / "child" / "SKILL.md").write_text(
+        "---\nname: child-skill\ndescription: Вложенный скилл\n---\n\n# Дочерний правленый\n",
+        encoding="utf-8",
+    )
+    _, changed = update_installed("meta-pack", root)
+    assert changed, "правка набора не применилась"
+    assert "правленый" in (
+        root / "meta-pack" / "skills" / "child" / SKILL_FILE
+    ).read_text(encoding="utf-8")
+
+
+MEGA_COMMAND = """---
+description: Здоровается из мега-пака
+---
+
+Поздоровайся с $ARGUMENTS.
+"""
+
+
+def test_skill_pack_and_mega_pack(tmp: Path) -> None:
+    """Скилл-пак из нескольких скиллов и мега-пак со скиллами и плагинами."""
+    tmp.mkdir(parents=True, exist_ok=True)
+    root = tmp / "skills"
+    pack = tmp / "skill-pack.zip"
+    with zipfile.ZipFile(pack, "w") as archive:
+        archive.writestr(
+            "pack-main/skills/one/SKILL.md",
+            "---\nname: one\ndescription: Первый\n---\n\n# Один\n",
+        )
+        archive.writestr(
+            "pack-main/skills/two/SKILL.md",
+            "---\nname: two\ndescription: Второй\n---\n\n# Два\n",
+        )
+        archive.writestr("pack-main/README.md", "общий файл пака")
+    skill, changed = install_skill_local(pack, root)
+    assert (skill.name, changed) == ("one", True), (skill.name, changed)
+    assert {s.name for s in load_skills(root, builtin=False)} == {"one", "two"}
+    assert origin_of(root, "one")["component"] == "skills/one"
+    assert origin_of(root, "two")["component"] == "skills/two"
+
+    # обновление одного компонента не трогает соседний
+    with zipfile.ZipFile(pack, "w") as archive:
+        archive.writestr(
+            "pack-main/skills/one/SKILL.md",
+            "---\nname: one\ndescription: Первый\n---\n\n# Один правленый\n",
+        )
+        archive.writestr(
+            "pack-main/skills/two/SKILL.md",
+            "---\nname: two\ndescription: Второй\n---\n\n# Два\n",
+        )
+        archive.writestr("pack-main/README.md", "общий файл пака")
+    _, changed = update_installed("one", root)
+    assert changed, "правка скилла из пака не применилась"
+    assert "правленый" in (root / "one" / "SKILL.md").read_text(encoding="utf-8")
+    assert (root / "two" / "SKILL.md").is_file()
+
+    mega = tmp / "mega-pack.zip"
+    with zipfile.ZipFile(mega, "w") as archive:
+        archive.writestr(
+            "mega-main/skills/standalone/SKILL.md",
+            "---\nname: standalone\ndescription: Скилл мега-пака\n---\n\n# Сам\n",
+        )
+        for name, title in (("tools", "Tools"), ("other", "Other")):
+            archive.writestr(
+                f"mega-main/plugins/{name}/.claude-plugin/plugin.json",
+                json.dumps({"name": title, "version": "1.0"}),
+            )
+            archive.writestr(
+                f"mega-main/plugins/{name}/skills/{name}-skill/SKILL.md",
+                f"---\nname: {name}-skill\ndescription: Скилл {name}\n---\n\n# {title}\n",
+            )
+            archive.writestr(
+                f"mega-main/plugins/{name}/commands/hello.md", MEGA_COMMAND
+            )
+        archive.writestr(
+            "mega-main/.claude-plugin/marketplace.json",
+            json.dumps({"plugins": [{"name": "Tools"}, {"name": "Other"}]}),
+        )
+
+    mega_root = tmp / "mega-skills"
+    folder, changed = install_plugin_local(mega, mega_root)
+    assert (folder in {"tools", "other"}, changed) == (True, True), (folder, changed)
+    assert {p.folder for p in installed_plugins(mega_root)} == {"tools", "other"}
+    names = {s.name for s in load_skills(mega_root, builtin=False)}
+    assert {
+        "standalone",
+        "tools-skill",
+        "other-skill",
+        "tools:hello",
+        "other:hello",
+    } <= names, sorted(names)
+    assert (mega_root / "tools" / "commands" / "hello.md").is_file()
+    assert remove_skill("tools-skill", mega_root) is False
+
+    # обновление одного плагина мега-пака не трогает соседний
+    with zipfile.ZipFile(mega, "w") as archive:
+        archive.writestr(
+            "mega-main/skills/standalone/SKILL.md",
+            "---\nname: standalone\ndescription: Скилл мега-пака\n---\n\n# Сам\n",
+        )
+        for name, title in (("tools", "Tools"), ("other", "Other")):
+            archive.writestr(
+                f"mega-main/plugins/{name}/.claude-plugin/plugin.json",
+                json.dumps({"name": title, "version": "1.0"}),
+            )
+            archive.writestr(
+                f"mega-main/plugins/{name}/skills/{name}-skill/SKILL.md",
+                f"---\nname: {name}-skill\ndescription: Скилл {name}\n---\n\n# {title}\n",
+            )
+            body = (
+                MEGA_COMMAND.replace("Поздоровайся", "Поприветствуй")
+                if name == "tools"
+                else MEGA_COMMAND
+            )
+            archive.writestr(f"mega-main/plugins/{name}/commands/hello.md", body)
+    _, changed = update_plugin("tools", mega_root)
+    assert changed, "правка плагина из мега-пака не применилась"
+    assert "Поприветствуй" in (
+        mega_root / "tools" / "commands" / "hello.md"
+    ).read_text(encoding="utf-8")
+    assert remove_plugin("other", mega_root)
+    assert {p.folder for p in installed_plugins(mega_root)} == {"tools"}
+
+
+def test_pack_gui_marks_members(tmp: Path) -> None:
+    """Вложенные скиллы не получают своих «⟳»/«×» в «Скачанных»."""
+    from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+
+    from nemus.gui.skill_store import SkillStoreDialog
+
+    app = QApplication.instance() or QApplication([])
+    tmp.mkdir(parents=True, exist_ok=True)
+    source = tmp / "gui-pack-src"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: gui-pack\ndescription: Пак\n---\n\n# Пак\n",
+        encoding="utf-8",
+    )
+    (source / "skills" / "inner").mkdir(parents=True)
+    (source / "skills" / "inner" / "SKILL.md").write_text(
+        "---\nname: gui-inner\ndescription: Вложенный\n---\n\n# Внутри\n",
+        encoding="utf-8",
+    )
+    dlg = SkillStoreDialog(None, directory=tmp, client=_client())
+    try:
+        dlg._install_local_skill(str(source))
+        _wait(app, lambda: _headers(dlg._installed_box) == [
+            "Самостоятельные скиллы (1)",
+            "В составе наборов (1)",
+        ])
+        assert _headers(dlg._installed_box) == [
+            "Самостоятельные скиллы (1)",
+            "В составе наборов (1)",
+        ], _headers(dlg._installed_box)
+        cards = _cards(dlg._installed_box)
+        inner_card = next(
+            card
+            for card in cards
+            if any(label.text() == "gui-inner" for label in card.findChildren(QLabel))
+        )
+        assert any(
+            "в составе набора" in label.text()
+            for label in inner_card.findChildren(QLabel)
+        )
+        assert not [
+            button
+            for button in inner_card.findChildren(QPushButton)
+            if button.objectName() in ("StoreUpdate", "StoreRemove")
+        ], "у вложенного скилла появились свои кнопки"
+    finally:
+        dlg.close()
+        dlg.deleteLater()
 
 
 def _cards(layout) -> list:
@@ -1102,6 +1355,9 @@ def main() -> None:
         test_plugins(tmp / "plugins")
         test_local_plugin(tmp / "local_plugins")
         test_local_skill(tmp / "local_skills")
+        test_nested_skill_and_plugin(tmp / "nested")
+        test_skill_pack_and_mega_pack(tmp / "bundles")
+        test_pack_gui_marks_members(tmp / "pack_gui")
         test_gui(tmp / "skills3")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

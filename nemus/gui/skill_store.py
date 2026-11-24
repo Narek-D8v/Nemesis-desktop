@@ -57,6 +57,7 @@ from nemus.core.skills import (
     get_skill,
     load_skills,
     remove_skill,
+    skill_pack,
     skill_plugin,
 )
 from nemus.gui import i18n
@@ -1516,18 +1517,23 @@ class SkillStoreDialog(QDialog):
         if not skills:
             self._notice(self._installed_box, i18n.tr("store.installed_empty"))
             return
-        # самостоятельные скиллы и скиллы из плагинов — двумя группами:
-        # у вторых своих «⟳»/«×» нет, ими управляет плагин целиком
+        # самостоятельные скиллы, скиллы из плагинов и из наборов — тремя
+        # группами: у вложенных своих «⟳»/«×» нет, ими управляет пакет
         standalone: list[Skill] = []
         members: list[Skill] = []
+        pack_members: list[Skill] = []
         for skill in skills:
-            if skill_plugin(getattr(skill, "path", ""), self._directory):
+            path = getattr(skill, "path", "")
+            if skill_plugin(path, self._directory):
                 members.append(skill)
+            elif skill_pack(path, self._directory):
+                pack_members.append(skill)
             else:
                 standalone.append(skill)
         for title, group in (
             ("store.group.standalone", standalone),
             ("store.group.plugin_members", members),
+            ("store.group.pack_members", pack_members),
         ):
             if not group:
                 continue
@@ -1575,8 +1581,12 @@ class SkillStoreDialog(QDialog):
         # скилл из установленного плагина — часть пакета: отдельно не трогаем
         path = getattr(skill, "path", None)
         member = skill_plugin(getattr(skill, "path", ""), self._directory)
-        if member:
-            badge_text = i18n.tr("store.plugin_member", name=member)
+        pack = skill_pack(getattr(skill, "path", ""), self._directory)
+        if member or pack:
+            if member:
+                badge_text = i18n.tr("store.plugin_member", name=member)
+            else:
+                badge_text = i18n.tr("store.pack_member", name=pack)
             badge = QLabel(badge_text)
             badge.setObjectName("StoreCardMeta")
             texts.addWidget(badge)
@@ -1600,8 +1610,8 @@ class SkillStoreDialog(QDialog):
         check.setObjectName("StoreInstalledMark")
         row.addWidget(check, 0, Qt.AlignmentFlag.AlignTop)
 
-        if member:
-            return card  # обновление и удаление — у плагина целиком
+        if member or pack:
+            return card  # обновление и удаление — у плагина или набора целиком
 
         name = str(getattr(skill, "name", ""))
         refresh = QPushButton("⟳")

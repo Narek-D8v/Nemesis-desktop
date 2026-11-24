@@ -9,6 +9,7 @@
 - Gemini — список моделей по API-ключу; бесплатный tier есть у Flash и Gemma,
   Pro-модели платные (поэтому не выдаём их за бесплатные);
 - Ollama — локальный ``localhost:11434/api/tags`` (модели уже скачаны, они бесплатны);
+- llama.cpp — локальные ``.gguf`` из ``llm.llama_cpp.models_dir``;
 - Anthropic/OpenAI — публичных списков без ключа нет, всегда статический фолбэк.
 
 При ошибке сети или пустом ответе возвращается ``STATIC_MODELS`` — приложение
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nemus.core.providers.registry import PROVIDER_SPECS
@@ -65,6 +67,9 @@ STATIC_MODELS: dict[str, list[tuple[str, bool]]] = {
         ("ollama/llama3.2", True),
         ("ollama/qwen3", True),
         ("ollama/gemma3", True),
+    ],
+    "llama_cpp": [
+        ("llama_cpp/local", True),
     ],
 }
 
@@ -179,6 +184,43 @@ def parse_ollama(data: Any) -> list[tuple[str, bool]]:
     ]
 
 
+def parse_llama_cpp(models_dir: str | Path, model_path: str = "") -> list[tuple[str, bool]]:
+    """GGUF-файлы из папки моделей и выбранный в конфиге файл.
+
+    Имя модели — путь относительно корня проекта, чтобы его можно было
+    сохранить в ``llm.default_model`` и перенести на другую машину.
+    """
+    from nemus.config import PROJECT_ROOT
+
+    paths: list[Path] = []
+    if model_path:
+        paths.append(Path(model_path))
+    root = Path(models_dir) if models_dir else None
+    if root is not None and root.is_dir():
+        paths.extend(
+            p
+            for p in root.rglob("*")
+            if p.is_file() and p.suffix.lower() == ".gguf"
+        )
+
+    out: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        try:
+            shown = resolved.relative_to(PROJECT_ROOT).as_posix()
+        except ValueError:
+            shown = resolved.as_posix()
+        name = f"llama_cpp/{shown}"
+        if name not in seen:
+            seen.add(name)
+            out.append((name, True))
+    return out
+
+
 # ------------------------------------------------------------------- живой список
 def fetch_models(provider: str, cfg: "Config | None" = None) -> list[tuple[str, bool]]:
     """Живой список моделей провайдера. Бросает исключение при недоступности."""
@@ -199,6 +241,13 @@ def fetch_models(provider: str, cfg: "Config | None" = None) -> list[tuple[str, 
         )
     if provider == "ollama":
         return parse_ollama(_http_json("http://localhost:11434/api/tags", timeout=2.0))
+    if provider == "llama_cpp":
+        if cfg is None:
+            raise RuntimeError("для llama.cpp нужен конфиг с путями к моделям")
+        return parse_llama_cpp(
+            cfg.llm.llama_cpp.models_dir,
+            cfg.llm.llama_cpp.model_path,
+        )
     raise RuntimeError(f"для провайдера {provider} нет публичного списка моделей")
 
 
@@ -233,6 +282,7 @@ __all__ = [
     "parse_gemini",
     "parse_openrouter",
     "parse_ollama",
+    "parse_llama_cpp",
     "sort_models",
     "static_models",
 ]

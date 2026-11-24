@@ -19,7 +19,27 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nemus.config import Config  # noqa: E402
+from nemus.core.diary import DiaryBook  # noqa: E402
+from nemus.core.emotions import EmotionState, EmotionStore  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
+from nemus.core.proactive import (  # noqa: E402
+    PROACTIVE_CURIOUS_ANGLES as _PROACTIVE_CURIOUS_ANGLES,
+)
+from nemus.core.proactive import (  # noqa: E402
+    PROACTIVE_RITUAL_ANGLES as _PROACTIVE_RITUAL_ANGLES,
+)
+from nemus.core.proactive import (  # noqa: E402
+    PROACTIVE_SYSTEM as _PROACTIVE_SYSTEM,
+)
+from nemus.core.proactive import (  # noqa: E402
+    daypart as _daypart,
+)
+from nemus.core.proactive import (
+    drop_repeated_greeting as _drop_repeated_greeting,
+)
+from nemus.core.proactive import (
+    proactive_angle as _proactive_angle,
+)
 from nemus.core.telegram_bot import (  # noqa: E402
     MAX_DOWNLOAD_MB,
     SEND_LIMIT_MB,
@@ -31,7 +51,18 @@ from nemus.core.telegram_bot import (  # noqa: E402
     guess_kind,
     safe_filename,
     split_message,
+    start_message,
     telegram_status,
+)
+from nemus.core.telegram_commands import (  # noqa: E402
+    category,
+    command_category_rows,
+    command_category_text,
+    command_detail_text,
+    command_home_rows,
+    command_home_text,
+    find_command,
+    search_commands,
 )
 from nemus.core.telegram_ux import (  # noqa: E402
     attachment_action_rows,
@@ -63,6 +94,43 @@ def _update(uid: int, chat_type: str = "private") -> SimpleNamespace:
     )
 
 
+def test_proactive_drops_repeated_greeting() -> None:
+    history = "Пользователь: привет\nНемуся: Привет! Как прошёл день?"
+    assert _drop_repeated_greeting("Привет! Я тут подумала…", history) == (
+        "Я тут подумала…"
+    )
+    assert _drop_repeated_greeting(
+        "Привет! Я тут подумала…", "Пользователь: привет"
+    ) == "Привет! Я тут подумала…"
+    assert _drop_repeated_greeting(
+        "Привет! Я тут подумала…", "", recent_contact=True
+    ) == "Я тут подумала…"
+    print("ok  эмоции: повторное приветствие убирается из инициативы")
+
+
+def test_proactive_angles_are_varied() -> None:
+    states = [
+        SimpleNamespace(hurt=0, loneliness=20, proactive_count=0, mood=10),
+        SimpleNamespace(hurt=0, loneliness=80, proactive_count=1, mood=10),
+        SimpleNamespace(hurt=80, loneliness=60, proactive_count=2, mood=-40),
+    ]
+    angles = {
+        _proactive_angle(state, now=1_000_000 + day * 86400 + hour * 3600)
+        for day in range(4)
+        for hour in (9, 15, 21)
+        for state in states
+    }
+    assert len(angles) >= 6, angles
+    assert "скучаю" not in " ".join(angles)
+    assert "не извиняйся, не бери вину на себя без реальной причины" in (
+        _PROACTIVE_SYSTEM
+    )
+    assert any("замет" in angle or "дневник" in angle for angle in _PROACTIVE_CURIOUS_ANGLES)
+    assert set(_PROACTIVE_RITUAL_ANGLES) == {"утро", "день", "вечер", "ночь"}
+    assert _daypart(1_000_000) in {"ночь", "утро", "день", "вечер"}
+    print("ok  эмоции: для скуки выбираются разные творческие заходы")
+
+
 def test_config_defaults() -> None:
     cfg = Config()
     assert cfg.telegram.enabled is False, "бот не должен включаться сам"
@@ -81,10 +149,41 @@ def test_message_split() -> None:
     long = "\n\n".join(f"Абзац {i} " + "слово " * 40 for i in range(20))
     chunks = split_message(long, limit=1000)
     assert len(chunks) > 1, len(chunks)
-    assert all(len(chunk) <= 1000 for chunk in chunks), [len(c) for c in chunks]
+    from nemus.core.telegram_format import utf16_len
+
+    assert all(utf16_len(chunk) <= 1000 for chunk in chunks), [len(c) for c in chunks]
+    emoji = "😀" * 900
+    emoji_chunks = split_message(emoji, limit=1000)
+    assert all(utf16_len(chunk) <= 1000 for chunk in emoji_chunks), (
+        [utf16_len(chunk) for chunk in emoji_chunks],
+        "эмодзи считаются как UTF-16, а не как один символ",
+    )
     assert "\n".join(chunks).replace("\n", " ") != ""
     assert sum(chunk.count("Абзац") for chunk in chunks) == 20
     print(f"ok  длинный ответ режется на {len(chunks)} сообщения по 1000 символов")
+
+
+def test_download_cleanup() -> None:
+    """Старые скачанные файлы удаляются, пользовательские — нет."""
+    import os
+    import time
+
+    bot = object.__new__(TelegramBot)
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        old = folder / "100_old.jpg"
+        recent = folder / "200_new.jpg"
+        user_file = folder / "notes.txt"
+        for path in (old, recent, user_file):
+            path.write_bytes(b"x")
+        past = time.time() - 8 * 86400
+        os.utime(old, (past, past))
+        os.utime(user_file, (past, past))
+        bot._prune_downloads(folder)
+        assert not old.exists(), "старый скачанный файл должен удаляться"
+        assert recent.exists(), "свежий файл должен остаться"
+        assert user_file.exists(), "чужие файлы в папке чата не трогаем"
+    print("ok  старые скачанные файлы удаляются, пользовательские — нет")
 
 
 def test_safe_names() -> None:
@@ -176,6 +275,20 @@ def test_authorization() -> None:
     assert bot._authorized(_update(42, chat_type="group")), (
         "с разрешёнными группами владелец проходит"
     )
+    group = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=999, type="group"),
+    )
+    assert bot._authorized(group)
+    assert bot.notify_chat_id == 42, "группа не должна перехватывать напоминания"
+    bot.username = "nemus_bot"
+    group_message = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=999, type="group"),
+        effective_message=SimpleNamespace(text="просто болтаем", caption=None),
+    )
+    assert not bot._addressed_to_bot(group_message), "группа без упоминания — молчим"
+    group_message.effective_message.text = "@nemus_bot помоги"
+    assert bot._addressed_to_bot(group_message), "упоминание включает бота"
     bot._chat_id = None
     assert bot._chat_target() == 42, (
         "после ответа напоминание всё ещё должно знать, куда идти"
@@ -186,10 +299,29 @@ def test_authorization() -> None:
     assert "Немесис" in suffix and "Немо" in suffix and "Markdown" in suffix, suffix
     # уточнения в Telegram — брейншторм с вариантами, а не открытый вопрос
     assert "брейншторм" in suffix.lower(), suffix
-    assert "1A, 2B" in suffix, suffix
+    assert "A), B), C)" in suffix and "D) Свой вариант" in suffix, suffix
+    assert "❓ Q1" in suffix, suffix
     # и честность про озвучку: голосовых ответов в TG нет
     assert "Голосовых ответов" in suffix, suffix
     print("ok  доступ: только ID владельца; группы — по настройке")
+
+
+def test_stop_cancels_running_task() -> None:
+    """stop() не только глушит polling, но и просит агентский поток встать."""
+    import threading
+
+    bot = object.__new__(TelegramBot)
+    bot._stop_event = threading.Event()
+    bot._stopping = threading.Event()
+    bot._loop = None
+    bot._app = None
+    bot._thread = None
+    bot._agent_thread = None
+    bot._lock_handle = None
+    bot.stop()
+    assert bot._stop_event.is_set(), "текущая задача должна получить stop-сигнал"
+    assert bot._stopping.is_set()
+    print("ok  stop останавливает не только polling, но и текущую задачу")
 
 
 def test_reminder_delivery() -> None:
@@ -645,6 +777,39 @@ def test_error_text_and_progress_keyboard() -> None:
     print("ok  ошибка короткая, с кнопками восстановления")
 
 
+def test_progress_download_line() -> None:
+    """Строка прогресса модели обновляет статус, а не копит заметки."""
+    import asyncio
+
+    class _Bot:
+        def __init__(self) -> None:
+            self.edits: list[str] = []
+
+        async def send_message(self, chat_id: int, text: str, **_: object):
+            return SimpleNamespace(message_id=3)
+
+        async def edit_message_text(
+            self, text: str, chat_id: int, message_id: int, **_: object
+        ) -> None:
+            self.edits.append(text)
+
+    bot = _Bot()
+    progress = _Progress(bot, 7)
+
+    async def scenario() -> None:
+        await progress.start("⏳ Думаю…")
+        progress._last = 0
+        await progress.download("⬇️ model.gguf: 25%")
+        progress._last = 0
+        await progress.download("⬇️ model.gguf: 50%")
+        await progress.close()
+
+    asyncio.run(scenario())
+    assert bot.edits and "50%" in bot.edits[-1], bot.edits
+    assert bot.edits[-1].count("model.gguf") == 1, bot.edits[-1]
+    print("ok  Telegram: прогресс модели заменяет строку статуса")
+
+
 def test_retry_and_new_callbacks() -> None:
     """Повтор берёт последнюю задачу, /new не сбрасывает работающий контекст."""
     import asyncio
@@ -744,12 +909,166 @@ def test_ux_texts() -> None:
     assert {data for row in menu for _, data in row} == {
         "ux:examples",
         "ux:help",
+        "ux:h",
         "ux:skills",
         "ux:new",
         "ux:status",
+        "ux:cleanup",
     }
     assert main_menu_rows(False) == []
     print("ok  тексты первого экрана и примеров зависят от подсказок")
+
+
+def test_diary_command_is_private_file() -> None:
+    """`/diary` отдаёт .md только при высоком доверии; иначе отказ и обида."""
+    import asyncio
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.documents: list[tuple[int, str, dict]] = []
+            self.messages: list[str] = []
+
+        async def send_document(
+            self, chat_id: int, document: object, **kwargs: object
+        ) -> None:
+            caption = kwargs.get("caption")
+            self.documents.append(
+                (chat_id, caption if isinstance(caption, str) else "", kwargs)
+            )
+
+        async def send_message(
+            self, chat_id: int, text: str, **kwargs: object
+        ) -> SimpleNamespace:
+            self.messages.append(text)
+            return SimpleNamespace(message_id=1)
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    path = Path(tempfile.mkdtemp(prefix="nemus_tg_diary_")) / "diary.md"
+    cfg.character.diary_file = str(path)
+    cfg.character.state_file = str(path.with_name("emotions.json"))
+    book = DiaryBook(path)
+    book.add("Это личная запись.")
+    store = EmotionStore(cfg.character.state_file)
+    fake = _FakeBot()
+    bot = object.__new__(TelegramBot)
+    bot.config = cfg
+    bot.cfg = cfg.telegram
+    bot.core = SimpleNamespace(diary=book)
+    bot._emotions = SimpleNamespace(store=store, state=store.snapshot)
+    bot._app = SimpleNamespace(bot=fake)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42, username="owner"),
+        effective_chat=SimpleNamespace(id=42, type="private"),
+        message=SimpleNamespace(message_id=11, text="/diary"),
+    )
+
+    store.state = EmotionState(
+        hurt=0, trust=85, attachment=85, warmth=75, mood=20, energy=70
+    )
+    store._save_locked()
+    asyncio.run(bot._cmd_diary(update, None))
+    assert fake.documents and fake.documents[0][0] == 42, fake.documents
+    assert "дневник" in fake.documents[0][1].lower(), fake.documents
+
+    # Если файла нет, она замечает это, заводит новый и присылает его.
+    path.unlink()
+    fake.documents.clear()
+    asyncio.run(bot._cmd_diary(update, None))
+    assert path.exists(), "отсутствующий дневник должен создаться"
+    assert fake.documents and "завела" in fake.documents[0][1].lower()
+
+    fake.documents.clear()
+    store.state = EmotionState(
+        hurt=0, trust=20, attachment=20, warmth=40, mood=0, energy=60
+    )
+    store._save_locked()
+    asyncio.run(bot._cmd_diary(update, None))
+    assert not fake.documents, "при низком доверии файл не отправляется"
+    assert "Нет" in fake.messages[-1], fake.messages
+    assert store.snapshot().hurt >= 16, store.snapshot()
+    print("ok  /diary: файл только при доверии, иначе отказ и обида")
+
+
+def test_command_catalog() -> None:
+    """Команды объясняют себя: категории, синтаксис, примеры и поиск."""
+    assert find_command("/read") is not None
+    assert find_command("/diary") is not None
+    assert "<url>" in find_command("read").syntax  # type: ignore[union-attr]
+    assert find_command("commands").name == "help"  # type: ignore[union-attr]
+    assert category("jobs") is not None
+    assert "<id>" in command_category_text("jobs")
+    assert "http.server" in command_detail_text("run")
+    read_help = command_detail_text("read")
+    assert "**Аргументы:**" in read_help
+    assert "`<...>` — обязательно" in read_help
+    assert "полный адрес страницы" in read_help
+    assert "[вопрос]" in read_help
+    assert "не нужны" in command_detail_text("pc")
+    assert any(item.name == "read" for item in search_commands("сайт"))
+    rows = command_home_rows()
+    callbacks = {data for row in rows for _, data in row}
+    assert {"ux:hc:main", "ux:hc:pc", "ux:hc:jobs", "ux:hc:auto"} <= callbacks
+    assert "ux:cleanup" in callbacks
+    for row in command_category_rows("jobs"):
+        for _, data in row:
+            assert len(data.encode("utf-8")) <= 64
+    assert "категор" in command_home_text().lower()
+    print("ok  каталог команд: категории, синтаксис, примеры и поиск")
+
+
+def test_help_callback_edits_same_message() -> None:
+    """Навигация по /help меняет одно сообщение, а не шлёт новые."""
+    import asyncio
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object) -> None:
+            self.sent.append(text)
+
+    class _Query:
+        data = "ux:hc:jobs"
+        from_user = SimpleNamespace(id=42)
+        message = SimpleNamespace(
+            chat_id=42,
+            message_id=5,
+            chat=SimpleNamespace(id=42, type="private"),
+        )
+
+        def __init__(self) -> None:
+            self.answers: list[str] = []
+            self.edits: list[tuple[str, dict[str, object]]] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            self.edits.append((text, kwargs))
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [42]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot.config = cfg
+    bot._hints_shown = set()
+    bot._hints_muted = set()
+    fake = _FakeBot()
+    bot._app = SimpleNamespace(bot=fake)
+    query = _Query()
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=query.from_user,
+        effective_chat=SimpleNamespace(id=42, type="private"),
+    )
+    asyncio.run(bot._on_callback(update, None))
+    assert not fake.sent, "навигация не должна присылать новое сообщение"
+    assert len(query.edits) == 1, query.edits
+    assert "Фоновые задачи" in query.edits[0][0]
+    assert query.edits[0][1].get("reply_markup") is not None
+    assert query.answers == [""], query.answers
+    print("ok  /help листается редактированием одного сообщения")
 
 
 def test_skills_text() -> None:
@@ -928,16 +1247,17 @@ def test_skills_command_and_callback() -> None:
     fake.commands.clear()
     asyncio.run(bot._cmd_unknown(update, None))
     assert "/skills" in fake.sent[-1][0]
-    assert "/skill" in fake.sent[-1][0]
+    assert " /skill " not in fake.sent[-1][0]
 
     asyncio.run(bot._set_commands())
     commands = {getattr(item, "command", "") for item in fake.commands}
-    assert {"skills", "skill"} <= commands, commands
-    print("ok  /skills и /skill, справка, callback и меню показывают скиллы")
+    assert "skills" in commands, commands
+    assert "skill" not in commands, commands
+    print("ok  /skills, справка, callback и меню показывают скиллы без дубля")
 
 
-def test_skill_alias_handler_registered() -> None:
-    """Короткий псевдоним /skill обслуживается тем же обработчиком."""
+def test_skill_command_not_duplicated() -> None:
+    """Короткого псевдонима /skill больше нет — только /skills."""
     class _App:
         def __init__(self) -> None:
             self.handlers: list[object] = []
@@ -954,8 +1274,9 @@ def test_skill_alias_handler_registered() -> None:
         for handler in app.handlers
         for command in getattr(handler, "commands", ())
     }
-    assert {"skills", "skill"} <= commands, commands
-    print("ok  /skill зарегистрирован как псевдоним /skills")
+    assert "skills" in commands, commands
+    assert "skill" not in commands, commands
+    print("ok  /skill не дублирует /skills")
 
 
 def test_natural_language_skills_question() -> None:
@@ -1276,6 +1597,26 @@ def test_attachment_actions() -> None:
     assert "отчёт" in attachment_prompt("document_report").lower()  # type: ignore[union-attr]
     assert attachment_prompt("unknown") is None
     print("ok  для вложений есть кнопки действий и промпты")
+
+
+def test_pending_attachments_are_per_user() -> None:
+    """В одном чате вложения разных людей не смешиваются."""
+    cfg = Config()
+    core = SimpleNamespace(
+        llm=None,
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        config=cfg,
+    )
+    bot = TelegramBot(cfg, core)
+    bot._remember_pending_attachment(1, "файл A", ["a.jpg"], user_id=7)
+    bot._remember_pending_attachment(1, "файл B", ["b.jpg"], user_id=8)
+    assert bot._peek_pending_attachment(1, 7)[0] == "файл A"
+    assert bot._peek_pending_attachment(1, 8)[0] == "файл B"
+    assert bot._take_pending_attachment(1, 7)[0] == "файл A"
+    assert bot._peek_pending_attachment(1, 8)[0] == "файл B"
+    assert bot._take_pending_attachment(1, 7) == ("", [])
+    print("ok  вложения без подписи изолированы по чату и автору")
 
 
 def test_pending_attachments_are_per_chat() -> None:
@@ -1869,16 +2210,18 @@ def test_confirmation_bound_to_chat_user() -> None:
 def test_reaction_list_complete() -> None:
     """У инструмента реакций весь согласованный список эмодзи, без потерь."""
     expected = (
-        "🤣 😁 🤩 😍 🥰 🙂 😐 🤔 🥱 😴 😢 😭 😱 🤬 😡 🤮 🤯 🤪 🥴 😇 "
-        "🤓 🧐 🤨 🫡 🤗 😎 😘 😨 ❤️ 💔 ❤️‍🔥 💘 👍 👎 👌 🤝 👏 🙏 🖕 ✍ "
-        "💅 🤷 🔥 🎉 💯 🏆 🍾 👀 🤡 💩 🗿 🕊 💊 🎃 🎄 🎅 ☃ 🍓 🍌 🌭 "
-        "🌚 😈 👻 🦄 🐳 ⚡ 🆒 👨‍💻"
+        "🤣 😁 🤩 😍 🥰 😐 🤔 🥱 😴 😢 😭 😱 🤬 😡 🤮 🤯 🤪 🥴 😇 🤓 "
+        "🤨 🫡 🤗 😎 😘 😨 ❤️ 💔 ❤‍🔥 💘 👍 👎 👌 🤝 👏 🙏 🖕 ✍ 💅 🤷 "
+        "🔥 🎉 💯 🏆 🍾 👀 🤡 💩 🗿 🕊 💊 🎃 🎄 🎅 ☃ 🍓 🍌 🌭 🌚 😈 "
+        "👻 🦄 🐳 ⚡ 🆒 👨‍💻 💋 🙈 🙉 🙊 👾 🤷‍♂ 🤷‍♀"
     ).split()
     assert list(REACTION_EMOJIS) == expected, REACTION_EMOJIS
     enum = ReactTelegramTool.parameters["properties"]["emoji"]["enum"]
     assert enum == expected, enum
     assert all(normalize_reaction(emoji) in _ALLOWED_REACTIONS for emoji in expected)
-    print("ok  у react_telegram весь список из 68 эмодзи")
+    assert normalize_reaction("❤️‍🔥") == "❤‍🔥"
+    assert normalize_reaction("🤷‍♂️") == "🤷‍♂"
+    print("ok  у react_telegram весь список из 73 эмодзи Bot API")
 
 
 def test_reaction_choice() -> None:
@@ -2021,9 +2364,12 @@ def test_agent_reset_clears_partial_answer() -> None:
             self.deleted.append(message_id)
 
     def run_agent(
-        text: str, images: list[str] | None = None, stop: object = None
+        text: str,
+        images: list[str] | None = None,
+        stop: object = None,
+        observe: bool = True,
     ):
-        yield SimpleNamespace(kind="assistant_delta", text="черновик ")
+        yield SimpleNamespace(kind="assistant_delta", text="черновик")
         yield SimpleNamespace(kind="assistant_reset")
         yield SimpleNamespace(kind="assistant_delta", text="полный ответ")
         yield SimpleNamespace(kind="final", text="полный ответ")
@@ -2101,13 +2447,6 @@ def test_advanced_api_golden_payloads() -> None:
             reply_parameters={"message_id": 3, "allow_sending_without_reply": True},
             reply_markup=None,
         ) == 11
-        assert await api.send_widget(
-            chat_id=5, html="<b>x</b>", chat_data="{}", caption="Панель"
-        ) == 11
-        assert await api.edit_message_widget_data(
-            chat_id=5, message_id=11, chat_data="{}"
-        )
-        assert await api.answer_widget_query(widget_query_id="q1", data="ok")
         assert await api.send_ephemeral(
             chat_id=5, callback_query_id="cb1", html="<b>x</b>", reply_markup=None
         ) == 11
@@ -2117,9 +2456,6 @@ def test_advanced_api_golden_payloads() -> None:
     assert endpoints == [
         "sendMessageDraft",
         "sendRichMessage",
-        "sendWidget",
-        "editMessageWidgetData",
-        "answerWidgetQuery",
         "sendMessage",
     ], endpoints
     payloads = dict(fake.calls)
@@ -2132,11 +2468,6 @@ def test_advanced_api_golden_payloads() -> None:
     }
     assert payloads["sendRichMessage"]["rich_message"] == {"markdown": "# x"}
     assert "reply_markup" not in payloads["sendRichMessage"], "None не отправляем"
-    assert payloads["sendWidget"]["allow_queries"] is True
-    assert payloads["answerWidgetQuery"] == {
-        "widget_query_id": "q1",
-        "data": "ok",
-    }
     ephemeral = payloads["sendMessage"]
     assert ephemeral["parse_mode"] == "HTML"
     assert ephemeral["ephemeral_message_parameters"] == {
@@ -2196,17 +2527,43 @@ def test_advanced_api_unsupported_sticky() -> None:
     async def scenario2() -> None:
         for _ in range(2):
             try:
-                await api2.send_widget(
-                    chat_id=1, html="x", chat_data="{}", caption="p"
-                )
+                await api2.send_rich_message(chat_id=1, rich_message={})
             except BadRequest:
                 pass
             else:
                 raise AssertionError("ошибка должна пробрасываться")
-        assert api2.available("sendWidget")
+        assert api2.available("sendRichMessage")
 
     asyncio.run(scenario2())
     assert fake2.calls == 2, fake2.calls
+
+    class _DeletedMessageBot:
+        token = "123:SECRET"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def _post(self, endpoint: str, data: dict):
+            self.calls += 1
+            raise BadRequest("Bad Request: message to edit not found")
+
+    fake3 = _DeletedMessageBot()
+    api3 = TelegramAdvancedAPI(fake3)
+
+    async def scenario3() -> None:
+        for _ in range(2):
+            try:
+                await api3.send_rich_message(chat_id=1, rich_message={})
+            except BadRequest:
+                pass
+            else:
+                raise AssertionError("удалённое сообщение должно пробрасывать ошибку")
+        assert api3.available("sendRichMessage"), (
+            "удалённое сообщение — временная ошибка, а не отсутствие метода"
+        )
+
+    asyncio.run(scenario3())
+    assert fake3.calls == 2, fake3.calls
     print("ok  неподдерживаемый метод кэшируется, временная ошибка — нет")
 
 
@@ -2229,12 +2586,18 @@ def test_rich_markdown() -> None:
     prepared = prepare_rich_markdown(source)
     assert "# Отчёт" in prepared
     assert "- пункт" in prepared
-    assert "| Файл | Дата |" in prepared
+    assert '<table bordered striped compact>' in prepared, prepared
+    assert "<th>Файл</th>" in prepared and "<td>Март</td>" in prepared, prepared
     assert "print('<tag>')" in prepared, prepared
     assert "`<b>`" in prepared, prepared
     assert "&lt;script>" in prepared, prepared
     assert "<script>" not in prepared, prepared
     assert "&lt;tg-button" in prepare_rich_markdown('<tg-button data="evil">')
+    long_quote = "> первая строка\n> вторая строка\n> третья строка\n> четвёртая строка"
+    expanded = prepare_rich_markdown(long_quote)
+    assert "<blockquote expandable>" in expanded, expanded
+    short_quote = prepare_rich_markdown("> только одна строка")
+    assert short_quote == "> только одна строка", short_quote
 
     rows = rich_button_rows(
         [[("🆕 <Новый>", "ux:new"), ("Помощь", "ux:help")]]
@@ -2371,7 +2734,7 @@ def test_draft_progress() -> None:
 
     async def scenario() -> None:
         await progress.start("⏳ Думаю…")
-        assert api.drafts and api.drafts[0][2] == "", api.drafts
+        assert api.drafts and "Думаю" in api.drafts[0][2], api.drafts
         assert api.drafts[0][1] != 0
         progress._last = float("inf")  # троттлинг: время ещё «не пришло»
         before = len(api.drafts)
@@ -2616,7 +2979,10 @@ def test_last_tasks_set_inside_lock() -> None:
             pass
 
     def run_agent(
-        text: str, images: list[str] | None = None, stop: object = None
+        text: str,
+        images: list[str] | None = None,
+        stop: object = None,
+        observe: bool = True,
     ):
         yield SimpleNamespace(kind="final", text="готово")
 
@@ -2665,213 +3031,189 @@ def test_last_tasks_set_inside_lock() -> None:
     print("ok  последняя задача обновляется внутри lock, очередь её не перетирает")
 
 
-def test_widget_html_and_state() -> None:
-    """HTML панели статический и компактный, состояние влезает в 1024 байта."""
-    import json
-    import zlib
-
-    from nemus.core.telegram_widgets import (
-        WIDGET_HTML,
-        make_state,
-        parse_widget_action,
-        state_json,
-        truncate_state,
-    )
-
-    raw = WIDGET_HTML.encode("utf-8")
-    assert len(raw) <= 32768, len(raw)
-    assert len(zlib.compress(raw, 9)) <= 4096, len(zlib.compress(raw, 9))
-    assert "textContent" in WIDGET_HTML
-    assert "TelegramWidget.onEvent(" in WIDGET_HTML
-    assert "innerHTML" not in WIDGET_HTML
-    assert "fetch(" not in WIDGET_HTML and "http://" not in WIDGET_HTML
-    assert "https://" not in WIDGET_HTML
-
-    state = make_state(
-        task_id=7,
-        status="working",
-        title="очень длинный заголовок задачи " * 30,
-        steps=[f"инструмент-{index}" for index in range(20)],
-        start=1760000000.0,
-        error="Ошибка " * 100,
-    )
-    state = truncate_state(state)
-    data = state_json(state)
-    assert len(data.encode("utf-8")) <= 1024, len(data.encode("utf-8"))
-    loaded = json.loads(data)
-    assert loaded["v"] == 1 and loaded["id"] == 7
-    assert loaded["s"] == "working"
-    assert len(loaded["steps"]) <= 6, loaded["steps"]
-    assert "\\u04" not in data, "кириллица должна быть без escape"
-
-    assert parse_widget_action("stop:7") == ("stop", 7)
-    assert parse_widget_action("retry:12") == ("retry", 12)
-    assert parse_widget_action("status") == ("status", None)
-    assert parse_widget_action("<script>") == ("<script>", None)
-    print("ok  HTML панели статический, состояние ≤1024 байт, действия разбираются")
-
-
-def test_widget_panel_throttle() -> None:
-    """Панель обновляется не чаще WIDGET_INTERVAL и ломается один раз."""
+def test_panel_command() -> None:
+    """`/panel` — настройки в Mini App с inline-резервом."""
     import asyncio
-    import time
 
-    import nemus.core.telegram_widgets as widgets
-
-    class _API:
+    class _Bot:
         def __init__(self) -> None:
-            self.edits: list[str] = []
-            self.ok = True
+            self.sent: list[str] = []
+            self.markups: list[object] = []
 
-        async def edit_message_widget_data(
-            self, *, chat_id: int, message_id: int, chat_data: str
-        ) -> bool:
-            self.edits.append(chat_data)
-            return self.ok
+        async def send_message(self, chat_id: int, text: str, **kwargs: object):
+            self.sent.append(text)
+            self.markups.append(kwargs.get("reply_markup"))
+            return SimpleNamespace(message_id=len(self.sent))
 
-    api = _API()
-    panel = widgets.WidgetPanel(
-        11,
-        widgets.make_state(
-            task_id=1,
-            status="working",
-            title="задача",
-            steps=[],
-            start=time.time(),
-        ),
-    )
+    def make_bot(*, allowed: bool = True):
+        cfg = Config()
+        cfg.telegram.allowed_users = [7] if allowed else [99]
+        bot = TelegramBot(
+            cfg,
+            SimpleNamespace(
+                llm=None,
+                registry=ToolRegistry(),
+                permissions=PermissionManager(cfg),
+                telegram_memory=None,
+            ),
+        )
+        bot._app = SimpleNamespace(bot=_Bot())
+        return bot
+
+    class _Reply:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.kwargs: dict[str, object] = {}
+
+        async def __call__(self, text: str, **kwargs: object) -> None:
+            self.calls.append(text)
+            self.kwargs = kwargs
+
+    def update(chat_type: str = "private") -> SimpleNamespace:
+        reply = _Reply()
+        message = SimpleNamespace(message_id=5, reply_text=reply)
+        return SimpleNamespace(
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=1, type=chat_type),
+            effective_message=message,
+            message=message,
+            reply=reply,
+        )
 
     async def scenario() -> None:
-        old = widgets.WIDGET_INTERVAL
-        widgets.WIDGET_INTERVAL = 100
-        try:
-            await panel.update(api, chat_id=5, steps=["a"])
-            await panel.update(api, chat_id=5, steps=["b"])
-            assert len(api.edits) == 1, api.edits
-            await panel.update(api, chat_id=5, force=True, steps=["c"])
-            assert len(api.edits) == 2, api.edits
-        finally:
-            widgets.WIDGET_INTERVAL = old
+        bot = make_bot()
+        await bot._cmd_panel(update(), None)
+        assert bot._app.bot.sent, "панель должна отправить сообщение"
+        panel_text = bot._app.bot.sent[-1]
+        assert "Настройки Немуси" in panel_text
+        assert "LLM" in panel_text and "Telegram" in panel_text
+        assert bot._app.bot.markups[-1] is not None, "нужны рабочие кнопки"
+        assert 1 in bot._settings_message
 
-        api.ok = False
-        await panel.update(api, chat_id=5, force=True, s="error")
-        assert panel.broken
-        calls = len(api.edits)
-        await panel.update(api, chat_id=5, force=True, s="done")
-        assert len(api.edits) == calls, "сломанную панель больше не трогаем"
+        web = make_bot()
+        web.config.telegram.web_app_url = "https://example.test/app"
+        web.cfg = web.config.telegram
+        web_update = update()
+        await web._cmd_panel(web_update, None)
+        markup = web_update.reply.kwargs.get("reply_markup")
+        assert markup is not None, "Web App должен прислать кнопку"
+        button = markup.inline_keyboard[0][0]
+        assert button.web_app is not None
+        assert button.web_app.url == "https://example.test/app"
+
+        auto = make_bot()
+        auto._tunnel = SimpleNamespace(
+            public_url="https://auto.test", starting=False, failed=False
+        )
+        auto_update = update()
+        await auto._cmd_panel(auto_update, None)
+        auto_markup = auto_update.reply.kwargs.get("reply_markup")
+        assert auto_markup is not None
+        assert auto_markup.inline_keyboard[0][0].web_app.url == "https://auto.test"
+
+        group = make_bot()
+        group_update = update("group")
+        await group._cmd_panel(group_update, None)
+        assert group_update.reply.calls, "в группе должен быть отказ"
+
+        denied = make_bot(allowed=False)
+        denied_update = update()
+        await denied._cmd_panel(denied_update, None)
+        assert denied_update.reply.calls
 
     asyncio.run(scenario())
-
-    api2 = _API()
-    panel2 = widgets.WidgetPanel(
-        12,
-        widgets.make_state(
-            task_id=2,
-            status="working",
-            title="задача",
-            steps=[],
-            start=time.time(),
-        ),
-    )
-
-    async def finish() -> None:
-        await panel2.close(api2, chat_id=5, status="done", retry=True)
-        assert panel2.state["s"] == "done"
-        assert panel2.state["retry"] is True
-        assert panel2.state["end"] > 0
-
-    asyncio.run(finish())
-    print("ok  панель троттлится, ломается один раз и сохраняет финал")
+    print("ok  /panel открывает Web App (или inline-резерв) и закрыта для групп")
 
 
-def test_panel_auto_create() -> None:
-    """Панель создаётся только для живой private-задачи и переиспользуется."""
+def test_webapp_menu_sync() -> None:
+    """Старая Web App-кнопка меню получает адрес нового quick-туннеля."""
     import asyncio
 
-    import nemus.core.telegram_bot as telegram_bot
-    import nemus.core.telegram_widgets as widgets
+    from telegram import MenuButtonDefault, MenuButtonWebApp, WebAppInfo
 
-    class _API:
-        def __init__(self) -> None:
-            self.widgets = 0
+    class _Bot:
+        def __init__(self, current: object) -> None:
+            self.current = current
+            self.menu: object | None = None
 
-        def available(self, endpoint: str) -> bool:
-            return endpoint == "sendWidget"
+        async def get_chat_menu_button(self, *, chat_id: int | None = None) -> object:
+            return self.current
 
-        async def send_widget(self, **kwargs: object) -> int:
-            self.widgets += 1
-            return 21
-
-        async def edit_message_widget_data(self, **kwargs: object) -> bool:
-            return True
-
-    cfg = Config()
-    bot = TelegramBot(
-        cfg,
-        SimpleNamespace(
-            llm=None,
-            registry=ToolRegistry(),
-            permissions=PermissionManager(cfg),
-            telegram_memory=None,
-        ),
-    )
-    api = _API()
-    bot._api = api  # type: ignore[assignment]
-    bot._current_task_id = 1
-
-    async def scenario() -> None:
-        await bot._ensure_panel(5, 1, "задача", "private")
-        assert api.widgets == 1 and 5 in bot._panels
-        await bot._ensure_panel(5, 1, "задача", "private")
-        assert api.widgets == 1, "панель должна переиспользоваться"
-        bot._current_task_id = 2
-        await bot._ensure_panel(5, 99, "короткая", "private")
-        assert api.widgets == 1, "короткая задача не создаёт панель"
-        await bot._ensure_panel(6, 2, "группа", "group")
-        assert api.widgets == 1, "в группе панели нет"
-
-    old_delay = telegram_bot.PANEL_DELAY
-    telegram_bot.PANEL_DELAY = 0
-    try:
-        asyncio.run(scenario())
-    finally:
-        telegram_bot.PANEL_DELAY = old_delay
-    _ = widgets
-    print("ok  панель создаётся после задержки и переиспользуется")
-
-
-def test_widget_query_actions() -> None:
-    """Кнопки панели проверяют панель, пользователя и задачу."""
-    import asyncio
-    import threading
-
-    from telegram import Update
-
-    from nemus.core.telegram_widgets import WidgetPanel, make_state
-
-    class _API:
-        def __init__(self, *, fail: bool = False) -> None:
-            self.answers: list[tuple[str, str]] = []
-            self.widgets = 0
-            self.fail = fail
-
-        def available(self, endpoint: str) -> bool:
-            return endpoint in ("sendWidget", "editMessageWidgetData")
-
-        async def answer_widget_query(
-            self, *, widget_query_id: str, data: str
+        async def set_chat_menu_button(
+            self, *, menu_button: object, chat_id: int | None = None
         ) -> bool:
-            self.answers.append((widget_query_id, data))
+            self.menu = menu_button
+            self.current = menu_button
             return True
 
-        async def edit_message_widget_data(self, **kwargs: object) -> bool:
-            return True
+    old = MenuButtonWebApp("Nemo", WebAppInfo("https://old.trycloudflare.com"))
+    app_bot = _Bot(old)
+    bot = object.__new__(TelegramBot)
+    bot.cfg = SimpleNamespace(token="", allowed_users=[])
+    bot._menu_url_synced = ""
+    bot._app = SimpleNamespace(bot=app_bot)
+    asyncio.run(bot._sync_webapp_menu("https://new.trycloudflare.com"))
+    assert app_bot.menu is not None, "кнопка меню не обновлена"
+    assert app_bot.menu.web_app.url == "https://new.trycloudflare.com"
+    assert app_bot.menu.text == "Nemo"
 
-        async def send_widget(self, **kwargs: object) -> int | None:
-            if self.fail:
-                raise RuntimeError("виджет недоступен")
-            self.widgets += 1
-            return 21
+    commands_bot = _Bot(MenuButtonDefault())
+    safe = object.__new__(TelegramBot)
+    safe.cfg = SimpleNamespace(token="", allowed_users=[])
+    safe._menu_url_synced = ""
+    safe._app = SimpleNamespace(bot=commands_bot)
+    asyncio.run(safe._sync_webapp_menu("https://new.trycloudflare.com"))
+    assert commands_bot.menu is None, "меню команд трогать нельзя"
+    print("ok  Web App: кнопка меню обновляется на актуальный туннель")
+
+
+def test_settings_callback_flow() -> None:
+    """Кнопки панели меняют настройки и текстовый ввод возвращает панель."""
+    import asyncio
+
+    class _Reply:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def __call__(self, text: str, **kwargs: object) -> None:
+            self.calls.append(text)
+
+    class _Msg:
+        def __init__(self) -> None:
+            self.chat_id = 1
+            self.chat = SimpleNamespace(id=1, type="private")
+            self.message_id = 11
+            self.reply_text = _Reply()
+            self.text = ""
+            self.deleted = False
+
+        async def delete(self) -> None:
+            self.deleted = True
+
+    class _Query:
+        def __init__(self, data: str) -> None:
+            self.data = data
+            self.message = _Msg()
+            self.from_user = SimpleNamespace(id=7)
+            self.answers: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            self.message.text = text
+
+    class _Bot:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.edits: list[str] = []
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: object):
+            self.sent.append(text)
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def edit_message_text(self, **kwargs: object) -> None:
+            self.edits.append(str(kwargs.get("text") or ""))
 
     cfg = Config()
     cfg.telegram.allowed_users = [7]
@@ -2884,210 +3226,81 @@ def test_widget_query_actions() -> None:
             telegram_memory=None,
         ),
     )
-    api = _API()
-    bot._api = api  # type: ignore[assignment]
-    panel = WidgetPanel(
-        31,
-        make_state(
-            task_id=3,
-            status="working",
-            title="задача",
-            steps=[],
-            start=1.0,
-        ),
-    )
-    bot._panels = {1: panel}
-    bot._current_task_id = 3
-    bot._current_task_chat = 1
-    bot._stop_event = threading.Event()
-    bot._last_tasks[1] = ("текст", [], None, 7)
-    bot._last_task_ids[1] = 3
-    bot._new_session_for_chat = lambda chat_id: None  # type: ignore[method-assign]
+    bot._app = SimpleNamespace(bot=_Bot())
 
-    def query(action: str, **overrides: object) -> dict:
-        data = {
-            "id": "q1",
-            "type": "data",
-            "from": {"id": 7},
-            "chat": {"id": 1, "type": "private"},
-            "message_id": 31,
-            "data": action,
-        }
-        data.update(overrides)
-        return data
+    def fake_save(mutate: object) -> tuple[bool, str]:
+        return mutate(bot.config)  # type: ignore[operator]
+
+    bot._save_settings = fake_save  # type: ignore[method-assign]
 
     async def scenario() -> None:
-        await bot._on_widget_query(query("status"))
-        assert api.answers and api.answers[-1][0] == "q1"
-        assert panel.state["s"] == "working", "status не меняет состояние"
-        await bot._on_widget_query(query("help"))
-        assert "Помощь" in api.answers[-1][1] or "умею" in api.answers[-1][1]
-
-        await bot._on_widget_query(query("stop:3"))
-        assert bot._stop_event is not None and bot._stop_event.is_set()
-        assert panel.state["s"] == "stopping"
-
-        bot._stop_event = threading.Event()
-        await bot._on_widget_query(query("stop:99"))
-        assert not bot._stop_event.is_set()
-        assert "устарела" in api.answers[-1][1]
-
-        await bot._on_widget_query(query("new"))
-        assert 1 not in bot._last_tasks and 1 not in bot._last_task_ids
-        assert panel.state["s"] == "idle" and panel.state["id"] == 0
-
-        bot._last_tasks[1] = ("снова", [], None, 7)
-        bot._last_task_ids[1] = 3
-        called: list[dict] = []
-
-        async def _run(**kwargs: object) -> None:
-            called.append(kwargs)
-
-        bot._run_task_for = _run  # type: ignore[method-assign]
-        await bot._on_widget_query(query("retry:3"))
-        await asyncio.sleep(0)
-        assert called and called[0]["retry"] is True
-        await bot._on_widget_query(query("retry:99"))
-        assert "нечего" in api.answers[-1][1]
-
-        await bot._on_widget_query(query("hack"))
-        assert api.answers[-1][1] == "Неизвестное действие"
-        await bot._on_widget_query(query("status", **{"from": {"id": 99}}))
-        assert api.answers[-1][1] == "Доступ запрещён"
-        await bot._on_widget_query(
-            query("status", chat={"id": 1, "type": "group"})
-        )
-        assert "личке" in api.answers[-1][1]
-        await bot._on_widget_query(query("status", message_id=99))
-        assert "устарела" in api.answers[-1][1]
-        bot._panels.clear()
-        await bot._on_widget_query(query("status"))
-        assert "устарела" in api.answers[-1][1]
-
-    asyncio.run(scenario())
-
-    update = Update.de_json(
-        {
-            "update_id": 1,
-            "widget_query": {
-                "id": "q2",
-                "type": "data",
-                "from": {"id": 7},
-                "chat": {"id": 1, "type": "private"},
-                "message_id": 31,
-                "data": "status",
-            },
-        },
-        None,
-    )
-    assert isinstance(update.api_kwargs.get("widget_query"), dict), update.api_kwargs
-    print("ok  widget_query проверяет панель, пользователя и не меняет состояние")
-
-
-def test_panel_command() -> None:
-    """`/panel` создаёт/переиспользует панель и не сбрасывает working."""
-    import asyncio
-
-    from nemus.core.telegram_widgets import WidgetPanel, make_state
-
-    class _Bot:
-        def __init__(self) -> None:
-            self.sent: list[str] = []
-
-        async def send_message(self, chat_id: int, text: str, **kwargs: object):
-            self.sent.append(text)
-            return SimpleNamespace(message_id=len(self.sent))
-
-        async def edit_message_text(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        async def delete_message(self, *args: object, **kwargs: object) -> None:
-            pass
-
-    class _API:
-        def __init__(self, *, fail: bool = False) -> None:
-            self.widgets = 0
-            self.fail = fail
-
-        def available(self, endpoint: str) -> bool:
-            return endpoint in ("sendWidget", "editMessageWidgetData")
-
-        async def send_widget(self, **kwargs: object) -> int | None:
-            if self.fail:
-                raise RuntimeError("виджет недоступен")
-            self.widgets += 1
-            return 21
-
-        async def edit_message_widget_data(self, **kwargs: object) -> bool:
-            return True
-
-    def make_bot(api: _API, *, advanced: bool = True):
-        cfg = Config()
-        cfg.telegram.allowed_users = [7]
-        cfg.telegram.advanced_ui = advanced
-        bot = TelegramBot(
-            cfg,
-            SimpleNamespace(
-                llm=None,
-                registry=ToolRegistry(),
-                permissions=PermissionManager(cfg),
-                telegram_memory=None,
-            ),
-        )
-        bot._app = SimpleNamespace(bot=_Bot())
-        bot._api = api  # type: ignore[assignment]
-        return bot
-
-    def update(chat_type: str = "private") -> SimpleNamespace:
-        return SimpleNamespace(
+        reply = _Reply()
+        message = SimpleNamespace(message_id=5, reply_text=reply)
+        update = SimpleNamespace(
             effective_user=SimpleNamespace(id=7),
-            effective_chat=SimpleNamespace(id=1, type=chat_type),
-            message=SimpleNamespace(message_id=5),
+            effective_chat=SimpleNamespace(id=1, type="private"),
+            effective_message=message,
+            message=message,
         )
+        await bot._cmd_panel(update, None)
+        assert bot._app.bot.sent
 
-    async def scenario() -> None:
-        api = _API()
-        bot = make_bot(api)
-        await bot._cmd_panel(update(), None)
-        assert api.widgets == 1 and 1 in bot._panels
-        await bot._cmd_panel(update(), None)
-        assert api.widgets == 1, "вторая /panel должна переиспользовать виджет"
+        query = _Query("pn:s:telegram:0")
+        await bot._on_settings_callback(query)
+        assert "Telegram" in query.message.text
 
-        bot._task_lock = asyncio.Lock()
-        await bot._task_lock.acquire()
-        bot._current_task_chat = 1
-        bot._panels[1] = WidgetPanel(
-            21,
-            make_state(
-                task_id=3,
-                status="working",
-                title="идёт",
-                steps=[],
-                start=1.0,
-            ),
+        before = cfg.telegram.hints_enabled
+        query = _Query("pn:t:telegram:tg_hints")
+        await bot._on_settings_callback(query)
+        assert cfg.telegram.hints_enabled is not before
+
+        query = _Query("pn:e:telegram:tg_groups")
+        await bot._on_settings_callback(query)
+        assert 1 in bot._settings_pending
+        value_message = SimpleNamespace(reply_text=_Reply())
+        value_update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=1, type="private"),
+            message=value_message,
+            effective_message=value_message,
         )
-        await bot._cmd_panel(update(), None)
-        assert bot._panels[1].state["s"] == "working"
-        bot._task_lock.release()
+        await bot._apply_settings_text(value_update, "да")
+        assert cfg.telegram.allow_groups is True
+        assert 1 not in bot._settings_pending
 
-        group_api = _API()
-        group = make_bot(group_api)
-        group.cfg.allow_groups = True
-        await group._cmd_panel(update("group"), None)
-        assert group_api.widgets == 0 and group._app.bot.sent
-
-        disabled_api = _API()
-        disabled = make_bot(disabled_api, advanced=False)
-        await disabled._cmd_panel(update(), None)
-        assert disabled_api.widgets == 0 and disabled._app.bot.sent
-
-        broken_api = _API(fail=True)
-        broken = make_bot(broken_api)
-        await broken._cmd_panel(update(), None)
-        assert broken_api.widgets == 0 and broken._app.bot.sent
+        await bot._on_settings_callback(_Query("pn:c"))
 
     asyncio.run(scenario())
-    print("ok  /panel создаёт и переиспользует панель, иначе показывает справку")
+    print("ok  callback-кнопки /panel меняют настройки, текст сохраняется")
+
+
+def test_settings_panel_helpers() -> None:
+    """Панель настроек читает/пишет те же поля конфига, что GUI."""
+    from nemus.core import telegram_settings as settings
+
+    cfg = Config()
+    assert settings.render(cfg, "root").startswith("<b>⚙️")
+    assert settings.section("telegram") is not None
+    temp = settings.find_field("llm", "temp")
+    assert temp is not None
+    ok, _ = settings.apply_text(cfg, temp, "0.3")
+    assert ok and cfg.llm.temperature == 0.3
+    provider = settings.find_field("llm", "provider")
+    assert provider is not None
+    ok, _ = settings.cycle_field(cfg, provider)
+    assert ok and cfg.llm.default_provider != "gemini"
+    users = settings.find_field("telegram", "tg_users")
+    assert users is not None
+    ok, _ = settings.apply_text(cfg, users, "7, 8")
+    assert ok and cfg.telegram.allowed_users == [7, 8]
+    bad = settings.apply_text(cfg, users, "не id")
+    assert bad[0] is False
+    keyboard = settings.section_keyboard(cfg, "telegram", autostart=False)
+    assert any(data.startswith("pn:t:") for row in keyboard for _, data in row)
+    assert any(data == "pn:auto" for row in keyboard for _, data in row)
+    tools_keyboard = settings.section_keyboard(cfg, "tools")
+    assert any(data == "pn:cleanup" for row in tools_keyboard for _, data in row)
+    print("ok  панель настроек читает и пишет поля GUI")
 
 
 def test_callback_message_ephemeral() -> None:
@@ -3239,19 +3452,143 @@ def test_ux_callback_no_double_answer() -> None:
 
 
 def test_status() -> None:
+    import nemus.core.telegram_bot as telegram_bot
+
     status = telegram_status()
     assert status["running"] is False, status
-    print("ok  статус без запущенного бота — «выключен»")
+    old = telegram_bot._active_bot
+    telegram_bot._active_bot = SimpleNamespace(
+        running=True, healthy=False, username="nemus_bot"
+    )
+    try:
+        status = telegram_status()
+        assert status["running"] is False, status
+        assert status["error"], status
+    finally:
+        telegram_bot._active_bot = old
+    print("ok  статус без запущенного бота — «выключен», мёртвый polling — ошибка")
+
+
+def test_brainstorm_one_question_at_a_time() -> None:
+    """Брейншторм идёт по одному вопросу, D просит текст и запускает задачу."""
+    import asyncio
+
+    from nemus.core.brainstorm import parse_choices
+
+    sample = """Поняла задачу: видео.
+1. Какого формата сделать видео?
+A) Вертикальный (рекомендую)
+B) Горизонтальный
+D) Свой вариант: _________
+
+2. Какая длительность?
+A) 30 секунд (рекомендую)
+B) 60 секунд
+D) Свой вариант: _________
+
+3. Какой стиль?
+A) Тёмный (рекомендую)
+B) Светлый
+D) Свой вариант: _________
+"""
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict[str, object]]] = []
+            self.edits: list[dict[str, object]] = []
+            self.next_id = 100
+
+        async def send_message(
+            self, chat_id: int, text: str, **kwargs: object
+        ) -> SimpleNamespace:
+            self.next_id += 1
+            self.sent.append((text, kwargs))
+            return SimpleNamespace(message_id=self.next_id)
+
+        async def edit_message_text(self, **kwargs: object) -> SimpleNamespace:
+            self.edits.append(kwargs)
+            return SimpleNamespace(message_id=kwargs.get("message_id"))
+
+    class _Query:
+        def __init__(self, data: str, message_id: int) -> None:
+            self.data = data
+            self.message = SimpleNamespace(
+                message_id=message_id,
+                chat_id=1,
+                chat=SimpleNamespace(id=1, type="private"),
+            )
+            self.from_user = SimpleNamespace(id=7)
+            self.answered = ""
+
+        async def answer(self, text: str = "", **_: object) -> None:
+            self.answered = text
+
+        async def edit_message_reply_markup(self, **_: object) -> None:
+            return None
+
+    async def run_flow() -> None:
+        bot = object.__new__(TelegramBot)
+        fake = _FakeBot()
+        bot._app = SimpleNamespace(bot=fake)
+        bot._brainstorm = {}
+        runs: list[dict[str, object]] = []
+
+        async def run_task(**kwargs: object) -> None:
+            runs.append(kwargs)
+
+        bot._run_task_for = run_task  # type: ignore[method-assign]
+        groups = parse_choices(sample)
+        assert len(groups) == 3, groups
+        await bot._send_brainstorm(
+            1, 10, groups, user_id=7, chat_type="private"
+        )
+        first = fake.sent[0][0]
+        assert "Вопрос 1 из 3" in first, first
+        assert "Вопрос 2 из 3" not in first, first
+        assert len(fake.sent[0][1].get("reply_markup").inline_keyboard) == 4
+
+        raw = _FakeBot()
+        await start_message(raw, 1, "<b>Вопрос</b>", raw_html=True)
+        assert raw.sent[0][0] == "<b>Вопрос</b>", raw.sent
+        assert "&lt;" not in raw.sent[0][0], raw.sent
+
+        prompt_id = bot._brainstorm[1]["prompt_message_id"]
+        await bot._on_brainstorm_callback(_Query("bs:0:0", prompt_id))
+        assert "Вопрос 2 из 3" in str(fake.edits[-1]["text"])
+        await bot._on_brainstorm_callback(_Query("bs:1:0", prompt_id))
+        assert "Вопрос 3 из 3" in str(fake.edits[-1]["text"])
+        await bot._on_brainstorm_callback(_Query("bs:2:2", prompt_id))
+        assert bot._brainstorm[1]["awaiting_custom"] is True
+
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=1),
+            effective_user=SimpleNamespace(id=7),
+        )
+        assert await bot._handle_brainstorm_text(
+            update, "Неоновый нуар"
+        )
+        assert len(runs) == 1, runs
+        assert "3D" in str(runs[0]["text"]), runs[0]
+        assert "Неоновый нуар" in str(runs[0]["text"]), runs[0]
+        assert 1 not in bot._brainstorm, bot._brainstorm
+
+    asyncio.run(run_flow())
+    print("ok  брейншторм: вопросы по одному, свой вариант и запуск задачи")
 
 
 def main() -> int:
+    test_proactive_drops_repeated_greeting()
+    test_proactive_angles_are_varied()
     test_config_defaults()
+    test_brainstorm_one_question_at_a_time()
     test_message_split()
+    test_download_cleanup()
     test_safe_names()
     test_kind_detection()
     test_ffmpeg_video_note()
     test_authorization()
     test_formatting()
+    test_stop_cancels_running_task()
     test_reminder_delivery()
     test_send_text_chunks()
     test_stt_import_without_numpy()
@@ -3264,10 +3601,13 @@ def main() -> int:
     test_retry_and_new_callbacks()
     test_status_context_lines()
     test_ux_texts()
+    test_diary_command_is_private_file()
+    test_command_catalog()
+    test_help_callback_edits_same_message()
     test_skills_text()
     test_skill_details_text()
     test_skills_command_and_callback()
-    test_skill_alias_handler_registered()
+    test_skill_command_not_duplicated()
     test_natural_language_skills_question()
     test_skills_helpers_are_safe()
     test_skills_use_real_plugin_and_mcp_config()
@@ -3275,6 +3615,7 @@ def main() -> int:
     test_muted_help_examples_and_attachment_buttons()
     test_ux_examples_callback()
     test_attachment_actions()
+    test_pending_attachments_are_per_user()
     test_pending_attachments_are_per_chat()
     test_attachment_callback_runs_task()
     test_stale_attachment_button_does_not_take_newer_file()
@@ -3297,17 +3638,17 @@ def main() -> int:
     test_advanced_api_unsupported_sticky()
     test_rich_markdown()
     test_rich_final_fallback()
+    test_progress_download_line()
     test_draft_progress()
     test_draft_keepalive_fallback()
     test_run_task_uses_draft()
     test_stopped_generation_update()
     test_stop_denies_pending_confirmation()
     test_last_tasks_set_inside_lock()
-    test_widget_html_and_state()
-    test_widget_panel_throttle()
-    test_panel_auto_create()
-    test_widget_query_actions()
     test_panel_command()
+    test_webapp_menu_sync()
+    test_settings_callback_flow()
+    test_settings_panel_helpers()
     test_callback_message_ephemeral()
     test_ux_callback_no_double_answer()
     test_status()

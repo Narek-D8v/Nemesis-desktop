@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemus.config import PROJECT_ROOT, Config
 from nemus.core.agent import Agent, ConfirmCallback
+from nemus.core.diary import DiaryBook
 from nemus.core.llm import LLMClient
 from nemus.core.mcp import MCPManager
 from nemus.core.memory import Memory
@@ -15,6 +17,7 @@ from nemus.core.permissions import PermissionManager
 from nemus.core.reminder import ReminderScheduler
 from nemus.core.tools.all import all_builtin_tools
 from nemus.core.tools.base import Tool
+from nemus.core.tools.diary_tools import diary_tools
 from nemus.core.tools.generate import generate_tools
 from nemus.core.tools.images import image_tools
 from nemus.core.tools.memory_tools import memory_tools
@@ -56,6 +59,7 @@ class Core:
     #: отдельная база Telegram: сессии чатов не смешиваются с GUI
     telegram_memory: Memory | None = None
     notes: NoteBook | None = None
+    diary: DiaryBook | None = None
     tools: list[Tool] = field(default_factory=list)
     mcp_manager: MCPManager | None = None
     reminder: ReminderScheduler | None = None
@@ -85,6 +89,7 @@ class Core:
             self.registry.register_many(spotify_tools())
         _apply_memory_tools(self.registry, config)
         _apply_notes(self.registry, config)
+        _apply_diary(self.registry, config)
         _apply_skills(self.registry, config)
         _apply_images(self.registry, config)
         _apply_telegram(self.registry, config)
@@ -92,6 +97,7 @@ class Core:
         _inject_memory(self.registry, self.memory)
         _inject_reminder(self.registry, self.reminder)
         self.notes = _inject_notes(self.registry, config)
+        self.diary = _inject_diary(self.registry, config)
         self.llm = LLMClient(config)
         _inject_llm(self.registry, self.llm)
         self.permissions = PermissionManager(config)
@@ -138,6 +144,7 @@ def _inject_settings(registry: ToolRegistry, config: Config) -> None:
         "screenshot",
         "run_python",
         "run_shell",
+        "download_image",
     ):
         tool = registry.get(name)
         if tool is not None and hasattr(tool, "guard"):
@@ -146,6 +153,10 @@ def _inject_settings(registry: ToolRegistry, config: Config) -> None:
     run_python = registry.get("run_python")
     if run_python is not None:
         run_python.workspace = config.tools.workspace
+
+    download_image = registry.get("download_image")
+    if download_image is not None:
+        download_image.workspace = config.tools.workspace
 
     # Генерация изображений: ключи провайдеров, модели и рабочая папка
     image_tool = registry.get("generate_image")
@@ -169,9 +180,14 @@ def _inject_settings(registry: ToolRegistry, config: Config) -> None:
             image_tool.openrouter_model = images_cfg.openrouter_model
             image_tool.pollinations_model = images_cfg.pollinations_model
         image_tool.workspace = config.tools.workspace
+        video_tool = registry.get("create_video")
+        if video_tool is not None:
+            # create_video генерирует недостающие кадры тем же настроенным
+            # generate_image (ключи, модели, провайдер), а не голым Pollinations.
+            video_tool.image_tool = image_tool
 
     # Презентации и видео: рабочая папка для готовых файлов
-    for name in ("create_presentation", "create_video"):
+    for name in ("create_presentation", "create_video", "verify_website"):
         tool = registry.get(name)
         if tool is not None and hasattr(tool, "workspace"):
             tool.workspace = config.tools.workspace
@@ -179,7 +195,7 @@ def _inject_settings(registry: ToolRegistry, config: Config) -> None:
     # Скиллы: папка и отключённые в настройках скиллы
     skills_cfg = getattr(config, "skills", None)
     if skills_cfg is not None:
-        for name in ("load_skill", "create_skill"):
+        for name in ("find_skills", "load_skill", "create_skill"):
             tool = registry.get(name)
             if tool is not None:
                 tool.skills_dir = skills_cfg.dir
@@ -215,8 +231,8 @@ def _apply_skills(registry: ToolRegistry, config: Config) -> None:
         if "load_skill" not in registry:
             registry.register_many(skill_tools())
     else:
-        registry.unregister("load_skill")
-        registry.unregister("create_skill")
+        for name in ("find_skills", "load_skill", "create_skill"):
+            registry.unregister(name)
 
 
 def _apply_memory_tools(registry: ToolRegistry, config: Config) -> None:
@@ -267,6 +283,28 @@ def _inject_notes(registry: ToolRegistry, config: Config) -> NoteBook | None:
     return notebook
 
 
+def _apply_diary(registry: ToolRegistry, config: Config) -> None:
+    """Включает/выключает инструменты личного дневника по ``character.diary``."""
+    if getattr(config.character, "diary", False):
+        if "write_diary" not in registry:
+            registry.register_many(diary_tools())
+    else:
+        registry.unregister("write_diary")
+        registry.unregister("read_diary")
+
+
+def _inject_diary(registry: ToolRegistry, config: Config) -> DiaryBook | None:
+    """Создаёт DiaryBook по конфигу и отдаёт его инструментам дневника."""
+    if not getattr(config.character, "diary", False):
+        return None
+    book = DiaryBook(config.character.diary_file)
+    for tool_name in ("write_diary", "read_diary"):
+        tool = registry.get(tool_name)
+        if tool is not None:
+            tool.diary = book
+    return book
+
+
 def _inject_llm(registry: ToolRegistry, llm: LLMClient) -> None:
     """Отдаёт инструментам экрана ссылку на LLM для определения vision."""
     for name in ("see_screen", "control_screen"):
@@ -279,12 +317,15 @@ def build_core(
     config: Config,
     confirm: ConfirmCallback | None = None,
     system_suffix: str = GUI_AGENT_SUFFIX,
+    mcp_async: bool = False,
 ) -> Core:
     """Создаёт и связывает подсистемы ядра.
 
     ``system_suffix`` — блок промпта конкретного интерфейса. По умолчанию
     GUI-приложение (озвучка финалов); headless-режим передаёт пустую строку
     и строит своего агента со своим суффиксом (см. TelegramBot).
+    ``mcp_async`` — не ждать подключения MCP-серверов: окно/бот стартуют
+    раньше, а инструменты появятся в реестре через несколько секунд.
     """
     registry = ToolRegistry()
     registry.register_many(all_builtin_tools())
@@ -293,6 +334,7 @@ def build_core(
     registry.register_many(remind_tools(reminder))
     _apply_memory_tools(registry, config)
     _apply_notes(registry, config)
+    _apply_diary(registry, config)
     _apply_skills(registry, config)
     _apply_images(registry, config)
     _apply_telegram(registry, config)
@@ -306,8 +348,22 @@ def build_core(
 
     # --- Model Context Protocol (MCP) ---
     mcp_manager = MCPManager(config, registry)
-    if mcp_manager.ensure_ready():
-        logger.info(f"Загружено МП-инструментов: {len(mcp_manager.tool_names)}")
+
+    def _connect_mcp() -> None:
+        try:
+            if mcp_manager.ensure_ready():
+                logger.info(
+                    f"Загружено МП-инструментов: {len(mcp_manager.tool_names)}"
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Не удалось подключить MCP")
+
+    if mcp_async and mcp_manager.enabled:
+        threading.Thread(
+            target=_connect_mcp, name="nemus-mcp-connect", daemon=True
+        ).start()
+    else:
+        _connect_mcp()
 
     # --- память ---
     memory = Memory(config.memory.database)
@@ -316,6 +372,7 @@ def build_core(
     _inject_settings(registry, config)
     _inject_memory(registry, memory)
     notes = _inject_notes(registry, config)
+    diary = _inject_diary(registry, config)
 
     llm = LLMClient(config)
     _inject_llm(registry, llm)
@@ -338,6 +395,7 @@ def build_core(
         agent=agent,
         memory=memory,
         notes=notes,
+        diary=diary,
         tools=list(registry),
         mcp_manager=mcp_manager,
         reminder=reminder,

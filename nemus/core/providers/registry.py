@@ -40,6 +40,9 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "ollama": ProviderSpec(
         "ollama", "ollama/", "", True, "Ollama (локально)"
     ),
+    "llama_cpp": ProviderSpec(
+        "llama_cpp", "llama_cpp/", "", True, "llama.cpp (локально, GGUF)"
+    ),
 }
 
 
@@ -51,6 +54,18 @@ def provider_kwargs(provider: str, cfg: "Config") -> dict[str, Any]:
 
     pc = cfg.llm.providers.get(provider)
     kwargs: dict[str, Any] = {}
+
+    if provider == "llama_cpp":
+        # llama-cpp-python поднимает локальный OpenAI-совместимый сервер.
+        # Ключ нужен формально: LiteLLM не ходит в OpenAI без него.
+        lc = cfg.llm.llama_cpp
+        kwargs["api_key"] = (pc.api_key if pc and pc.api_key else "local")
+        kwargs["api_base"] = (
+            pc.api_base
+            if pc and pc.api_base
+            else f"http://{lc.host}:{lc.port}/v1"
+        )
+        return kwargs
 
     if pc and pc.api_key:
         kwargs["api_key"] = pc.api_key

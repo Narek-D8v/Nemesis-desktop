@@ -261,6 +261,9 @@ class TTSEngine:
         self.voice = voice
         self.rate = rate
         self.volume = volume
+        #: базовые настройки из «Озвучки», от них считаем эмоциональный оттенок
+        self.base_rate = _percent(rate)
+        self.base_volume = _percent(volume)
         self.engine = engine
         self.model = model
         self.api_key = api_key
@@ -271,6 +274,32 @@ class TTSEngine:
         self._stop_flag = threading.Event()
         self._speaking = threading.Event()
         self._play_lock = threading.Lock()
+
+    def apply_emotion(self, *, mood: int = 0, energy: int = 65, hurt: int = 0) -> None:
+        """Меняет скорость и громкость речи под текущее состояние.
+
+        Обида и усталость делают голос тише и медленнее, хорошее настроение —
+        чуть живее. Значения не выходят за разумные пределы, а базовые
+        настройки из конфига остаются точкой отсчёта.
+        """
+        mood_delta = max(-1.0, min(1.0, mood / 100.0))
+        energy_delta = max(-1.0, min(1.0, (energy - 65) / 35.0))
+        hurt_delta = max(0.0, min(1.0, hurt / 100.0))
+        rate = self.base_rate + round(
+            mood_delta * 8 + energy_delta * 4 - hurt_delta * 7
+        )
+        volume = self.base_volume + round(
+            mood_delta * 5 + energy_delta * 3 - hurt_delta * 6
+        )
+        rate = max(-30, min(30, rate))
+        volume = max(-30, min(30, volume))
+        self.rate = f"{rate:+d}%"
+        self.volume = f"{volume:+d}%"
+
+    def reset_emotion(self) -> None:
+        """Возвращает голос к базовым настройкам."""
+        self.rate = f"{self.base_rate:+d}%"
+        self.volume = f"{self.base_volume:+d}%"
 
     # ------------------------------------------------------------- synthesize
     def synthesize(self, text: str) -> Path:

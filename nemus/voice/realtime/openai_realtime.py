@@ -19,6 +19,7 @@ from nemus.core.language import (
     reply_language_directive,
 )
 from nemus.utils.logger import logger
+from nemus.voice.echo import create_echo_canceller
 from nemus.voice.params import SAMPLE_RATE
 from nemus.voice.realtime.audio_io import MicStreamer, SpeakerPlayer, resample_pcm16
 from nemus.voice.realtime.base import (
@@ -95,14 +96,21 @@ class OpenAIRealtimeSession(BaseRealtimeSession):
                 await ws.send(json.dumps(self._session_update()))
 
                 if self._audio:
-                    self._speaker = SpeakerPlayer(self.receive_rate)
+                    self._speaker = SpeakerPlayer(
+                        self.receive_rate, reference_rate=self.mic_rate
+                    )
                     if not self._speaker.start():
                         self._audio = False
                     else:
+                        echo = (
+                            create_echo_canceller(self.mic_rate) if self.aec else None
+                        )
                         self._mic = MicStreamer(
                             self.mic_rate,
                             self._on_mic_chunk,
                             cleaner=self.noise_reducer,
+                            echo_canceller=echo,
+                            echo_reference=self._speaker.reference,
                         )
                         if not self._mic.start():
                             self._emit_error("Микрофон недоступен — аудиоввод выключен.")
@@ -171,12 +179,26 @@ class OpenAIRealtimeSession(BaseRealtimeSession):
 
     # ----------------------------------------------------------- audio hooks
     def _on_mic_chunk(self, chunk: bytes) -> None:
+        rms = pcm16_rms(chunk)
+        now = time.monotonic()
+        # эхо динамика не должно попадать в модель и запускать новый ход
+        chunks = self._echo_guard(
+            chunk,
+            rms,
+            now,
+            self._speaker,
+            self._drain_play_queue,
+            aec_active=self._mic is not None and self._mic.aec_active,
+        )
+        if chunks is None:
+            return
         # затянувшуюся тишину модели не шлём — на ней она галлюцинирует
-        if not self._gate_audio(pcm16_rms(chunk), time.monotonic()):
+        if not self._gate_audio(rms, now):
             return
         loop = self._loop
         if loop is not None and not loop.is_closed() and self._running:
-            loop.call_soon_threadsafe(self._mic_queue.put_nowait, chunk)
+            for item in chunks:
+                loop.call_soon_threadsafe(self._mic_queue.put_nowait, item)
 
     async def _mic_loop(self) -> None:
         while self._running:

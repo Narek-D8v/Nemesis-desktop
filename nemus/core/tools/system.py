@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
 from nemus.core.tools.sandbox import PathGuard, PathNotAllowed
@@ -23,6 +24,10 @@ POWERSHELL_TIMEOUT = 20
 CREATE_NO_WINDOW = 0x08000000
 #: таймаут пробы версии одной команды в check_deps (секунды)
 VERSION_TIMEOUT = 5
+#: сколько ждать полной проверки файла в Windows Defender, секунд
+DEFENDER_TIMEOUT = 300
+#: сколько символов вывода сканера отдаём модели
+SCAN_OUTPUT_LIMIT = 4000
 #: флаги запроса версии — перебираются, пока не получим код 0
 VERSION_FLAGS = ("--version", "-version", "-V")
 #: готовые команды установки для известных зависимостей
@@ -318,6 +323,121 @@ class OpenApplicationTool(Tool):
         return None
 
 
+def _defender_cli() -> str | None:
+    """Ищет MpCmdRun.exe: сначала обычный путь, затем актуальная платформа."""
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    candidates = [
+        os.path.join(program_files, "Windows Defender", "MpCmdRun.exe"),
+    ]
+    platform_root = Path(
+        os.environ.get("ProgramData", r"C:\ProgramData")
+    ) / "Microsoft" / "Windows Defender" / "Platform"
+    if platform_root.is_dir():
+        versions = sorted(
+            (p for p in platform_root.iterdir() if p.is_dir()),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        candidates.extend(str(p / "MpCmdRun.exe") for p in versions)
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _scan_verdict(output: str) -> bool | None:
+    """True — чисто, False — угрозы, None — сканер не дал понятного ответа."""
+    low = output.casefold()
+    if "found no threats" in low or "no threats found" in low:
+        return True
+    if (
+        "found threats" in low
+        or "threats found" in low
+        or "threat detected" in low
+        or "обнаружены угрозы" in low
+    ):
+        return False
+    if "scan finished" in low and "error" not in low and "failed" not in low:
+        return True
+    return None
+
+
+class ScanFileTool(Tool):
+    name = "scan_file"
+    description = (
+        "Проверяет файл или папку встроенным Windows Defender — локально, без "
+        "отправки в облако. ОБЯЗАТЕЛЬНО вызывай перед запуском установщика, "
+        "игры или exe из неофициального источника. При угрозе вернёт ok=false "
+        "и название/вывод сканера; файл не удаляется и не лечится."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Файл или папка для проверки.",
+            }
+        },
+        "required": ["path"],
+    }
+    risk = RiskLevel.SAFE
+
+    def execute(self, path: str = "", **_: object) -> ToolResult:
+        raw = (path or "").strip().strip('"')
+        if not raw:
+            return ToolResult.failure("Не указан путь для проверки.")
+        target = Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+        if not target.exists():
+            return ToolResult.failure(f"Файл или папка не найдены: {target}")
+        if not sys.platform.startswith("win"):
+            return ToolResult.failure(
+                "scan_file рассчитан на Windows Defender и работает только на Windows."
+            )
+        scanner = _defender_cli()
+        if scanner is None:
+            return ToolResult.failure(
+                "Не найден MpCmdRun.exe Windows Defender. Проверь, что антивирус "
+                "Windows включён, и повтори проверку."
+            )
+        run = run_capture(
+            [
+                scanner,
+                "-Scan",
+                "-ScanType",
+                "3",
+                "-File",
+                str(target),
+                "-DisableRemediation",
+            ],
+            timeout=DEFENDER_TIMEOUT,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        raw_output = (run.stdout or b"") + (run.stderr or b"")
+        output = raw_output.decode("utf-8", errors="replace").strip()
+        short = output[-SCAN_OUTPUT_LIMIT:]
+        if run.timed_out:
+            return ToolResult.failure(
+                f"Проверка не уложилась в {DEFENDER_TIMEOUT} секунд. "
+                f"Файл: {target}. Не запускай его, пока проверка не завершится."
+            )
+        verdict = _scan_verdict(output)
+        if verdict is False:
+            return ToolResult.failure(
+                "Windows Defender нашёл угрозу. НЕ запускай файл и не добавляй "
+                f"исключение.\nФайл: {target}\nВывод сканера:\n{short}"
+            )
+        if verdict is None:
+            return ToolResult.failure(
+                "Сканер не дал однозначного результата — считай проверку не "
+                f"пройденной.\nФайл: {target}\nКод: {run.returncode}\n"
+                f"Вывод:\n{short}"
+            )
+        return ToolResult.success(
+            f"Windows Defender: угроз не найдено.\nФайл: {target}\n"
+            f"Вывод сканера:\n{short}"
+        )
+
+
 class ScreenshotTool(Tool):
     name = "screenshot"
     description = (
@@ -517,6 +637,7 @@ def system_tools() -> list[Tool]:
         GetSystemInfoTool(),
         OpenUrlTool(),
         OpenApplicationTool(),
+        ScanFileTool(),
         ScreenshotTool(),
         CheckDepsTool(),
     ]

@@ -27,6 +27,7 @@ import litellm  # noqa: E402
 
 from nemus.config import get_config  # noqa: E402
 from nemus.core.llm import (  # noqa: E402
+    INTERACTIVE_ATTEMPTS,
     MAX_ATTEMPTS,
     MAX_BACKOFF,
     ChatTarget,
@@ -86,11 +87,15 @@ def test_midstream_error_falls_back() -> None:
     finally:
         litellm.completion = original
 
-    # основной провайдер ретраится MAX_ATTEMPTS раз, потом — резервный
-    assert calls == ["gemini/primary"] * MAX_ATTEMPTS + ["openai/backup"], calls
+    # облачный провайдер в интерактиве ретраится меньше, чем локальный
+    assert calls == ["gemini/primary"] * INTERACTIVE_ATTEMPTS + [
+        "openai/backup"
+    ], calls
     final = [e for e in events if e.kind == "final"]
     assert final and final[-1].response.content == "ответ резервной модели", events
-    print(f"ok  обрыв стрима до дельт → {MAX_ATTEMPTS} ретраев, затем fallback")
+    print(
+        f"ok  обрыв стрима до дельт → {INTERACTIVE_ATTEMPTS} ретраев, затем fallback"
+    )
 
 
 def test_rate_limit_with_retry_hint_retries() -> None:
@@ -167,8 +172,8 @@ def test_midstream_after_thoughts_retries() -> None:
     print("ok  обрыв после мыслей (без видимого текста) → повтор, а не падение")
 
 
-def test_rate_limit_falls_back_immediately() -> None:
-    """Исчерпанные лимиты (429) — фолбэк сразу, без единого повтора."""
+def test_rate_limit_without_hint_retries() -> None:
+    """429 без retryDelay — временный лимит: повторяем, а не падаем сразу."""
     calls: list[str] = []
     original = litellm.completion
 
@@ -177,8 +182,34 @@ def test_rate_limit_falls_back_immediately() -> None:
 
     def fake_completion(**kwargs):
         calls.append(kwargs["model"])
-        if kwargs["model"] == "gemini/primary":
+        if kwargs["model"] == "gemini/primary" and len(calls) < 3:
             raise RateLimitError("429 Too Many Requests: rate limit exceeded")
+        return iter([_chunk("ответ после повтора", finish="stop")])
+
+    litellm.completion = fake_completion
+    try:
+        with mock.patch("nemus.core.llm.time.sleep"):
+            events = list(_client().stream(_messages()))
+    finally:
+        litellm.completion = original
+
+    assert calls == ["gemini/primary"] * 3, calls
+    final = [e for e in events if e.kind == "final"]
+    assert final and final[-1].response.content == "ответ после повтора", events
+    print("ok  429 без retryDelay → повтор с бэкоффом, без лишнего фолбэка")
+
+
+def test_no_credit_falls_back_immediately() -> None:
+    """Кончились кредиты (402) — повтор бесполезен, сразу фолбэк."""
+    calls: list[str] = []
+    original = litellm.completion
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "gemini/primary":
+            raise RuntimeError(
+                '402 Payment Required: insufficient credits. "code":402'
+            )
         return iter([_chunk("ответ из резерва", finish="stop")])
 
     litellm.completion = fake_completion
@@ -191,7 +222,46 @@ def test_rate_limit_falls_back_immediately() -> None:
     assert calls == ["gemini/primary", "openai/backup"], calls
     final = [e for e in events if e.kind == "final"]
     assert final and final[-1].response.content == "ответ из резерва", events
-    print("ok  лимиты исчерпаны → фолбэк сразу, без ретраев")
+    print("ok  кончились кредиты → фолбэк сразу, без ретраев")
+
+def test_paid_fallback_skipped() -> None:
+    """Платный Claude в конфиге не должен становиться автофолбэком."""
+    cfg = get_config()
+    cfg.llm.default_provider = "gemini"
+    cfg.llm.default_model = "gemini/primary"
+    cfg.llm.fallback = [
+        SimpleNamespace(provider="openrouter", model="openrouter/free-model:free"),
+        SimpleNamespace(
+            provider="openrouter",
+            model="openrouter/anthropic/claude-sonnet-4.6",
+        ),
+        SimpleNamespace(provider="openai", model="openai/gpt-4o"),
+    ]
+    client = LLMClient(cfg)
+    models = [target.model for target in client._targets()]
+    assert models == ["gemini/primary", "openrouter/free-model:free"], models
+    print("ok  платные модели пропущены: автофолбэк только на free")
+
+
+def test_transient_provider_error_is_retryable() -> None:
+    """Если все провайдеры ответили 429, ошибка помечена retryable."""
+    original = litellm.completion
+
+    def fake_completion(**kwargs):
+        raise RuntimeError("429 Too Many Requests: rate limit exceeded")
+
+    litellm.completion = fake_completion
+    try:
+        with mock.patch("nemus.core.llm.time.sleep"):
+            try:
+                list(_client().stream(_messages()))
+            except ProviderError as exc:
+                assert exc.retryable is True, exc
+            else:  # pragma: no cover
+                raise AssertionError("ожидалась ProviderError")
+    finally:
+        litellm.completion = original
+    print("ok  временная ошибка всех провайдеров помечена retryable")
 
 
 def test_fatal_error_falls_back_immediately() -> None:
@@ -360,11 +430,12 @@ def test_sampling_stripped_only_for_gemini_3() -> None:
 def test_error_classification() -> None:
     """429/квота → limit, ключ/модель → fatal, обрыв связи → transient."""
     cases = [
-        (RuntimeError("Error code: 429"), "limit"),
-        (RuntimeError("You exceeded your current quota"), "limit"),
-        (RuntimeError("RESOURCE_EXHAUSTED: Quota exceeded"), "limit"),
-        (RuntimeError("rate_limit_error"), "limit"),
+        (RuntimeError("Error code: 429"), "transient"),
+        (RuntimeError("You exceeded your current quota"), "transient"),
+        (RuntimeError("RESOURCE_EXHAUSTED: Quota exceeded"), "transient"),
+        (RuntimeError("rate_limit_error"), "transient"),
         (RuntimeError('429 quota exceeded: "retryDelay": "37s"'), "transient"),
+        (RuntimeError('429 daily quota: "retryDelay": "58034s"'), "limit"),
         (RuntimeError("429 insufficient_quota: You have no credits remaining"), "limit"),
         (RuntimeError("401 Unauthorized"), "fatal"),
         (RuntimeError("402 Payment Required: insufficient credits"), "limit"),
@@ -463,9 +534,11 @@ def test_midstream_after_text_resets_before_fallback() -> None:
     finally:
         litellm.completion = original
 
-    assert calls == ["gemini/primary"] * MAX_ATTEMPTS + ["openai/backup"], calls
+    assert calls == ["gemini/primary"] * INTERACTIVE_ATTEMPTS + [
+        "openai/backup"
+    ], calls
     kinds = [event.kind for event in events]
-    assert kinds.count("reset") >= MAX_ATTEMPTS, kinds
+    assert kinds.count("reset") >= INTERACTIVE_ATTEMPTS, kinds
     last_reset = len(kinds) - 1 - kinds[::-1].index("reset")
     after = "".join(
         event.text for event in events[last_reset + 1 :] if event.kind == "content"
@@ -521,9 +594,36 @@ def test_complete_retries_then_falls_back() -> None:
     finally:
         litellm.completion = original
 
-    assert calls == ["gemini/primary"] * MAX_ATTEMPTS + ["openai/backup"], calls
+    assert calls == ["gemini/primary"] * INTERACTIVE_ATTEMPTS + [
+        "openai/backup"
+    ], calls
     assert resp.content == "синхронный ответ", resp.content
-    print(f"ok  complete(): {MAX_ATTEMPTS} ретраев, затем fallback")
+    print(f"ok  complete(): {INTERACTIVE_ATTEMPTS} ретраев, затем fallback")
+
+
+def test_complete_no_fallback_for_fast_path() -> None:
+    """Быстрый ответ не должен последовательно ждать всю fallback-цепочку."""
+    calls: list[str] = []
+    original = litellm.completion
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs["model"])
+        raise RuntimeError("connection reset by peer")
+
+    litellm.completion = fake_completion
+    try:
+        with mock.patch("nemus.core.llm.time.sleep"):
+            try:
+                _client().complete(_messages(), attempts=1, fallback=False)
+            except ProviderError:
+                pass
+            else:
+                raise AssertionError("ожидался ProviderError")
+    finally:
+        litellm.completion = original
+
+    assert calls == ["gemini/primary"], calls
+    print("ok  fallback=False → только выбранная модель, без чужих провайдеров")
 
 
 def test_redact_headers() -> None:
@@ -581,12 +681,16 @@ def main() -> int:
     test_midstream_error_falls_back()
     test_rate_limit_with_retry_hint_retries()
     test_midstream_after_thoughts_retries()
-    test_rate_limit_falls_back_immediately()
+    test_rate_limit_without_hint_retries()
+    test_paid_fallback_skipped()
+    test_transient_provider_error_is_retryable()
+    test_no_credit_falls_back_immediately()
     test_fatal_error_falls_back_immediately()
     test_midstream_after_text_resets_and_retries()
     test_midstream_after_text_resets_before_fallback()
     test_all_targets_fail()
     test_complete_retries_then_falls_back()
+    test_complete_no_fallback_for_fast_path()
     test_redact_headers()
     test_logger_redacts_traceback()
     print("\nВСЕ ТЕСТЫ ПРОШЛИ")

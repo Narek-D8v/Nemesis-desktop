@@ -278,6 +278,96 @@ def test_dialog_limits() -> None:
     print("ok  GUI: лимиты агента (шаги и время) настраиваются")
 
 
+def test_hf_search_ui_and_main_progress() -> None:
+    """Поиск GGUF в настройках и прогресс в главном окне."""
+    from PySide6.QtWidgets import QApplication
+
+    import nemus.gui.dialogs as dialogs
+    from nemus.core.providers.hf_catalog import HFFile, HFModel
+    from nemus.core.providers.hf_download import ModelDownloadEvent
+    from nemus.gui.dialogs import SettingsDialog
+    from nemus.gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    original_search = dialogs.search_hf_models
+    original_files = dialogs.list_hf_gguf_files
+    dialogs.search_hf_models = lambda query, endpoint="": [
+        HFModel("owner/model", downloads=1234, likes=7)
+    ]
+    dialogs.list_hf_gguf_files = lambda repo, endpoint="": [
+        HFFile("model-q4_k_m.gguf", size=4 * 1024 * 1024)
+    ]
+    dlg = SettingsDialog(None, core=None)
+    window = MainWindow(None)
+    try:
+        dlg.cb_provider.blockSignals(True)
+        dlg.cb_provider.setCurrentText("llama_cpp")
+        dlg._update_provider_visibility()
+        assert not dlg._local_group.isHidden()
+        assert not dlg._hf_group.isHidden()
+        assert dlg._keys_group.isHidden()
+        dlg.cb_provider.setCurrentText("openrouter")
+        dlg._update_provider_visibility()
+        assert dlg._local_group.isHidden()
+        assert dlg._hf_group.isHidden()
+        assert not dlg._keys_group.isHidden()
+        dlg.cb_provider.blockSignals(False)
+
+        dlg.edit_hf_query.setText("model")
+        dlg._search_hf()
+        worker = dlg._hf_search_worker
+        assert worker is not None and worker.wait(8000)
+        for _ in range(4):
+            QApplication.processEvents()
+        assert dlg.cb_hf_results.count() == 1, dlg.cb_hf_results.count()
+        assert dlg.edit_hf_repo.text() == "owner/model"
+
+        files_worker = dlg._hf_files_worker
+        assert files_worker is not None and files_worker.wait(8000)
+        for _ in range(4):
+            QApplication.processEvents()
+        assert dlg.cb_hf_files.count() == 1, dlg.cb_hf_files.count()
+        assert dlg.edit_hf_file.text() == "model-q4_k_m.gguf"
+
+        assert window.download_bar.isHidden()
+        window._on_model_download_event(
+            ModelDownloadEvent(
+                phase="start",
+                repo="owner/model",
+                filename="model-q4_k_m.gguf",
+            )
+        )
+        assert not window.download_bar.isHidden()
+        window._on_model_download_event(
+            ModelDownloadEvent(
+                phase="progress",
+                repo="owner/model",
+                filename="model-q4_k_m.gguf",
+                done=50,
+                total=100,
+            )
+        )
+        assert window.download_bar.value() == 500
+        assert "50" in window.download_label.text()
+        window._on_model_download_event(
+            ModelDownloadEvent(
+                phase="done",
+                repo="owner/model",
+                filename="model-q4_k_m.gguf",
+                done=100,
+                total=100,
+            )
+        )
+        assert "скачана" in window.download_label.text().lower()
+    finally:
+        dialogs.search_hf_models = original_search
+        dialogs.list_hf_gguf_files = original_files
+        window._unsubscribe_downloads()
+        window.close()
+        dlg.done(0)
+    print("ok  GUI: поиск GGUF на Hugging Face и прогресс в главном окне")
+
+
 def main() -> int:
     test_static_catalog()
     test_parsers()
@@ -285,6 +375,7 @@ def main() -> int:
     test_dialog_combo()
     test_dialog_os()
     test_dialog_limits()
+    test_hf_search_ui_and_main_progress()
     print("\nMODEL CATALOG TESTS PASSED")
     return 0
 

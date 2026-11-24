@@ -38,6 +38,7 @@ import atexit
 import json
 import os
 import re
+import shlex
 import threading
 import time
 from contextlib import AsyncExitStack
@@ -92,6 +93,160 @@ MCP_PRESETS: tuple[tuple[str, str, list[str], dict[str, str]], ...] = (
     ("github", "npx", ["-y", "@modelcontextprotocol/server-github"], {"GITHUB_TOKEN": ""}),
     ("time", "uvx", ["mcp-server-time"], {}),
 )
+
+
+def _split_quotes(token: str) -> str:
+    """Убирает парные кавычки, которые оставляет shlex в Windows-режиме."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
+def _option_value(tokens: list[str], name: str) -> str:
+    """Значение опции вида ``--config X`` или ``--config=X``."""
+    for index, token in enumerate(tokens):
+        if token == name and index + 1 < len(tokens):
+            return tokens[index + 1]
+        if token.startswith(name + "="):
+            return token[len(name) + 1 :]
+    return ""
+
+
+def _is_smithery(token: str) -> bool:
+    low = token.lower()
+    return (
+        low in ("smithery", "smithery.cmd")
+        or low.startswith("@smithery/cli")
+        or low.startswith("smithery@")
+    )
+
+
+def _smithery_install(tokens: list[str]) -> str | None:
+    """Сервер из ``smithery install`` / ``smithery mcp add``; иначе None."""
+    index = next(
+        (i for i, token in enumerate(tokens) if _is_smithery(token)), None
+    )
+    if index is None:
+        return None
+    rest = tokens[index + 1 :]
+    words = [token for token in rest if not token.startswith("-")]
+    if not words:
+        return None
+    if words[0].lower() == "install":
+        start = rest.index(words[0]) + 1
+    elif words[0].lower() == "mcp" and len(words) > 1 and words[1].lower() == "add":
+        start = rest.index(words[1]) + 1
+    else:
+        return None
+    # значение опции не должно стать именем сервера: --client claude
+    takes_value = {"--client", "--config", "--key", "--id"}
+    skip_next = False
+    for token in rest[start:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in takes_value:
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        return token
+    raise ValueError("в команде не указан сервер после install/add")
+
+
+def _strip_client_flag(tokens: list[str]) -> list[str]:
+    """Убирает ``--client claude``: это выбор чужого клиента, не сервера."""
+    out: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--client":
+            index += 2
+            continue
+        if token.startswith("--client="):
+            index += 1
+            continue
+        out.append(token)
+        index += 1
+    return out
+
+
+def _display_name(raw: str) -> str:
+    """Человеческое имя сервера из пакета или пути."""
+    name = (raw or "").strip().rstrip("/\\")
+    name = re.split(r"[/\\]", name)[-1]
+    name = name.split("@")[0]
+    name = re.sub(r"\.(?:py|js|mjs|cjs|exe)$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"[-_]+", " ", name).strip()
+    return name[:60] or "MCP"
+
+
+def _guess_name(tokens: list[str]) -> str:
+    """Имя для обычной команды: пакет у npx/uvx, модуль или файл у python."""
+    command = Path(tokens[0]).name.lower()
+    values = [token for token in tokens[1:] if not token.startswith("-")]
+    if command in ("npx", "bunx", "pnpm", "yarn", "uvx", "uv", "pipx"):
+        return values[0] if values else tokens[0]
+    if command in ("python", "python3", "py"):
+        if "-m" in tokens:
+            at = tokens.index("-m")
+            if at + 1 < len(tokens):
+                return tokens[at + 1]
+        return values[0] if values else tokens[0]
+    return tokens[0]
+
+
+def parse_mcp_command(text: str) -> MCPServerConfig:
+    """Превращает вставленную команду в stdio-сервер для Немуси.
+
+    Понимает установочные команды Smithery (``... install @scope/server
+    --client claude``): они ставят сервер в конфиг Claude, поэтому для
+    Немуси та же команда переписывается в ``npx -y @smithery/cli run
+    <server>``. ``--config`` сохраняется. Обычная команда запуска
+    (``npx ...``, ``uvx ...``, ``python ...``) разбирается на command/args.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("команда не задана")
+    try:
+        tokens = shlex.split(raw, posix=os.name != "nt")
+    except ValueError as exc:
+        raise ValueError(f"не удалось разобрать команду: {exc}") from exc
+    tokens = [_split_quotes(token) for token in tokens if token.strip()]
+    if not tokens:
+        raise ValueError("команда не задана")
+
+    server = _smithery_install(tokens)
+    if server is not None:
+        if server.startswith(("http://", "https://")):
+            raise ValueError(
+                "Smithery предлагает удалённый HTTP-сервер, а Немуся "
+                "подключает только stdio"
+            )
+        args = ["-y", "@smithery/cli", "run", server]
+        config_value = _option_value(tokens, "--config")
+        if config_value:
+            args.extend(["--config", config_value])
+        return MCPServerConfig(
+            name=_display_name(server),
+            command="npx",
+            args=args,
+            cwd=".",
+            env={},
+            enabled=True,
+        )
+
+    cleaned = _strip_client_flag(tokens)
+    if not cleaned:
+        raise ValueError("команда не задана")
+    return MCPServerConfig(
+        name=_display_name(_guess_name(cleaned)),
+        command=cleaned[0],
+        args=cleaned[1:],
+        cwd=".",
+        env={},
+        enabled=True,
+    )
 
 
 def parse_claude_config(text: str) -> list[MCPServerConfig]:

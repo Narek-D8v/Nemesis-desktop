@@ -3,9 +3,10 @@ from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('nemus/voice/_rnnoise/rnnoise.dll', 'nemus/voice/_rnnoise'),
-         ('nemus/skills', 'nemus/skills')]
+         ('nemus/skills', 'nemus/skills'),
+         ('nemus/core/webapp/index.html', 'nemus/core/webapp')]
 binaries = []
-hiddenimports = []
+hiddenimports = ['nemus.core.emotions']
 hiddenimports += collect_submodules('keyring.backends')
 tmp_ret = collect_all('litellm')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -17,6 +18,14 @@ tmp_ret = collect_all('ctranslate2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('sounddevice')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# llama-cpp-python необязателен: если он установлен при сборке, кладём
+# нативные библиотеки и сервер рядом с exe.
+try:
+    tmp_ret = collect_all('llama_cpp')
+except Exception:
+    pass
+else:
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(

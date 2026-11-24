@@ -56,6 +56,8 @@ class LocalLiveSession:
         barge_in: bool = True,
         llm: Any = None,
         memory: Any = None,
+        ack: str = "",
+        idle_timeout: float = 0.0,
     ) -> None:
         self.config = config
         self.cb = callbacks
@@ -66,6 +68,10 @@ class LocalLiveSession:
         self.barge_in = barge_in
         self.llm = llm
         self.memory = memory
+        #: короткое подтверждение активации ("Слушаю") и окно продолжения
+        self.ack = ack.strip()
+        self.idle_timeout = max(0.0, float(idle_timeout or 0))
+        self._last_activity = 0.0
 
         self._thread: threading.Thread | None = None
         self._running = False
@@ -149,6 +155,16 @@ class LocalLiveSession:
 
         threading.Thread(target=self._stt.warmup, daemon=True, name="local-stt-warmup").start()
         self._emit_state(RealtimeState.READY)
+        self._last_activity = time.monotonic()
+        if self.ack and self._tts is not None:
+            self._tts.speak(self.ack, block=False)
+            deadline = time.monotonic() + 1.0
+            while (
+                self._running
+                and not self._tts.is_speaking
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
         vad = EnergyVAD(threshold=VAD_THRESHOLD, silence_ms=VAD_SILENCE_MS)
 
         try:
@@ -158,14 +174,22 @@ class LocalLiveSession:
                 if not self._running:
                     break
                 if audio.size == 0:
+                    if (
+                        self.idle_timeout
+                        and time.monotonic() - self._last_activity >= self.idle_timeout
+                    ):
+                        logger.info("Голосовой компаньон: пауза — возвращаюсь к wake word")
+                        break
                     continue
                 self._emit_state(RealtimeState.THINKING)
                 text = self._stt.transcribe(audio) if self._stt else ""
                 if not text:
                     continue
+                self._last_activity = time.monotonic()
                 logger.info(f"Локальный диалог, распознано: {text}")
                 self._emit_user_text(text)
                 self._respond(text)
+                self._last_activity = time.monotonic()
         except Exception as exc:  # noqa: BLE001
             logger.exception("Сбой локального диалога")
             self._emit_error(str(exc))

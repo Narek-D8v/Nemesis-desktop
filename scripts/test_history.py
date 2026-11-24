@@ -20,13 +20,22 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nemus.config import get_config  # noqa: E402
-from nemus.core.agent import Agent, pair_tool_messages  # noqa: E402
+from nemus.core.agent import (  # noqa: E402
+    _INTERNAL_PREFIX,
+    Agent,
+    QualityGate,
+    _is_poll_call,
+    _requested_video_seconds,
+    pair_tool_messages,
+)
 from nemus.core.llm import LLMResponse  # noqa: E402
 from nemus.core.memory import Memory, load_messages_into  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
-from nemus.core.providers import Message, ToolCall  # noqa: E402
+from nemus.core.providers import Message, ProviderError, ToolCall  # noqa: E402
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult  # noqa: E402
 from nemus.core.tools.registry import ToolRegistry  # noqa: E402
+from nemus.core.tools.skills_tool import FindSkillsTool  # noqa: E402
+from nemus.core.tools.todo_tool import TodoWriteTool  # noqa: E402
 
 
 def _tmp_db() -> Path:
@@ -207,6 +216,51 @@ def test_empty_answer_retried() -> None:
     print(f"ok  {empties} пустых ответов подряд: повторы без съедания шагов и рабочий финал")
 
 
+class _FlakyLLM:
+    """Первый запрос падает временной ошибкой, второй отвечает."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def stream(self, messages, tools=None, **_: Any):  # noqa: ANN001
+        from nemus.core.llm import StreamEvent
+
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderError("429 Too Many Requests", retryable=True)
+        yield StreamEvent(
+            kind="final",
+            response=LLMResponse(content="Ответ после паузы"),
+        )
+
+
+def test_provider_error_retried_inside_run() -> None:
+    """Временный отказ всех провайдеров не обрывает задачу с первого раза."""
+    from unittest import mock
+
+    cfg = get_config()
+    llm = _FlakyLLM()
+    agent = Agent(
+        config=cfg,  # type: ignore[arg-type]
+        llm=llm,  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+    )
+    with mock.patch("nemus.core.agent.PROVIDER_RETRY_DELAYS", (0.0,)):
+        events = list(
+            agent.run(
+                "Объясни подробно, чем отличаются TCP и UDP, и приведи примеры "
+                "использования в реальных проектах."
+            )
+        )
+
+    assert llm.calls == 2, llm.calls
+    assert not [e for e in events if e.kind == "error"], events
+    finals = [e for e in events if e.kind == "final"]
+    assert finals and finals[-1].text == "Ответ после паузы", events
+    print("ok  временный отказ провайдеров → автоповтор шага, без ошибки")
+
+
 def test_empty_answer_gives_error() -> None:
     """Если модель упорно пустая — пользователь видит ошибку, а не «Готова»."""
     from nemus.core.agent import EMPTY_ANSWER_RETRIES
@@ -228,8 +282,52 @@ def test_empty_answer_gives_error() -> None:
     assert len(errors) == 1 and "пустой" in errors[0].error, [
         (e.kind, e.error) for e in events
     ]
-    assert llm.calls == EMPTY_ANSWER_RETRIES + 1, llm.calls
+    assert llm.calls == EMPTY_ANSWER_RETRIES, llm.calls
     print("ok  пустые ответы подряд: явная ошибка вместо молчаливого финала")
+
+
+class _TruncatedLLM:
+    """Первый ответ оборван по лимиту, второй — нормальный."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.tokens: list[int] = []
+
+    def stream(self, messages, tools=None, **kwargs: Any):  # noqa: ANN001
+        from nemus.core.llm import StreamEvent
+
+        self.calls += 1
+        self.tokens.append(int(kwargs.get("max_tokens") or 0))
+        if self.calls == 1:
+            yield StreamEvent(
+                kind="final",
+                response=LLMResponse(content="", finish_reason="length"),
+            )
+            return
+        yield StreamEvent(
+            kind="final",
+            response=LLMResponse(content="Готово: сайт собран и проверен"),
+        )
+
+
+def test_truncated_answer_raises_token_budget() -> None:
+    """finish=length не повторяется с тем же лимитом: бюджет растёт."""
+    cfg = get_config()
+    llm = _TruncatedLLM()
+    agent = Agent(
+        config=cfg,  # type: ignore[arg-type]
+        llm=llm,  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+    )
+    events = list(agent.run("сделай сайт кофейни"))
+
+    assert llm.calls == 2, llm.calls
+    assert llm.tokens[0] >= 8192, llm.tokens
+    assert llm.tokens[1] > llm.tokens[0], llm.tokens
+    finals = [e for e in events if e.kind == "final"]
+    assert len(finals) == 1 and "сайт собран" in finals[0].text, events
+    print("ok  finish=length: повтор с увеличенным max_tokens, а не тот же обрыв")
 
 
 class _BoomTool(Tool):
@@ -442,6 +540,386 @@ def test_heartbeat_extends_budget() -> None:
     )
 
 
+class _WriteTool(Tool):
+    """Подставной производственный инструмент для quality gate."""
+
+    name = "write_file"
+    description = "записывает файл"
+    parameters = {"type": "object", "properties": {}}
+    risk = RiskLevel.SAFE
+    executions = 0
+
+    def execute(self, **_: Any) -> ToolResult:
+        type(self).executions += 1
+        return ToolResult.success("файл записан")
+
+
+def test_quality_gate_blocks_shortcuts() -> None:
+    """Код/артефакт нельзя начать без research и плана."""
+    cfg = get_config()
+    _WriteTool.executions = 0
+    registry = ToolRegistry()
+    registry.register_many([FindSkillsTool(), TodoWriteTool(), _WriteTool()])
+    llm = _FakeLLM(
+        [
+            LLMResponse(
+                tool_calls=[ToolCall(id="w1", name="write_file", arguments={})]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="f1", name="find_skills", arguments={"query": "код"}
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="p1",
+                        name="todo_write",
+                        arguments={
+                            "items": [
+                                {"title": "research", "status": "completed"},
+                                {"title": "build", "status": "in_progress"},
+                            ]
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[ToolCall(id="w2", name="write_file", arguments={})]
+            ),
+            LLMResponse(content="Готово: скрипт написан и проверен."),
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm=llm,  # type: ignore[arg-type]
+        registry=registry,
+        permissions=PermissionManager(cfg),
+    )
+    events = list(agent.run("напиши скрипт для отчёта"))
+
+    tool_messages = [m for m in agent.history if m.role == "tool"]
+    assert "QUALITY GATE" in str(tool_messages[0].content), tool_messages[0].content
+    assert _WriteTool.executions == 1, _WriteTool.executions
+    assert [e.text for e in events if e.kind == "final"] == [
+        "Готово: скрипт написан и проверен."
+    ]
+    print("ok  quality gate: production заблокирован до research и todo_write")
+
+
+class _VerifyWebsiteStub(Tool):
+    """Заглушка браузерной проверки для quality gate."""
+
+    name = "verify_website"
+    description = "проверяет сайт"
+    parameters = {"type": "object", "properties": {}}
+    risk = RiskLevel.SAFE
+
+    def execute(self, **_: Any) -> ToolResult:
+        return ToolResult.success("сайт проверен")
+
+
+def test_website_requires_verification() -> None:
+    """Сайт нельзя сдать без verify_website, обычный код — можно."""
+    from nemus.core.language import is_website_request
+
+    assert is_website_request("сделай сайт кофейни")
+    assert is_website_request("сверстай лендинг для кофейни")
+    assert not is_website_request("открой сайт кофейни")
+    assert not is_website_request("напиши скрипт для отчёта")
+
+    registry = ToolRegistry()
+    registry.register_many(
+        [FindSkillsTool(), TodoWriteTool(), _WriteTool(), _VerifyWebsiteStub()]
+    )
+    gate = QualityGate(registry, "сделай сайт кофейни")
+    assert gate.needs_verify and not gate.verified_done
+    gate.research_done = gate.plan_done = gate.production_done = True
+    reason = gate.final_reason("Готово: сайт собран")
+    assert "verify_website" in reason, reason
+    gate.observe("verify_website", True)
+    assert gate.final_reason("Готово: сайт проверен") == ""
+    gate.observe("write_file", True)
+    assert not gate.verified_done
+    assert "verify_website" in gate.final_reason("Готово: сайт поправлен")
+    gate.observe("verify_website", True)
+    assert gate.final_reason("Готово: сайт перепроверен") == ""
+    gate.observe("send_telegram", True)
+    assert gate.verified_done  # отправка архива не отменяет проверку
+
+    code_gate = QualityGate(registry, "напиши скрипт для отчёта")
+    code_gate.research_done = code_gate.plan_done = True
+    code_gate.production_done = True
+    assert not code_gate.needs_verify
+    assert code_gate.final_reason("Готово") == ""
+    print("ok  quality gate: сайт требует verify_website, код — нет")
+
+
+def test_telegram_gate_requires_brainstorm_answers() -> None:
+    """В Telegram производство заблокировано, пока не заданы вопросы и не пришли ответы."""
+    cfg = get_config()
+    _WriteTool.executions = 0
+    registry = ToolRegistry()
+    registry.register_many([FindSkillsTool(), TodoWriteTool(), _WriteTool()])
+    questions = (
+        "1. Какой формат у отчёта?\n"
+        "A) Markdown (рекомендую)\n"
+        "B) HTML\n"
+        "C) PDF\n"
+        "D) Свой вариант: _________\n\n"
+        "2. Где сохранить файл?\n"
+        "A) В рабочей папке (рекомендую)\n"
+        "B) На рабочем столе\n"
+        "C) В папке загрузок\n"
+        "D) Свой вариант: ___________"
+    )
+    bad_questions = (
+        "1. В каком стиле?\n"
+        "A) Векторный (рекомендую)\n"
+        "D) Свой вариант: _________\n\n"
+        "2. Какая длина?\n"
+        "A) 30 секунд (рекомендую)\n"
+        "D) Свой вариант: _________"
+    )
+    bad_gate = QualityGate(
+        registry, "сделай видео", needs_brief=True
+    )
+    bad_reason = bad_gate.brainstorm_problem(bad_questions)
+    assert "не хватает вариантов" in bad_reason, bad_reason
+    llm = _FakeLLM(
+        [
+            LLMResponse(
+                tool_calls=[ToolCall(id="w1", name="write_file", arguments={})]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="f1", name="find_skills", arguments={"query": "отчёт"}
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="p1",
+                        name="todo_write",
+                        arguments={
+                            "items": [
+                                {"title": "research", "status": "completed"},
+                                {"title": "брейншторм", "status": "in_progress"},
+                            ]
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[ToolCall(id="w2", name="write_file", arguments={})]
+            ),
+            LLMResponse(content=questions),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="f2", name="find_skills", arguments={"query": "отчёт"}
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="p2",
+                        name="todo_write",
+                        arguments={
+                            "items": [
+                                {"title": "research", "status": "completed"},
+                                {"title": "build", "status": "in_progress"},
+                            ]
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[ToolCall(id="w3", name="write_file", arguments={})]
+            ),
+            LLMResponse(content="Готово: отчёт написан."),
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm=llm,  # type: ignore[arg-type]
+        registry=registry,
+        permissions=PermissionManager(cfg),
+        system_suffix="СЕЙЧАС ТЫ РАБОТАЕШЬ В TELEGRAM. Отвечай коротко.",
+    )
+    first = list(agent.run("напиши скрипт для отчёта"))
+    assert [e.text for e in first if e.kind == "final"] == [questions], [
+        (e.kind, e.text) for e in first
+    ]
+    assert _WriteTool.executions == 0, _WriteTool.executions
+    blocked = "\n".join(
+        str(message.content)
+        for message in agent.history
+        if message.role == "tool"
+    )
+    assert "брейншторм не пройден" in blocked, blocked
+
+    answers = (
+        "Ответы пользователя на вопросы брейншторма:\n"
+        "Выбор: 1A, 2A\n\n"
+        "1. Какой формат у отчёта? A) Markdown\n"
+        "2. Где сохранить файл? A) В рабочей папке\n\n"
+        "Все вопросы согласованы. Приступай к работе по этим ответам."
+    )
+    second = list(agent.run(answers))
+    assert _WriteTool.executions == 1, _WriteTool.executions
+    assert [e.text for e in second if e.kind == "final"] == [
+        "Готово: отчёт написан."
+    ], [(e.kind, e.text) for e in second]
+    print(
+        "ok  Telegram: production заблокирован до ответов на брейншторм"
+    )
+
+
+def test_old_internal_rows_dropped() -> None:
+    """Старые служебные директивы из БД не попадают в роль пользователя."""
+    db = _tmp_db()
+    mem = Memory(db)
+    mem.add_message("user", "QUALITY GATE: вызови find_skills и todo_write")
+    mem.add_message("user", "обычный вопрос")
+    history: list[Message] = [Message(role="system", content="s")]
+    load_messages_into(history, mem.recent_messages(limit=20))
+    mem.close()
+    assert [m.content for m in history[1:]] == ["обычный вопрос"]
+    print("ok  старые служебные директивы вычищены из истории")
+
+
+def test_telegram_open_brief_answers_unlock() -> None:
+    """Открытые ответы на фактические вопросы разблокируют производство."""
+    cfg = get_config()
+    _WriteTool.executions = 0
+    registry = ToolRegistry()
+    registry.register_many([FindSkillsTool(), TodoWriteTool(), _WriteTool()])
+    questions = (
+        "1. Какой у вас адрес?\n"
+        "2. Какие телефон и мессенджеры?\n"
+        "3. Что в меню и какие цены?\n"
+        "4. Какие часы работы?"
+    )
+    llm = _FakeLLM(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="f1", name="find_skills", arguments={"query": "сайт"}
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="p1",
+                        name="todo_write",
+                        arguments={
+                            "items": [
+                                {"title": "research", "status": "completed"},
+                                {"title": "брейншторм", "status": "in_progress"},
+                            ]
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(content=questions),
+            LLMResponse(
+                tool_calls=[ToolCall(id="w1", name="write_file", arguments={})]
+            ),
+            LLMResponse(content="Готово: сайт собран."),
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm=llm,  # type: ignore[arg-type]
+        registry=registry,
+        permissions=PermissionManager(cfg),
+        system_suffix="СЕЙЧАС ТЫ РАБОТАЕШЬ В TELEGRAM. Отвечай коротко.",
+    )
+    first = list(agent.run("создай сайт кофейни"))
+    assert [e.text for e in first if e.kind == "final"] == [questions], [
+        (e.kind, e.text) for e in first
+    ]
+    assert _WriteTool.executions == 0, _WriteTool.executions
+
+    answers = (
+        "Адрес: Дмитровка, 12. Телефон: +7 999 123-45-67. "
+        "Меню: эспрессо 250 ₽, капучино 320 ₽. Часы: 8:00–22:00."
+    )
+    second = list(agent.run(answers))
+    assert _WriteTool.executions == 1, _WriteTool.executions
+    assert [e.text for e in second if e.kind == "final"] == [
+        "Готово: сайт собран."
+    ], [(e.kind, e.text) for e in second]
+    print(
+        "ok  Telegram: открытые ответы на факты разблокировали работу"
+    )
+
+
+def test_internal_directives_not_saved_as_user() -> None:
+    """Служебные указания не должны попадать в чат как реплики человека."""
+    db = _tmp_db()
+    mem = Memory(db)
+    cfg = get_config()
+    llm = _FakeLLM(
+        [LLMResponse(content=""), LLMResponse(content="Готово: ответ по делу.")]
+    )
+    agent = Agent(
+        config=cfg,
+        llm=llm,  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+        memory=mem,
+    )
+    list(agent.run("простой вопрос"))
+    rows = mem.recent_messages(limit=20)
+    assert not any(_INTERNAL_PREFIX in str(row.get("content") or "") for row in rows)
+    assert any(row.get("role") == "user" for row in rows)
+    assert any(
+        _INTERNAL_PREFIX in str(message.content)
+        for message in agent.history
+        if message.role == "user"
+    )
+    mem.close()
+    print("ok  служебные директивы не сохраняются как сообщения пользователя")
+
+
+def test_polling_is_not_deadlock() -> None:
+    """Ожидание фонового рендера не должно считаться тупиком."""
+    assert _is_poll_call(
+        ToolCall(id="p", name="run_shell", arguments={"action": "read"})
+    )
+    assert not _is_poll_call(
+        ToolCall(id="r", name="run_shell", arguments={"action": "run"})
+    )
+    gate = QualityGate(
+        ToolRegistry(), "Сделай видео про блины на 2 минуты с шагами"
+    )
+    gate.active = True
+    gate.research_done = gate.plan_done = True
+    reason = gate.block_reason(
+        "create_video",
+        {
+            "duration": 120,
+            "scenes": [
+                {"title": "Интро", "duration": 5},
+                {"title": "Рецепт", "duration": 5},
+                {"title": "Итог", "duration": 5},
+            ],
+        },
+    )
+    assert "15 с" in reason and "120 с" in reason, reason
+    assert _requested_video_seconds("2-минутное видео") == 120
+    print("ok  polling не тупик; короткое видео отклоняется гейтом")
+
+
 def test_limits_from_config() -> None:
     """Лимиты шагов и времени берутся из конфига (настраиваются в GUI)."""
     cfg = get_config()
@@ -486,9 +964,18 @@ def main() -> int:
     test_partial_results_kept()
     test_agent_boot_with_legacy_db()
     test_empty_answer_retried()
+    test_provider_error_retried_inside_run()
     test_empty_answer_gives_error()
+    test_truncated_answer_raises_token_budget()
     test_error_sent_back_for_rework()
     test_error_directives_sequence()
+    test_quality_gate_blocks_shortcuts()
+    test_website_requires_verification()
+    test_telegram_gate_requires_brainstorm_answers()
+    test_telegram_open_brief_answers_unlock()
+    test_internal_directives_not_saved_as_user()
+    test_old_internal_rows_dropped()
+    test_polling_is_not_deadlock()
     test_loop_and_budget_stops()
     test_heartbeat_extends_budget()
     test_limits_from_config()

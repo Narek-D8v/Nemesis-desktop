@@ -28,6 +28,7 @@ markdownify>=0.12
 psutil>=5.9
 Pillow>=10.0
 python-pptx>=1.0
+pypdf>=4.0
 
 # --- MCP (опционально: без пакета интеграция отключается) ---
 mcp>=2.0

@@ -7,6 +7,9 @@ from nemus.core.skills import (
     get_skill,
     load_skills,
     save_skill,
+    search_skills,
+    skill_highlights,
+    skill_plugin,
     skills_root,
 )
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
@@ -73,6 +76,99 @@ class LoadSkillTool(Tool):
         )
 
 
+class FindSkillsTool(Tool):
+    """Ищет установленные скиллы и плагины по теме задачи."""
+
+    name = "find_skills"
+    description = (
+        "Ищет по УСТАНОВЛЕННЫМ скиллам и плагинам: по названию, описанию, "
+        "заголовкам и тексту инструкций. ОБЯЗАТЕЛЬНО вызывай ПЕРВЫМ делом для "
+        "любой задачи на код, видео, сайт, дизайн, презентацию, документ или "
+        "другой создаваемый артефакт — до load_skill и до первого "
+        "производственного действия. Возвращает кандидатов с описаниями. Если "
+        "под задачу подходят несколько скиллов — загрузи ВСЕ подходящие через "
+        "load_skill. Если это разные подходы к одному результату (например, "
+        "HyperFrames и Remotion для видео) — НЕ выбирай первый молча: покажи "
+        "пользователю 2–3 варианта с плюсами/минусами и спроси, какой делать "
+        "(или оба)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "Тема задачи простыми словами: «видео», «сайт», "
+                    "«рефакторинг python», «презентация»."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Сколько кандидатов вернуть (по умолчанию 10).",
+            },
+        },
+        "required": ["query"],
+    }
+    risk = RiskLevel.SAFE
+
+    #: папка со скиллами (инъекция из конфига в factory._inject_settings)
+    skills_dir: str = DEFAULT_SKILLS_DIR
+    #: отключённые в настройках скиллы — их модель не должна видеть
+    disabled: list[str] | None = None
+
+    def execute(self, query: str = "", limit: int | str = 10, **_: object) -> ToolResult:
+        query = str(query or "").strip()
+        if not query:
+            return ToolResult.failure(
+                "Укажи тему задачи в query: «видео», «сайт», «код», «презентация»."
+            )
+        try:
+            count = int(limit)
+        except (TypeError, ValueError):
+            count = 10
+        count = max(1, min(20, count))
+        try:
+            skills = load_skills(self.skills_dir, disabled=self.disabled or ())
+        except OSError as exc:
+            return ToolResult.failure(f"Не удалось прочитать скиллы: {exc}")
+        matches = search_skills(query, skills, limit=count)
+        if not matches:
+            return ToolResult.success(
+                f"По запросу «{query}» установленных скиллов и плагинов не "
+                "нашлось. Не выдумывай скилл. Проверь список инструментов, "
+                "поищи подход через web_search или сделай своим ходом; если "
+                "задача будет повторяться — сохрани навык через create_skill."
+            )
+
+        lines = [f"Кандидаты по запросу «{query}» ({len(matches)}):"]
+        for index, skill in enumerate(matches, start=1):
+            plugin = skill_plugin(skill.path, self.skills_dir)
+            kind = "команда плагина" if skill.kind == "command" else "скилл"
+            if plugin:
+                kind += f", плагин «{plugin}»"
+            description = (skill.description or "без описания").strip()
+            if len(description) > 240:
+                description = description[:237].rstrip() + "…"
+            lines.append(f"{index}. {skill.name} ({kind}) — {description}")
+            highlights = skill_highlights(skill.body, 5)
+            if highlights:
+                lines.append("   Состав: " + "; ".join(highlights))
+        lines.extend(
+            [
+                "",
+                "Дальше: загрузи load_skill(имя) ВСЕ подходящие скиллы, а не "
+                "только первый. Если найденные скиллы — альтернативные способы "
+                "сделать одно и то же (HyperFrames/Remotion, разные движки, "
+                "разные стили), сначала покажи пользователю варианты A/B/C с "
+                "плюсами и минусами и спроси, какой делать или нужны ли оба.",
+            ]
+        )
+        return ToolResult.success("\n".join(lines), data={
+            "query": query,
+            "names": [skill.name for skill in matches],
+        })
+
+
 class CreateSkillTool(Tool):
     """Сохраняет выученный навык в .agents/skills/<имя>/SKILL.md."""
 
@@ -134,8 +230,8 @@ class CreateSkillTool(Tool):
 
 
 def skill_tools() -> list[Tool]:
-    """Инструменты чтения и создания скиллов."""
-    return [LoadSkillTool(), CreateSkillTool()]
+    """Инструменты поиска, чтения и создания скиллов."""
+    return [FindSkillsTool(), LoadSkillTool(), CreateSkillTool()]
 
 
-__all__ = ["CreateSkillTool", "LoadSkillTool", "skill_tools"]
+__all__ = ["CreateSkillTool", "FindSkillsTool", "LoadSkillTool", "skill_tools"]

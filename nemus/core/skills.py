@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -37,6 +39,22 @@ BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 #: имя файла скилла
 SKILL_FILE = "SKILL.md"
+
+#: сколько секунд держим результат сканирования. Скан читает все SKILL.md,
+#: парсит YAML и обходит вспомогательные файлы; на 100+ скиллах это сотни
+#: миллисекунд, а промпт пересобирается перед каждым запросом.
+SKILLS_CACHE_TTL = 30.0
+_SKILLS_CACHE: dict[tuple, tuple[float, int, list[Skill]]] = {}
+_SKILLS_CACHE_LOCK = threading.Lock()
+_SKILLS_GENERATION = 0
+
+
+def skills_cache_clear() -> None:
+    """Сбрасывает кэш сканирования после установки/удаления/правки скиллов."""
+    global _SKILLS_GENERATION
+    with _SKILLS_CACHE_LOCK:
+        _SKILLS_GENERATION += 1
+        _SKILLS_CACHE.clear()
 
 #: манифест установленного плагина (вместе с папкой плагина)
 PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
@@ -164,9 +182,10 @@ def _scan_skills(root: Path, disabled: set[str]) -> list[Skill]:
 
     Так работают наборы и плагины, положенные целиком:
     ``пакет/plugins/<плагин>/skills/<скилл>/SKILL.md`` тоже находится.
-    Внутрь папки, где уже есть ``SKILL.md``, скан не спускается: это сам
-    скилл и его файлы, а не скиллы внутри скилла. Скрытые папки и
-    ``node_modules`` пропускаются, битые файлы — с предупреждением в лог.
+    Внутрь папки скилла скан спускается только в ``skills/``: там лежат
+    настоящие вложенные скиллы скилл-пака, тогда как примеры и справка —
+    его собственные файлы. Скрытые папки и ``node_modules`` пропускаются,
+    битые файлы — с предупреждением в лог.
     ``disabled`` — имена, которые не отдаются модели.
     """
     if not root.is_dir():
@@ -175,22 +194,37 @@ def _scan_skills(root: Path, disabled: set[str]) -> list[Skill]:
     seen: set[str] = set()
     # любая вложенность — наборы и плагины кладут скиллы глубже
     candidates = sorted(
-        path
-        for path in root.rglob(SKILL_FILE)
-        if not any(
-            part.startswith(".") or part == "node_modules"
-            for part in path.relative_to(root).parts[:-1]
-        )
+        (
+            path
+            for path in root.rglob(SKILL_FILE)
+            if not any(
+                part.startswith(".") or part == "node_modules"
+                for part in path.relative_to(root).parts[:-1]
+            )
+        ),
+        # внешний скилл важнее вложенной копии: она не должна занимать имя
+        key=lambda path: (
+            len(path.relative_to(root).parts),
+            path.as_posix().lower(),
+        ),
     )
 
     def inside_skill(path: Path) -> bool:
-        """Папка скилла цельная: его примеры и вложенные документы — не скиллы."""
+        """Вложенный скилл виден, если он лежит в ``skills/`` внутри другого.
+
+        Обычный скилл цельный: его примеры, справка и тестовые заготовки —
+        не отдельные навыки. Но скилл-пак может быть обёрткой с корневым
+        ``SKILL.md`` и настоящими скиллами в ``skills/<имя>/`` — их отдаём
+        модели. Копии того же имени всё равно отсеет ``seen``.
+        """
         folder = path.parent.parent
-        while folder != root and root in folder.parents:
+        while True:
             if (folder / SKILL_FILE).is_file():
-                return True
+                rel = path.relative_to(folder)
+                return "skills" not in rel.parts[:-1]
+            if folder == root or root not in folder.parents:
+                return False
             folder = folder.parent
-        return False
 
     candidates = [path for path in candidates if not inside_skill(path)]
     for skill_file in candidates:
@@ -314,19 +348,12 @@ def _scan_plugin_commands(root: Path, disabled: set[str]) -> list[Skill]:
     return found
 
 
-def load_skills(
-    directory: str | Path | None = None,
-    disabled: Iterable[str] = (),
-    builtin: bool = True,
+def _load_skills_uncached(
+    root: Path,
+    off: set[str],
+    builtin: bool,
 ) -> list[Skill]:
-    """Находит все скиллы ``<dir>/*/SKILL.md`` плюс встроенные (``nemus/skills``).
-
-    Встроенные скиллы идут первыми; одноимённый скилл из пользовательской
-    папки перекрывает встроенный (своя версия важнее поставленной).
-    ``builtin=False`` — только пользовательская папка.
-    """
-    root = skills_root(directory)
-    off = {str(item).strip().lower() for item in disabled if str(item).strip()}
+    """Собирает скиллы без кэша (внутренняя часть ``load_skills``)."""
     merged: dict[str, Skill] = {}
     if builtin and root.resolve() != BUILTIN_SKILLS_DIR.resolve():
         for skill in _scan_skills(BUILTIN_SKILLS_DIR, off):
@@ -337,6 +364,43 @@ def load_skills(
     for command in _scan_plugin_commands(root, off):
         merged.setdefault(command.name.lower(), command)
     return sorted(merged.values(), key=lambda s: s.name.lower())
+
+
+def load_skills(
+    directory: str | Path | None = None,
+    disabled: Iterable[str] = (),
+    builtin: bool = True,
+) -> list[Skill]:
+    """Находит все скиллы ``<dir>/*/SKILL.md`` плюс встроенные (``nemus/skills``).
+
+    Встроенные скиллы идут первыми; одноимённый скилл из пользовательской
+    папки перекрывает встроенный (своя версия важнее поставленной).
+    ``builtin=False`` — только пользовательская папка.
+
+    Результат кэшируется на ``SKILLS_CACHE_TTL``: сканирование читает все
+    SKILL.md и вспомогательные файлы, а системный промпт собирается перед
+    каждым запросом. Кэш сбрасывается явно при сохранении/удалении и сам
+    истекает, поэтому правки с диска подхватываются без перезапуска.
+    """
+    root = skills_root(directory)
+    off = {str(item).strip().lower() for item in disabled if str(item).strip()}
+    try:
+        key = (str(root.resolve()), tuple(sorted(off)), bool(builtin))
+    except OSError:
+        key = (str(root), tuple(sorted(off)), bool(builtin))
+    now = time.monotonic()
+    with _SKILLS_CACHE_LOCK:
+        cached = _SKILLS_CACHE.get(key)
+        if cached is not None and cached[0] > now and cached[1] == _SKILLS_GENERATION:
+            return list(cached[2])
+    found = _load_skills_uncached(root, off, builtin)
+    with _SKILLS_CACHE_LOCK:
+        _SKILLS_CACHE[key] = (
+            now + SKILLS_CACHE_TTL,
+            _SKILLS_GENERATION,
+            found,
+        )
+    return list(found)
 
 
 def skill_plugin(
@@ -382,6 +446,28 @@ def get_skill(name: str, directory: str | Path | None = None,
     return None
 
 
+def skill_pack(
+    path: str | Path, directory: str | Path | None = None
+) -> str:
+    """Имя набора, внутри которого лежит вложенный скилл (пусто — свой скилл).
+
+    Скилл-пак ставится одной папкой: отдельно удалять или обновлять его
+    вложенный скилл нельзя, иначе набор развалится. Владелец — верхняя
+    папка в корне скиллов, если сам скилл лежит глубже.
+    """
+    root = skills_root(directory).resolve()
+    folder = Path(path).resolve()
+    if folder == root or root not in folder.parents:
+        return ""
+    rel = folder.relative_to(root)
+    if len(rel.parts) <= 1:
+        return ""
+    if skill_plugin(folder, directory):
+        return ""
+    owner = root / rel.parts[0]
+    return owner.name if owner.is_dir() else ""
+
+
 def remove_skill(name: str, directory: str | Path | None = None) -> bool:
     """Удаляет папку пользовательского скилла целиком (встроенные не трогает).
 
@@ -407,7 +493,14 @@ def remove_skill(name: str, directory: str | Path | None = None) -> bool:
                 f"Скилл «{name}» — часть плагина «{plugin}»: удалять его отдельно нельзя"
             )
             return False
+        pack = skill_pack(folder, directory)
+        if pack:
+            logger.warning(
+                f"Скилл «{name}» — часть набора «{pack}»: удалять его отдельно нельзя"
+            )
+            return False
         shutil.rmtree(folder, ignore_errors=True)
+        skills_cache_clear()
         return not folder.exists()
     return False
 
@@ -441,6 +534,7 @@ def save_skill(
     (folder / SKILL_FILE).write_text(
         f"---\n{front}\n---\n\n{body}\n", encoding="utf-8"
     )
+    skills_cache_clear()
     logger.info(f"Скилл «{slug}» сохранён: {folder}")
     return Skill(
         name=slug,
@@ -504,6 +598,13 @@ SKILL_TRIGGERS: dict[str, tuple[str, ...]] = {
     "hyperframes": (
         "видео", "ролик", "клип", "анимац", "титр", "video", "motion",
     ),
+    "remotion-motion-graphics": (
+        "remotion", "motion graphics", "моушн", "видео", "ролик", "клип",
+    ),
+    "code-craft": (
+        "код", "напиши", "скрипт", "функци", "модул", "класс", "python",
+        "рефактор", "багфикс", "plugin", "плагин", "code",
+    ),
     "software-install": (
         "установи", "установить", "установка", "поставь", "скачай прилож",
         "скачать прилож", "скачай и установи", "обнови прилож", "удали прилож",
@@ -553,6 +654,117 @@ def match_skills(
     return [skill for _score, skill in scored[: max(0, limit)]]
 
 
+#: синонимы для поиска: запрос на русском должен находить скиллы с
+#: англоязычными описаниями (большинство установленных скиллов такие).
+SEARCH_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "видео": (
+        "video", "видео", "ролик", "клип", "motion", "animation", "анимац",
+        "remotion", "hyperframes", "слайд", "slideshow", "титр", "caption",
+        "footage", "render", "ffmpeg",
+    ),
+    "код": (
+        "code", "код", "script", "скрипт", "python", "функци", "модул",
+        "класс", "plugin", "tool", "refactor", "bug", "test", "api",
+    ),
+    "сайт": (
+        "website", "site", "сайт", "лендинг", "frontend", "html", "css",
+        "react", "web", "интерфейс",
+    ),
+    "презентац": (
+        "presentation", "slide", "deck", "pptx", "презентац", "слайд",
+    ),
+    "картин": (
+        "image", "изображен", "картин", "art", "design", "иллюстрац",
+        "poster", "постер", "logo", "аватар",
+    ),
+    "текст": ("text", "writing", "статья", "документ", "docx", "pdf"),
+    "аудио": ("audio", "music", "музык", "voice", "озвуч", "sound"),
+}
+
+#: служебные слова запроса — не участвуют в поиске
+_SEARCH_STOPWORDS = {
+    "сделай", "создай", "нужно", "надо", "хочу", "можешь", "пожалуйста",
+    "the", "and", "for", "with", "make", "create", "please", "this",
+    "that", "как", "для", "про", "мне", "еще", "уже", "все", "что",
+}
+
+
+def _search_terms(query: str) -> list[str]:
+    """Слова запроса плюс русско-английские синонимы для поиска по скиллам."""
+    text = (query or "").lower().replace("ё", "е")
+    words = [
+        word
+        for word in re.findall(r"[a-zа-я0-9-]{3,}", text)
+        if word not in _SEARCH_STOPWORDS
+    ]
+    terms: list[str] = []
+    for key, synonyms in SEARCH_SYNONYMS.items():
+        if key in text:
+            terms.extend(synonyms)
+    for word in words:
+        terms.append(word)
+        for key, synonyms in SEARCH_SYNONYMS.items():
+            if word.startswith(key[:5]) and len(key) >= 5:
+                terms.extend(synonyms)
+    # уникальные, длинные — раньше: они точнее
+    return sorted(dict.fromkeys(terms), key=lambda item: (-len(item), item))
+
+
+def _term_hits(term: str, text: str) -> int:
+    """Сколько раз термин встречается как слово (короткие — только целиком).
+
+    Иначе «art» находится внутри «start», а «api» — внутри «capital»,
+    и поиск выдаёт случайные скиллы.
+    """
+    if len(term) > 4:
+        return text.count(term)
+    pattern = rf"(?<![a-zа-я0-9]){re.escape(term)}(?![a-zа-я0-9])"
+    return len(re.findall(pattern, text))
+
+
+def search_skills(
+    query: str, skills: Iterable[Skill], limit: int = 10
+) -> list[Skill]:
+    """Ищет скиллы по имени, описанию, заголовкам и тексту инструкции.
+
+    В отличие от :func:`match_skills` (жёсткие триггеры для авто-загрузки),
+    здесь широкий поиск: русский запрос «сделай видео» находит и HyperFrames,
+    и Remotion, даже если их описания на английском. Результат — кандидаты
+    для брейншторма, а не готовое решение: модель обязана показать разные
+    подходы пользователю.
+    """
+    terms = _search_terms(query)
+    if not terms:
+        return []
+    scored: list[tuple[float, Skill]] = []
+    for skill in skills:
+        name = skill.name.lower().replace("_", "-")
+        description = (skill.description or "").lower().replace("ё", "е")
+        body = (skill.body or "").lower().replace("ё", "е")
+        highlights = " ".join(skill_highlights(skill.body, 12)).lower()
+        score = 0.0
+        for term in terms:
+            if _term_hits(term, name):
+                score += 18
+            if _term_hits(term, description):
+                score += 7
+            if _term_hits(term, highlights):
+                score += 4
+            hits = _term_hits(term, body)
+            if hits:
+                score += min(8.0, 1.5 + hits * 0.35)
+        for trigger in SKILL_TRIGGERS.get(name, ()):
+            if trigger in (query or "").lower():
+                score += 10
+        if score:
+            # точное имя в запросе — самый сильный сигнал
+            if name in (query or "").lower():
+                score += 25
+            scored.append((score, skill))
+    scored.sort(key=lambda item: (-item[0], len(item[1].name), item[1].name))
+    return [skill for _score, skill in scored[: max(0, limit)]]
+
+
 def explicit_skill(query: str, skills: Iterable[Skill]) -> Skill | None:
     """Скилл из команды ``/имя`` в начале сообщения (или ``None``)."""
     text = (query or "").lstrip()
@@ -570,9 +782,16 @@ def explicit_skill(query: str, skills: Iterable[Skill]) -> Skill | None:
 
 
 def format_skills_block(
-    skills: list[Skill], directory: str | Path | None = None
+    skills: list[Skill],
+    directory: str | Path | None = None,
+    description_limit: int = 140,
 ) -> str:
-    """Блок для системного промпта: краткие описания + как ими пользоваться."""
+    """Блок для системного промпта: краткие описания + как ими пользоваться.
+
+    ``description_limit`` важен для контекста: 100+ полных описаний съедают
+    тысячи токенов на каждом шаге. Полное описание всё равно доступно через
+    ``find_skills``/``load_skill``.
+    """
     if not skills:
         return ""
     root = skills_root(directory)
@@ -587,14 +806,21 @@ def format_skills_block(
             f"{len(commands)} шт."
         )
     for skill in skills:
-        lines.append(f"- {skill.name}: {skill.description or 'без описания'}")
+        description = skill.description or "без описания"
+        if description_limit > 0 and len(description) > description_limit:
+            description = description[: description_limit - 1].rstrip() + "…"
+        lines.append(f"- {skill.name}: {description}")
     lines.append(
         "Список исчерпывающий и обновляется при каждом запросе: скиллов, которых "
-        "здесь нет, не существует. Когда задача попадает под описание скилла — "
-        "сначала вызови load_skill(имя): там полная инструкция и вспомогательные "
-        "файлы (пути к ним есть в ответе). Если под задачу подходят несколько "
-        "скиллов (одна тема или смежные темы) — загрузи ВСЕ их до начала работы "
-        "и применяй совместно. Если подходящего скилла нет, но задача будет "
+        "здесь нет, не существует. Для задачи на код, видео, сайт, дизайн, "
+        "презентацию или другой создаваемый артефакт сначала вызови "
+        "find_skills(тема), затем load_skill для ВСЕХ подходящих скиллов: там "
+        "полная инструкция и вспомогательные файлы (пути к ним есть в ответе). "
+        "Если под задачу подходят несколько скиллов (одна тема или смежные "
+        "темы) — загрузи ВСЕ их до начала работы и применяй совместно. Если "
+        "найдены альтернативные подходы (HyperFrames/Remotion и т.п.) — покажи "
+        "пользователю варианты и спроси, какой делать или нужны ли оба; не "
+        "выбирай первый молча. Если подходящего скилла нет, но задача будет "
         "повторяться — сохрани свой через create_skill."
     )
     return "\n".join(lines) + "\n"
@@ -607,6 +833,7 @@ __all__ = [
     "PLUGIN_MANIFEST",
     "SKILL_FILE",
     "Skill",
+    "SEARCH_SYNONYMS",
     "SKILL_TRIGGERS",
     "explicit_skill",
     "format_skills_block",
@@ -615,7 +842,10 @@ __all__ = [
     "load_skills",
     "parse_skill",
     "save_skill",
+    "search_skills",
     "skill_highlights",
+    "skills_cache_clear",
+    "skill_pack",
     "skill_plugin",
     "skills_root",
     "slugify",

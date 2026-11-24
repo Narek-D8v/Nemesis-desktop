@@ -93,6 +93,19 @@ def test_split_sentences() -> None:
     print("  split_sentences: ок")
 
 
+def test_emotional_voice() -> None:
+    engine = TTSEngine(rate="+0%", volume="+0%")
+    engine.apply_emotion(mood=80, energy=90, hurt=0)
+    happy_rate = int(engine.rate.rstrip("%"))
+    engine.apply_emotion(mood=-80, energy=20, hurt=90)
+    tired_rate = int(engine.rate.rstrip("%"))
+    assert tired_rate < happy_rate, (happy_rate, tired_rate)
+    assert int(engine.volume.rstrip("%")) < 0
+    engine.reset_emotion()
+    assert engine.rate == "+0%" and engine.volume == "+0%"
+    print("  эмоциональный голос: обида и усталость замедляют речь")
+
+
 def main() -> int:
     assert ENGINES == ("edge-tts", "openai", "system")
     tests = [
@@ -103,6 +116,7 @@ def main() -> int:
         test_system_voices_and_synth,
         test_system_engine_normalizes,
         test_split_sentences,
+        test_emotional_voice,
     ]
     for test in tests:
         test()

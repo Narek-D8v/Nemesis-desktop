@@ -23,6 +23,7 @@ from nemus.core.skills import (  # noqa: E402
     parse_skill,
     remove_skill,
     save_skill,
+    search_skills,
     skills_root,
     slugify,
 )
@@ -197,6 +198,9 @@ def test_builtin_skills(tmp: Path) -> None:
 
     names = [s.name for s in load_skills(tmp)]
     assert "code-craft" in names, names
+    assert "code-craft" in [
+        s.name for s in search_skills("напиши скрипт", load_skills(tmp))
+    ]
     assert len(names) == len(set(names)), names
     assert "code-craft" not in [s.name for s in load_skills(tmp, builtin=False)]
 
@@ -227,6 +231,9 @@ def test_tools(tmp: Path) -> None:
     registry = ToolRegistry()
     registry.register_many(skill_tools())
     _inject_settings(registry, cfg)
+
+    res = registry.execute("find_skills", {"query": "pdf"})
+    assert res.ok and "pdf-tools" in res.content, res.content
 
     res = registry.execute("load_skill", {"name": "PDF-Tools"})
     assert res.ok and "Шаг 1: сделать." in res.content, res.content
@@ -267,8 +274,11 @@ def test_factory(tmp: Path) -> None:
 
     assert "load_skill" in core.registry.names, core.registry.names
     assert "create_skill" in core.registry.names
+    assert "find_skills" in core.registry.names, core.registry.names
     tool = core.registry.get("load_skill")
     assert getattr(tool, "skills_dir", None) == cfg.skills.dir
+    finder = core.registry.get("find_skills")
+    assert getattr(finder, "skills_dir", None) == cfg.skills.dir
     res = core.registry.execute("load_skill", {"name": "pdf-tools"})
     assert res.ok and "Инструкция." in res.content, res.content
 
@@ -280,7 +290,11 @@ def test_factory(tmp: Path) -> None:
     registry = ToolRegistry()
     registry.register_many(skill_tools())
     _apply_skills(registry, cfg)
-    assert "load_skill" not in registry and "create_skill" not in registry
+    assert (
+        "find_skills" not in registry
+        and "load_skill" not in registry
+        and "create_skill" not in registry
+    )
     print("ok  фабрика: регистрация, инъекция папки, отключение")
 
 

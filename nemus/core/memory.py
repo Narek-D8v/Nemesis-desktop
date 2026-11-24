@@ -381,6 +381,27 @@ class Memory:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def session_messages(
+        self, session_id: int, limit: int = 20
+    ) -> list[dict]:
+        """Последние реплики указанного диалога без переключения текущего.
+
+        Нужно субагенту /btw: основная задача может работать в другом чате,
+        а читать историю этого чата всё равно надо безопасно.
+        """
+        sql = (
+            "SELECT id, role, content, tool_calls, tool_call_id, name "
+            "FROM messages WHERE session_id = ? "
+            "AND role IN ('user', 'assistant') ORDER BY id DESC"
+        )
+        params: list[Any] = [int(session_id)]
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
     def clear_messages(self) -> None:
         """Очищает текущий диалог и его выжимку (остальные не трогает)."""
         with self._lock, self._conn:
@@ -481,11 +502,27 @@ class Memory:
             self._conn.close()
 
 
+#: начала старых служебных директив, которые ошибочно сохранялись как
+#: сообщения пользователя. Их нельзя показывать человеку и подмешивать в роль
+#: «пользователь»: модель начинала путать себя с собеседником.
+_OLD_INTERNAL_PREFIXES = (
+    "[СЛУЖЕБНАЯ ДИРЕКТИВА ОРКЕСТРАТОРА",
+    "QUALITY GATE:",
+    "Ты снова ответил пустым сообщением",
+    "Ты израсходовала",
+    "Ты заявила, что у тебя нет доступа к устройству",
+    "Ты ответила только обещанием, но не выполнила",
+)
+
+
 def load_messages_into(history: list, rows: list[dict]) -> None:
     """Преобразует строки БД в объекты Message и добавляет в историю."""
     from nemus.core.providers import Message
 
     for row in rows:
+        text = str(row.get("content") or "")
+        if row.get("role") == "user" and text.startswith(_OLD_INTERNAL_PREFIXES):
+            continue
         history.append(
             Message(
                 role=row["role"],

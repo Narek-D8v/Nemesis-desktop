@@ -15,6 +15,8 @@ anthropic>=0.30
 
 # --- Голос: реальное время (Gemini Live / OpenAI Realtime) ---
 websockets>=12.0
+# WebRTC AEC3: эхоподавление, чтобы динамик не попадал в микрофон
+pywebrtc-audio>=0.2.0
 
 # --- Голос: речь в текст (локально) ---
 faster-whisper>=1.0
@@ -38,6 +40,8 @@ pyautogui>=0.9.54
 Pillow>=10.0
 # --- Презентации: pptx ---
 python-pptx>=1.0
+# --- Документы: PDF (DOCX/PPTX/XLSX читаются стандартной библиотекой) ---
+pypdf>=4.0
 
 # --- Инструменты: музыка (Spotify Web API) ---
 spotipy>=2.23

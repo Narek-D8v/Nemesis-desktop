@@ -255,14 +255,75 @@ def test_video_tool() -> None:
     tmp = Path(tempfile.mkdtemp())
     tool = CreateVideoTool()
     tool.workspace = str(tmp)
+    short = tool.execute(
+        title="Короткий тест",
+        duration=120,
+        path=str(tmp / "short.mp4"),
+        scenes=[
+            {"title": "Раз", "duration": 5},
+            {"title": "Два", "duration": 5},
+            {"title": "Три", "duration": 5},
+        ],
+    )
+    assert not short.ok and "120" in short.content, short.content
+    # сцены с несуществующей картинкой должны отклоняться, а не молча
+    # превращаться в текст на фоне
+    broken = tool.execute(
+        title="Битый кадр",
+        duration=12,
+        path=str(tmp / "broken.mp4"),
+        scenes=[
+            {"title": "Раз", "image": str(tmp / "nope.png")},
+            {"title": "Два", "image": str(tmp / "nope.png")},
+            {"title": "Три", "image": str(tmp / "nope.png")},
+        ],
+    )
+    assert not broken.ok and "не найдена" in broken.content, broken.content
+    text_only = tool.execute(
+        title="Текст на фоне",
+        duration=12,
+        path=str(tmp / "text-only.mp4"),
+        scenes=[
+            {"title": "Раз", "text": "Только текст."},
+            {"title": "Два", "text": "И тут только текст."},
+            {"title": "Три", "text": "И тут."},
+        ],
+    )
+    assert not text_only.ok and "visual" in text_only.content, text_only.content
+
+    from PIL import Image, ImageDraw
+
+    images = []
+    for index, color in enumerate(((38, 70, 120), (120, 82, 38), (42, 96, 70)), start=1):
+        frame = Image.new("RGB", (960, 540), color)
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle((80, 80, 880, 460), outline=(245, 166, 35), width=8)
+        draw.ellipse((360, 180, 600, 420), fill=(240, 230, 200))
+        path = tmp / f"scene-{index}.png"
+        frame.save(path)
+        images.append(path)
+
     result = tool.execute(
         title="Пшеница: от поля до стола",
+        duration=12,
         size="1920x1080",
         path=str(tmp / "video.mp4"),
         scenes=[
-            {"title": "Пшеница кормит миллиарды", "text": "Основа хлеба."},
-            {"title": "Урожай зависит от трёх факторов", "text": "Сорт, влага, защита."},
-            {"title": "Будущее за устойчивыми сортами", "text": "Селекция."},
+            {
+                "title": "Пшеница кормит миллиарды",
+                "text": "Основа хлеба.",
+                "image": str(images[0]),
+            },
+            {
+                "title": "Урожай зависит от трёх факторов",
+                "text": "Сорт, влага, защита.",
+                "image": str(images[1]),
+            },
+            {
+                "title": "Будущее за устойчивыми сортами",
+                "text": "Селекция.",
+                "image": str(images[2]),
+            },
         ],
     )
     assert result.ok, result.content
@@ -283,8 +344,8 @@ def test_video_tool() -> None:
         text=True,
         check=True,
     )
-    assert float(probe.stdout.strip()) > 5, probe.stdout
-    print("ok  create_video: 4 сцены, MP4 длиннее 5 секунд")
+    assert float(probe.stdout.strip()) > 10, probe.stdout
+    print("ok  create_video: 4 сцены, MP4 длиннее 10 секунд, визуал на месте")
 
 
 def main() -> int:

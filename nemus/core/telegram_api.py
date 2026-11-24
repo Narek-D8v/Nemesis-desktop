@@ -1,7 +1,7 @@
 """Тонкий адаптер новых методов Telegram Bot API 10.3/10.4.
 
 Установленная python-telegram-bot 22.8 знает Bot API 10.0, поэтому методы
-``sendMessageDraft``, ``sendRichMessage``, ``sendWidget`` и другие вызываются
+``sendMessageDraft``, ``sendRichMessage`` и другие вызываются
 напрямую через ``Bot._post``. Модуль не знает про Немусю: он только собирает
 payload по документированному контракту, запоминает заведомо неподдерживаемые
 методы и не даёт токену попасть в логи.
@@ -13,6 +13,7 @@ endpoint недоступным, если сервер явно сказал, ч
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from nemus.utils.logger import logger
@@ -25,11 +26,13 @@ _UNSUPPORTED_MARKERS = (
     "unsupported",
 )
 
-#: «not found» про объект (чат, файл) — временная ошибка, не отсутствие метода
-_NOT_FOUND_TARGETS = ("chat", "user", "message", "file", "topic")
-
-#: маркеры безобидной гонки правок
-_NOT_MODIFIED_MARKERS = ("message is not modified",)
+#: «not found» про объект (чат, файл, сообщение для правки) — временная
+#: ошибка, а не отсутствие метода. Telegram пишет "message to edit not found",
+#: поэтому между объектом и not found допускаем действие.
+_MISSING_OBJECT = re.compile(
+    r"\b(?:chat|user|message|file|topic|query)\b[^.]{0,40}\bnot found",
+    re.IGNORECASE,
+)
 
 
 class TelegramAdvancedAPI:
@@ -61,15 +64,8 @@ class TelegramAdvancedAPI:
         if any(marker in text for marker in _UNSUPPORTED_MARKERS):
             return True
         if "not found" in text:
-            return not any(
-                f"{target} not found" in text for target in _NOT_FOUND_TARGETS
-            )
+            return _MISSING_OBJECT.search(text) is None
         return False
-
-    @staticmethod
-    def _is_not_modified(exc: Exception) -> bool:
-        text = str(exc).lower()
-        return any(marker in text for marker in _NOT_MODIFIED_MARKERS)
 
     @staticmethod
     def _message_id(result: Any) -> int | None:
@@ -138,60 +134,6 @@ class TelegramAdvancedAPI:
             },
         )
         return self._message_id(result)
-
-    async def send_widget(
-        self,
-        *,
-        chat_id: int,
-        html: str,
-        chat_data: str,
-        caption: str,
-        allow_queries: bool = True,
-    ) -> int | None:
-        """Интерактивная HTML-панель (в production — только личка)."""
-        result = await self._call(
-            "sendWidget",
-            {
-                "chat_id": chat_id,
-                "html": html,
-                "chat_data": chat_data,
-                "caption": caption,
-                "allow_queries": allow_queries,
-            },
-        )
-        return self._message_id(result)
-
-    async def edit_message_widget_data(
-        self, *, chat_id: int, message_id: int, chat_data: str
-    ) -> bool:
-        """Обновляет состояние панели, не пересоздавая сообщение."""
-        try:
-            result = await self._call(
-                "editMessageWidgetData",
-                {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "chat_data": chat_data,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            if self._is_not_modified(exc):
-                return True
-            raise
-        return result is not None
-
-    async def answer_widget_query(self, *, widget_query_id: str, data: str) -> bool:
-        """Ответ на запрос виджета; должен уложиться в 15 секунд."""
-        try:
-            result = await self._call(
-                "answerWidgetQuery",
-                {"widget_query_id": widget_query_id, "data": data},
-            )
-        except Exception as exc:  # noqa: BLE001
-            if self._is_not_modified(exc):
-                return True
-            raise
-        return result is not None
 
     async def send_ephemeral(
         self,

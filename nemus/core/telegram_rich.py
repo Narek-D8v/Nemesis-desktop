@@ -21,6 +21,10 @@ BUTTON_DATA_LIMIT = 64
 _FENCE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _PLACEHOLDER = re.compile(r"\x00(\d+)\x00")
+_QUOTE_LINE = re.compile(r"^\s*>\s?(.*)$")
+_TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
+_TABLE_SEP = re.compile(r"^:?-{3,}:?$")
+
 
 
 class RichTextTooLong(ValueError):
@@ -45,6 +49,129 @@ def _restore(text: str, stash: list[str]) -> str:
     return _PLACEHOLDER.sub(lambda m: stash[int(m.group(1))], text)
 
 
+def _table_cells(line: str) -> list[str]:
+    match = _TABLE_ROW.match(line)
+    if match is None:
+        return []
+    return [cell.strip() for cell in match.group(1).split("|")]
+
+
+def _cell_align(cell: str) -> str | None:
+    left = cell.startswith(":")
+    right = cell.endswith(":")
+    if left and right:
+        return "center"
+    if left:
+        return "left"
+    if right:
+        return "right"
+    return None
+
+
+def _plain_cell(cell: str) -> bool:
+    """В HTML-таблице Markdown не парсится — не теряем разметку ячеек."""
+    return not any(marker in cell for marker in ("**", "__", "`", "[", "]", "<", "\\"))
+
+
+def _compact_tables(text: str) -> str:
+    """Простые GFM-таблицы превращает в компактные `<table>` Bot API 10.3.
+
+    Сложные таблицы (ссылки, код, жирный текст) остаются Markdown: внутри
+    HTML-блока они потеряли бы форматирование.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        header = _table_cells(lines[index])
+        separator = _table_cells(lines[index + 1]) if index + 1 < len(lines) else []
+        aligns = [_cell_align(cell) for cell in separator]
+        valid = (
+            len(header) >= 2
+            and len(header) == len(separator)
+            and all(_TABLE_SEP.match(cell) for cell in separator)
+            and all(_plain_cell(cell) for cell in header)
+        )
+        if not valid:
+            out.append(lines[index])
+            index += 1
+            continue
+        rows: list[list[str]] = []
+        cursor = index + 2
+        while cursor < len(lines):
+            cells = _table_cells(lines[cursor])
+            if len(cells) != len(header):
+                break
+            if not all(_plain_cell(cell) for cell in cells):
+                break
+            rows.append(cells)
+            cursor += 1
+        if not rows:
+            out.append(lines[index])
+            index += 1
+            continue
+
+        def cell(
+            tag: str, value: str, column: int, aligns: list[str | None] = aligns
+        ) -> str:
+            align = aligns[column]
+            attr = f' align="{align}"' if align else ""
+            return f"<{tag}{attr}>{value}</{tag}>"
+
+        html_rows = [
+            "<tr>"
+            + "".join(cell("th", value, column) for column, value in enumerate(header))
+            + "</tr>"
+        ]
+        html_rows.extend(
+            "<tr>"
+            + "".join(cell("td", value, column) for column, value in enumerate(row))
+            + "</tr>"
+            for row in rows
+        )
+        out.append(
+            '<table bordered striped compact>'
+            + "".join(html_rows)
+            + "</table>"
+        )
+        index = cursor
+    return "\n".join(out)
+
+
+def _expandable_quotes(text: str) -> str:
+    """Длинные цитаты сворачивает в expandable-blockquote Bot API 10.3.
+
+    Короткие цитаты остаются обычным Markdown: внутри HTML-блока цитаты
+    Markdown не парсится, поэтому порог нужен, чтобы не терять `**bold**`.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    group: list[str] = []
+    original: list[str] = []
+
+    def flush() -> None:
+        if not group:
+            return
+        content = "<br>".join(group).strip()
+        if len(group) >= 4 or len(content) >= 240:
+            out.append(f"<blockquote expandable>{content}</blockquote>")
+        else:
+            out.extend(original)
+        group.clear()
+        original.clear()
+
+    for line in lines:
+        match = _QUOTE_LINE.match(line)
+        if match:
+            group.append(match.group(1))
+            original.append(line)
+            continue
+        flush()
+        out.append(line)
+    flush()
+    return "\n".join(out)
+
+
 def prepare_rich_markdown(text: str) -> str:
     """Готовит Markdown к rich-сообщению, не пропуская HTML модели."""
     raw = text or ""
@@ -52,6 +179,8 @@ def prepare_rich_markdown(text: str) -> str:
         return ""
     prepared, stash = _extract_code(raw)
     prepared = prepared.replace("<", "&lt;")
+    prepared = _compact_tables(prepared)
+    prepared = _expandable_quotes(prepared)
     out = _restore(prepared, stash)
     if len(out) > RICH_LIMIT:
         raise RichTextTooLong(

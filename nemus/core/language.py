@@ -391,6 +391,73 @@ def is_simple_request(text: str) -> bool:
     return not any(marker in low for marker in SIMPLE_EXCLUDE)
 
 
+#: действия, после которых начинается создание кода/артефакта, а не
+#: бытовое действие вроде «сделай громче» или «создай папку»
+CREATION_ACTIONS: tuple[str, ...] = (
+    "сделай", "создай", "сгенерируй", "напиши", "сверстай", "разработай",
+    "собери", "почини", "исправь", "переделай", "отрефактори", "улучши",
+    "нарисуй", "смонтируй", "придумай", "сочини", "добавь", "допиши",
+    "make", "create", "generate", "write", "build", "develop", "design",
+    "fix", "refactor", "improve", "draw", "render", "edit",
+)
+
+#: объекты, которые делают задачу «создающей»: код, медиа, документы, дизайн
+CREATION_OBJECTS: tuple[str, ...] = (
+    "код", "скрипт", "функци", "модул", "класс", "плагин", "скилл",
+    "сайт", "лендинг", "интерфейс", "верстк", "макет", "бот", "api",
+    "python", "javascript", "typescript", "html", "css", "sql", "конфиг",
+    "сборк", "баг", "ошибк", "тест", "видео", "ролик", "клип", "анимац",
+    "презентац", "слайд", "картин", "изображен", "постер", "дизайн",
+    "логотип", "аватар", "обложк", "афиш", "документ", "отчёт", "отчет",
+    "статья", "текст", "рассказ", "стих", "письмо", "эссе", "пост",
+    "сценарий", "книг", "музык", "песн", "таблиц", "игру", "приложение",
+    "программ", "утилит", "библиотек", "коллаж", "иллюстрац",
+    "code", "script", "function", "module", "class", "plugin", "skill",
+    "website", "site", "landing", "interface", "layout", "bot", "config",
+    "build", "bug", "test", "video", "clip", "animation", "presentation",
+    "slide", "image", "picture", "poster", "design", "logo", "avatar",
+    "document", "report", "article", "text", "story", "poem", "letter",
+    "essay", "post", "scenario", "book", "music", "song", "table",
+    "game", "application", "app", "program", "utility", "library",
+    "collage", "illustration",
+)
+
+
+#: объекты, из-за которых создание артефакта считается именно сайтом
+WEBSITE_OBJECTS: tuple[str, ...] = (
+    "сайт", "лендинг", "веб-страниц", "веб страниц", "вебсайт",
+    "фронтенд", "frontend", "website", "web page", "landing",
+    "webapp", "веб-приложен",
+)
+
+
+def is_website_request(text: str) -> bool:
+    """Просят создать или переделать сайт/лендинг?"""
+    low = " ".join((text or "").strip().lower().replace("ё", "е").split())
+    return is_creation_request(low) and any(
+        obj in low for obj in WEBSITE_OBJECTS
+    )
+
+
+def is_creation_request(text: str) -> bool:
+    """Требует ли запрос создать код или артефакт (а не бытовое действие).
+
+    Нужен для жёсткого quality gate: «сделай видео», «напиши скрипт»,
+    «почини баг» проходят через research и план, а «сделай громче»,
+    «создай папку» и «открой сайт» — нет.
+    """
+    low = " ".join((text or "").strip().lower().replace("ё", "е").split())
+    if not low or low.startswith("/"):
+        return False
+    # эти действия сами по себе означают создание артефакта, даже если
+    # предмет назван иначе («нарисуй кота», «сверстай вот это»)
+    if any(action in low for action in ("нарисуй", "сверстай", "смонтируй", "draw")):
+        return True
+    if not any(action in low for action in CREATION_ACTIONS):
+        return False
+    return any(obj in low for obj in CREATION_OBJECTS)
+
+
 #: как пользователи спрашивают о списке установленных скиллов (ru + en)
 _SKILLS_QUESTION_MARKERS: tuple[str, ...] = (
     # ru
@@ -452,6 +519,9 @@ __all__ = [
     "hallucination_guard_directive",
     "reply_key",
     "quick_reply",
+    "CREATION_ACTIONS",
+    "CREATION_OBJECTS",
+    "is_creation_request",
     "is_simple_request",
     "looks_like_skills_question",
     "looks_like_deferral",

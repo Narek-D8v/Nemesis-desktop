@@ -72,6 +72,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "sessions.busy": "Дождитесь ответа — потом переключим диалог.",
         "model.prefix": "модель: {model}",
         "model.demo": "демо-режим",
+        "download.starting": "⬇️ Скачиваю {name}",
+        "download.progress": "⬇️ {name}: {percent}% ({done} / {total})",
+        "download.progress_unknown": "⬇️ {name}: {done}",
+        "download.done": "✅ Модель скачана: {name}",
+        "download.failed": "⚠️ Загрузка модели: {msg}",
+        "download.cancelled": "⏹ Загрузка модели отменена",
         "remind.fired": "⏰ Напоминание: {text}",
         # состояния
         "state.idle": "Готова",
@@ -134,7 +140,60 @@ _STRINGS: dict[str, dict[str, str]] = {
         "set.window": "Немуся — настройки",
         "tab.llm": "LLM",
         "tab.voice": "Голос",
+        "tab.character": "Характер",
         "tab.tts": "Озвучка (TTS)",
+        "character.intro": (
+            "Черты задают склонности, а базовые чувства — точка, к которой "
+            "Немуся возвращается. Настроение и теплота меняются от общения и "
+            "времени; их видно ниже и командой /emotions в Telegram."
+        ),
+        "character.enabled": "Характер и чувства включены",
+        "character.mode": "Режим",
+        "character.mode.basic": "Базовый",
+        "character.mode.advanced": "Расширенный",
+        "character.advanced_intro": (
+            "Расширенный режим: опиши характер Немуси свободным текстом. "
+            "Это дополняет ползунки с чертами."
+        ),
+        "character.advanced_placeholder": (
+            "Например: говори мягко, но не сюсюкай; люби ироничные "
+            "замечания; не называй меня «пользователь»..."
+        ),
+        "character.advanced_hint": (
+            "Текст попадает в системный промпт, когда выбран расширенный "
+            "режим. Ползунки и чувства продолжают работать."
+        ),
+        "character.rhythm": (
+            "Ритм не настраивается: скука растёт сама, а если долго не "
+            "отвечать на её сообщение — копится обида."
+        ),
+        "character.traits": "Черты характера",
+        "character.feelings": "Базовые чувства",
+        "character.proactive": "Собственная инициатива",
+        "character.playfulness": "Игривость",
+        "character.sensitivity": "Обидчивость",
+        "character.attachment": "Привязанность",
+        "character.independence": "Самостоятельность",
+        "character.curiosity": "Любопытство",
+        "character.mood": "Настроение",
+        "character.energy": "Энергия",
+        "character.trust": "Доверие",
+        "character.hurt": "Обида",
+        "character.proactive_enabled": "Может написать первой, если соскучится",
+        "character.quiet": "Тихие часы",
+        "character.state": "Текущее состояние",
+        "character.refresh": "Обновить",
+        "character.reset": "Сбросить чувства",
+        "character.reset_confirm": (
+            "Вернуть настроение, энергию, доверие, обиду, теплоту и "
+            "привязанность к спокойным значениям?"
+        ),
+        "character.reset_done": "Чувства сброшены к спокойным значениям.",
+        "character.hint": (
+            "Чем выше привязанность и ниже самостоятельность, тем быстрее "
+            "появляется скука. Теплота меняется от общения сама, а ползунок "
+            "привязанности задаёт её базу. Тихие часы не дают писать ночью."
+        ),
         "tab.mcp": "MCP",
         "tab.spotify": "Spotify",
         "tab.telegram": "Telegram",
@@ -164,11 +223,11 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Примеры задач, первая подсказка и кнопки действий под вложениями. "
             "/help остаётся доступной всегда."
         ),
-        "tg.advanced_ui": "Живой ответ и панель задач",
+        "tg.advanced_ui": "Живой ответ и rich-сообщения",
         "tg.advanced_ui_tip": (
-            "Нативный стрим ответа с кнопкой «Стоп», rich-сообщения и HTML-панель "
-            "задачи в личке, ephemeral-ответы в группах. При любой ошибке Bot API "
-            "бот сам вернётся к обычному прогрессу."
+            "Нативный стрим ответа с кнопкой «Стоп», rich-сообщения и "
+            "ephemeral-ответы в группах. При любой ошибке Bot API бот сам "
+            "вернётся к обычному прогрессу."
         ),
         "tg.max_file": "Максимальный файл",
         "tg.mb": "МБ",
@@ -261,24 +320,31 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store.plugin_update_tip": "Обновить плагин «{name}» с GitHub",
         "store.plugin_remove_tip": "Удалить плагин «{name}» целиком",
         "store.plugin_member": "в составе плагина «{name}»",
+        "store.pack_member": "в составе набора «{name}»",
         "store.plugin_local_zip": "Из .zip",
         "store.plugin_local_folder": "Из папки",
-        "store.plugin_local_zip_tip": "Поставить плагин из скачанного архива целиком",
-        "store.plugin_local_folder_tip": (
-            "Поставить плагин из папки на диске целиком"
+        "store.plugin_local_zip_tip": (
+            "Поставить плагин, скилл-пак или мега-пак из архива целиком"
         ),
-        "store.plugin_local_zip_title": "Выберите архив с плагином",
-        "store.plugin_local_folder_title": "Выберите папку плагина",
+        "store.plugin_local_folder_tip": (
+            "Поставить плагин, скилл-пак или мега-пак из папки на диске"
+        ),
+        "store.plugin_local_zip_title": "Выберите архив с плагинами или скиллами",
+        "store.plugin_local_folder_title": "Выберите папку с плагинами или скиллами",
         "store.plugin_local_filter": "Архивы плагинов (*.zip)",
         "store.plugin_local_fail": "Плагин из файла не установлен: {msg}",
         "store.local_source": "источник: {path}",
         "store.source_manual": "источник: поставлен вручную",
         "store.source_repo": "источник: {repo}",
         "store.source_repo_path": "источник: {repo} · {path}",
-        "store.skill_local_zip_tip": "Поставить скилл из скачанного архива",
-        "store.skill_local_folder_tip": "Поставить скилл из папки на диске",
-        "store.skill_local_zip_title": "Выберите архив со скиллом",
-        "store.skill_local_folder_title": "Выберите папку скилла",
+        "store.skill_local_zip_tip": (
+            "Поставить скилл, скилл-пак или мега-пак из скачанного архива"
+        ),
+        "store.skill_local_folder_tip": (
+            "Поставить скилл, скилл-пак или мега-пак из папки на диске"
+        ),
+        "store.skill_local_zip_title": "Выберите архив со скиллами или плагинами",
+        "store.skill_local_folder_title": "Выберите папку со скиллами или плагинами",
         "store.skill_local_filter": "Архивы скиллов (*.zip)",
         "store.skill_local_fail": "Скилл из файла не установлен: {msg}",
         "store.hint": (
@@ -321,6 +387,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "store.group.standalone": "Самостоятельные скиллы ({n})",
         "store.group.plugin_members": "В составе плагинов ({n})",
+        "store.group.pack_members": "В составе наборов ({n})",
         "store.path": "Папка: {path}",
         "store.update_tip": "Обновить скилл «{name}» с GitHub",
         "store.updating": "Обновляем «{name}» с GitHub…",
@@ -367,6 +434,93 @@ _STRINGS: dict[str, dict[str, str]] = {
         "llm.max_tokens": "Max tokens",
         "llm.keys": "API-ключи (хранятся в OS keyring)",
         "llm.key_for": "Ключ для {name}",
+        "llm.local_group": "llama.cpp (локально, GGUF)",
+        "llm.local_path": "Файл модели",
+        "llm.local_browse": "Выбрать…",
+        "llm.local_host": "Адрес сервера",
+        "llm.local_port": "Порт",
+        "llm.local_ctx": "Контекст (токенов)",
+        "llm.local_gpu": "Слоёв на GPU",
+        "llm.local_gpu_tip": (
+            "0 — только CPU; -1 — все слои на GPU. Для CUDA/ROCm нужна сборка "
+            "llama-cpp-python с поддержкой GPU."
+        ),
+        "llm.local_threads": "Потоков CPU (0 — авто)",
+        "llm.local_autostart": "Запускать локальный сервер автоматически",
+        "llm.local_advanced": "Параметры сервера",
+        "llm.local_tip": (
+            "Нужен пакет llama-cpp-python[server]. Модель .gguf работает без "
+            "API-ключа и интернета; выберите её в списке моделей или укажите "
+            "файл здесь."
+        ),
+        "llm.local_pkg": "Пакет",
+        "llm.local_pkg_ok": "llama-cpp-python[server] установлен",
+        "llm.local_pkg_broken": (
+            "Установка llama-cpp-python[server] повреждена — нажмите "
+            "«Переустановить»."
+        ),
+        "llm.local_reinstall": "Переустановить",
+        "llm.local_pkg_missing": (
+            "llama-cpp-python[server] не установлен — локальная модель "
+            "не запустится."
+        ),
+        "llm.local_pkg_manual": (
+            "llama-cpp-python[server] не установлен. Во встроенной сборке "
+            "установите его в окружение вручную."
+        ),
+        "llm.local_install": "Установить",
+        "llm.local_install_cancel": "Отменить",
+        "llm.local_install_starting": "Готовлю установку…",
+        "llm.local_install_resolve": "Получаю список файлов…",
+        "llm.local_install_collect": "Скачиваю пакет…",
+        "llm.local_install_download": "Скачиваю пакеты…",
+        "llm.local_install_progress": "Скачиваю: {percent}% · {done} / {total}",
+        "llm.local_install_downloaded": "Скачиваю: {done}",
+        "llm.local_install_build": "Собираю пакет…",
+        "llm.local_install_installing": "Устанавливаю…",
+        "llm.local_install_finishing": "Завершаю установку…",
+        "llm.local_install_done": "Готово — пакет установлен.",
+        "llm.local_install_failed": "Не удалось установить: {msg}",
+        "llm.local_install_cancelled": "Установка отменена.",
+        "llm.local_install_cancelling": "Отменяю установку…",
+        "llm.local_install_retry": "Повторить",
+        "llm.local_install_wait": "Дождитесь окончания установки пакета.",
+        "llm.hf_group": "Скачать модель с Hugging Face",
+        "llm.hf_search_label": "Поиск на Hugging Face",
+        "llm.hf_search": "Найти",
+        "llm.hf_search_ph": "Например: qwen2.5 7b, gemma 3, llama…",
+        "llm.hf_search_hint": (
+            "Пустой запрос покажет самые популярные GGUF-модели. "
+            "Выберите модель — файлы подтянутся автоматически."
+        ),
+        "llm.hf_manual": "Указать репозиторий вручную",
+        "llm.hf_not_found": "Ничего не найдено. Попробуйте другой запрос.",
+        "llm.hf_results": "Найденные модели",
+        "llm.hf_results_ph": "Сначала нажмите «Найти»",
+        "llm.hf_files": "Файлы модели",
+        "llm.hf_files_ph": "Выберите репозиторий",
+        "llm.hf_searching": "Ищу GGUF-модели…",
+        "llm.hf_search_failed": "Поиск не удался: {msg}",
+        "llm.hf_found": "Найдено: {n}",
+        "llm.hf_files_loading": "Загружаю список файлов…",
+        "llm.hf_files_failed": "Не удалось получить файлы: {msg}",
+        "llm.hf_files_found": "Файлов: {n}",
+        "llm.hf_repo": "Репозиторий",
+        "llm.hf_file": "GGUF-файл",
+        "llm.hf_revision": "Ревизия",
+        "llm.hf_auto": "Скачивать автоматически при первом запуске",
+        "llm.hf_download": "Скачать в data/models",
+        "llm.hf_tip": (
+            "Можно вставить owner/model или полную ссылку Hugging Face. "
+            "Файл сохраняется в data/models/<repo>/. Для приватных моделей "
+            "задайте HF_TOKEN в переменных окружения."
+        ),
+        "llm.hf_need_fields": "Укажите репозиторий и имя GGUF-файла.",
+        "llm.hf_starting": "Начинаю загрузку…",
+        "llm.hf_failed": "Не удалось скачать: {msg}",
+        "llm.hf_done": "Готово: {name}",
+        "llm.hf_cancelled": "Загрузка отменена; при следующем запуске продолжится.",
+        "llm.hf_wait": "Дождитесь окончания загрузки модели или отмените её.",
         "lang.group": "Язык",
         "lang.reply": "Язык ответов",
         "lang.ui": "Язык интерфейса",
@@ -396,6 +550,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "voice.rt_openai": "Модель OpenAI Realtime",
         "voice.rt_voice": "Голос OpenAI",
         "voice.rt_audio": "Передавать и воспроизводить аудио",
+        "voice.rt_aec": "Эхоподавление (AEC)",
+        "voice.rt_aec_tip": (
+            "Вычитает голос ассистента из микрофона — можно говорить через динамики."
+        ),
         "voice.rt_wake": "Запускать по слову активации (Немуся)",
         "voice.rt_fallback": "Офлайн без интернета и ключа",
         "voice.barge_in": "Прерывать голосом (barge-in)",
@@ -437,14 +595,26 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "mcp.hint": (
             "Внешние серверы (Node.js/Python) добавляют Немусе сторонние "
-            "инструменты. Изменения применяются после «Сохранить»."
+            "инструменты. Команда вида «npx … install … --client claude» ставит "
+            "сервер в Claude Desktop: импортируйте его JSON кнопкой «Импорт…» "
+            "или нажмите «Вставить команду…» — она сама соберёт карточку. "
+            "Изменения применяются после «Сохранить»."
         ),
         "mcp.help": (
             "MCP (Model Context Protocol) — внешние серверы с дополнительными "
             "инструментами для Немуси: работа с файлами, интернетом, базами данных "
-            "и т. д.\nЧтобы добавить сервер: выберите готовый пример или впишите "
-            "команду сами, затем «Проверить» и «Сохранить».\nГотовые серверы: "
-            "https://github.com/modelcontextprotocol/servers"
+            "и т. д.\n\n"
+            "Команды из документации часто выглядят так: npx -y @smithery/cli "
+            "install @автор/сервер --client claude. Флаг --client claude означает "
+            "запись в конфиг Claude Desktop, а не запуск сервера для Немуси.\n\n"
+            "Два пути:\n"
+            "1. Выполните команду (нужен Node.js), затем «Импорт…» и выберите "
+            "claude_desktop_config.json — на Windows это "
+            "%APPDATA%\\Claude\\claude_desktop_config.json.\n"
+            "2. Заполните карточку вручную: команда npx, аргументы — команда "
+            "запуска из README сервера (часто просто -y и имя пакета). Затем "
+            "«Проверить» и «Сохранить».\n\n"
+            "Готовые серверы: https://github.com/modelcontextprotocol/servers"
         ),
         "mcp.presets": "Примеры:",
         "mcp.presets_tip": (
@@ -455,7 +625,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "mcp.preset_add_tip": "Добавить выбранный пример в список серверов",
         "mcp.import": "Импорт…",
         "mcp.import_tip": (
-            "Импортировать серверы из mcp_config.json (формат Claude Desktop)"
+            "Импортировать серверы из claude_desktop_config.json (формат Claude "
+            "Desktop), обычно %APPDATA%\\Claude\\claude_desktop_config.json"
         ),
         "mcp.import_done": "Импортировано серверов: {n}.",
         "mcp.import_none": "В файле нет серверов (секция mcpServers пуста).",
@@ -490,6 +661,21 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "mcp.add": "Добавить сервер",
         "mcp.add_tip": "Добавить пустую карточку и заполнить поля вручную",
+        "mcp.paste": "Вставить команду…",
+        "mcp.paste_tip": (
+            "Вставьте команду запуска или установки — включая Smithery с "
+            "«--client claude»: Немуся сама соберёт карточку сервера."
+        ),
+        "mcp.paste_title": "Команда MCP-сервера",
+        "mcp.paste_prompt": (
+            "Вставьте команду из документации:\n"
+            "npx -y @smithery/cli install @автор/сервер --client claude"
+        ),
+        "mcp.paste_done": (
+            "Сервер «{name}» добавлен. Проверьте его кнопкой «Проверить» и "
+            "сохраните настройки."
+        ),
+        "mcp.paste_fail": "Не удалось разобрать команду: {msg}",
         "mcp.delete": "Удалить",
         "mcp.delete_tip": "Удалить этот сервер из списка",
         "mcp.expand_tip": "Показать или скрыть настройки сервера",
@@ -546,6 +732,26 @@ _STRINGS: dict[str, dict[str, str]] = {
         "tools.auto_allow": "Авто-разрешать",
         "tools.workspace": "Рабочая папка",
         "tools.workspace_hint": "Папка для собственных скриптов и файлов ассистента.",
+        "tools.cleanup_group": "Старые файлы",
+        "tools.cleanup_days": "Хранить",
+        "tools.cleanup_days_suffix": " дн.",
+        "tools.cleanup_button": "Очистить старые файлы",
+        "tools.cleanup_hint": (
+            "Удаляет из рабочей папки старые скриншоты, картинки, вложения "
+            "Telegram и временные остатки Немуси. Свежие файлы, базы и модели "
+            "не трогает."
+        ),
+        "tools.cleanup_title": "Очистка старых файлов",
+        "tools.cleanup_nothing": "Файлов старше {days} дн. не найдено.",
+        "tools.cleanup_confirm": (
+            "Удалить файлы старше {days} дн. ({count} шт.)?\n"
+            "Освободится около {size}."
+        ),
+        "tools.cleanup_done": "Удалено файлов: {count}, освобождено {size}.",
+        "tools.cleanup_failed": (
+            "Не удалось удалить файлов: {count} — возможно, они заняты "
+            "другой программой."
+        ),
         "tools.limits_group": "Лимиты агента",
         "tools.max_steps": "Макс. шагов за запрос",
         "tools.time_budget": "Время на запрос",
@@ -640,6 +846,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "model.prefix": "model: {model}",
         "remind.fired": "⏰ Reminder: {text}",
         "model.demo": "demo mode",
+        "download.starting": "⬇️ Downloading {name}",
+        "download.progress": "⬇️ {name}: {percent}% ({done} / {total})",
+        "download.progress_unknown": "⬇️ {name}: {done}",
+        "download.done": "✅ Model downloaded: {name}",
+        "download.failed": "⚠️ Model download: {msg}",
+        "download.cancelled": "⏹ Model download cancelled",
         "state.idle": "Ready",
         "state.listening": "Listening…",
         "state.thinking": "Thinking…",
@@ -693,7 +905,61 @@ _STRINGS: dict[str, dict[str, str]] = {
         "set.window": "Немуся — settings",
         "tab.llm": "LLM",
         "tab.voice": "Voice",
+        "tab.character": "Character",
         "tab.tts": "Voice (TTS)",
+        "character.intro": (
+            "Traits set her tendencies; baseline feelings are where she returns. "
+            "Mood and warmth change with conversation and time; see them below "
+            "and with /emotions in Telegram."
+        ),
+        "character.enabled": "Character and feelings enabled",
+        "character.mode": "Mode",
+        "character.mode.basic": "Basic",
+        "character.mode.advanced": "Advanced",
+        "character.advanced_intro": (
+            "Advanced mode: describe her character in free form. "
+            "This adds to the trait sliders."
+        ),
+        "character.advanced_placeholder": (
+            "For example: speak softly without baby talk; enjoy dry jokes; "
+            "never call me 'user'..."
+        ),
+        "character.advanced_hint": (
+            "The text goes into the system prompt when advanced mode is on. "
+            "The trait sliders and feelings keep working."
+        ),
+        "character.rhythm": (
+            "No schedule: loneliness grows on its own, and silence after her "
+            "message slowly turns into resentment."
+        ),
+        "character.traits": "Character traits",
+        "character.feelings": "Baseline feelings",
+        "character.proactive": "Her own initiative",
+        "character.playfulness": "Playfulness",
+        "character.sensitivity": "Touchiness",
+        "character.attachment": "Attachment",
+        "character.independence": "Independence",
+        "character.curiosity": "Curiosity",
+        "character.mood": "Mood",
+        "character.energy": "Energy",
+        "character.trust": "Trust",
+        "character.hurt": "Hurt",
+        "character.proactive_enabled": "May message first when she misses you",
+        "character.quiet": "Quiet hours",
+        "character.state": "Current state",
+        "character.refresh": "Refresh",
+        "character.reset": "Reset feelings",
+        "character.reset_confirm": (
+            "Return mood, energy, trust, hurt, warmth and attachment to "
+            "their calm values?"
+        ),
+        "character.reset_done": "Feelings reset to calm values.",
+        "character.hint": (
+            "Higher attachment and lower independence make loneliness grow "
+            "faster. Warmth changes through conversation on its own, while "
+            "the attachment slider sets its baseline. Quiet hours prevent "
+            "nighttime messages."
+        ),
         "tab.mcp": "MCP",
         "tab.spotify": "Spotify",
         "tab.telegram": "Telegram",
@@ -721,11 +987,11 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Task examples, a first-run hint and action buttons under attachments. "
             "/help always remains available."
         ),
-        "tg.advanced_ui": "Live answer and task panel",
+        "tg.advanced_ui": "Live answer and rich messages",
         "tg.advanced_ui_tip": (
-            "Native answer streaming with a Stop button, rich messages and an HTML "
-            "task panel in private chats, ephemeral replies in groups. On any Bot "
-            "API error the bot falls back to the usual progress message."
+            "Native answer streaming with a Stop button, rich messages and "
+            "ephemeral replies in groups. On any Bot API error the bot falls "
+            "back to the usual progress message."
         ),
         "tg.max_file": "Maximum file",
         "tg.mb": "MB",
@@ -818,22 +1084,31 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store.plugin_update_tip": "Update plugin «{name}» from GitHub",
         "store.plugin_remove_tip": "Remove plugin «{name}» with all its files",
         "store.plugin_member": "part of plugin «{name}»",
+        "store.pack_member": "part of pack «{name}»",
         "store.plugin_local_zip": "From .zip",
         "store.plugin_local_folder": "From folder",
-        "store.plugin_local_zip_tip": "Install a plugin from a downloaded archive",
-        "store.plugin_local_folder_tip": "Install a plugin from a folder on disk",
-        "store.plugin_local_zip_title": "Choose a plugin archive",
-        "store.plugin_local_folder_title": "Choose a plugin folder",
+        "store.plugin_local_zip_tip": (
+            "Install a plugin, skill pack or mega pack from an archive"
+        ),
+        "store.plugin_local_folder_tip": (
+            "Install a plugin, skill pack or mega pack from a folder on disk"
+        ),
+        "store.plugin_local_zip_title": "Choose an archive with plugins or skills",
+        "store.plugin_local_folder_title": "Choose a folder with plugins or skills",
         "store.plugin_local_filter": "Plugin archives (*.zip)",
         "store.plugin_local_fail": "Plugin from file was not installed: {msg}",
         "store.local_source": "source: {path}",
         "store.source_manual": "source: installed manually",
         "store.source_repo": "source: {repo}",
         "store.source_repo_path": "source: {repo} · {path}",
-        "store.skill_local_zip_tip": "Install a skill from a downloaded archive",
-        "store.skill_local_folder_tip": "Install a skill from a folder on disk",
-        "store.skill_local_zip_title": "Choose a skill archive",
-        "store.skill_local_folder_title": "Choose a skill folder",
+        "store.skill_local_zip_tip": (
+            "Install a skill, skill pack or mega pack from a downloaded archive"
+        ),
+        "store.skill_local_folder_tip": (
+            "Install a skill, skill pack or mega pack from a folder on disk"
+        ),
+        "store.skill_local_zip_title": "Choose an archive with skills or plugins",
+        "store.skill_local_folder_title": "Choose a folder with skills or plugins",
         "store.skill_local_filter": "Skill archives (*.zip)",
         "store.skill_local_fail": "Skill from file was not installed: {msg}",
         "store.hint": (
@@ -876,6 +1151,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "store.group.standalone": "Standalone skills ({n})",
         "store.group.plugin_members": "Inside plugins ({n})",
+        "store.group.pack_members": "Inside packs ({n})",
         "store.path": "Folder: {path}",
         "store.update_tip": "Update skill «{name}» from GitHub",
         "store.updating": "Updating «{name}» from GitHub…",
@@ -921,6 +1197,93 @@ _STRINGS: dict[str, dict[str, str]] = {
         "llm.max_tokens": "Max tokens",
         "llm.keys": "API keys (stored in the OS keyring)",
         "llm.key_for": "Key for {name}",
+        "llm.local_group": "llama.cpp (local, GGUF)",
+        "llm.local_path": "Model file",
+        "llm.local_browse": "Browse…",
+        "llm.local_host": "Server address",
+        "llm.local_port": "Port",
+        "llm.local_ctx": "Context (tokens)",
+        "llm.local_gpu": "GPU layers",
+        "llm.local_gpu_tip": (
+            "0 — CPU only; -1 — all layers on GPU. A GPU-enabled "
+            "llama-cpp-python build is required for CUDA/ROCm."
+        ),
+        "llm.local_threads": "CPU threads (0 — auto)",
+        "llm.local_autostart": "Start the local server automatically",
+        "llm.local_advanced": "Server settings",
+        "llm.local_tip": (
+            "Requires llama-cpp-python[server]. A .gguf model runs without an "
+            "API key or internet; pick it from the model list or choose a file "
+            "here."
+        ),
+        "llm.local_pkg": "Package",
+        "llm.local_pkg_ok": "llama-cpp-python[server] is installed",
+        "llm.local_pkg_broken": (
+            "The llama-cpp-python[server] installation is damaged — click "
+            "“Reinstall”."
+        ),
+        "llm.local_reinstall": "Reinstall",
+        "llm.local_pkg_missing": (
+            "llama-cpp-python[server] is not installed — the local model "
+            "cannot start."
+        ),
+        "llm.local_pkg_manual": (
+            "llama-cpp-python[server] is not installed. In a frozen build, "
+            "install it into the environment manually."
+        ),
+        "llm.local_install": "Install",
+        "llm.local_install_cancel": "Cancel",
+        "llm.local_install_starting": "Preparing installation…",
+        "llm.local_install_resolve": "Getting the file list…",
+        "llm.local_install_collect": "Downloading the package…",
+        "llm.local_install_download": "Downloading packages…",
+        "llm.local_install_progress": "Downloading: {percent}% · {done} / {total}",
+        "llm.local_install_downloaded": "Downloading: {done}",
+        "llm.local_install_build": "Building the package…",
+        "llm.local_install_installing": "Installing…",
+        "llm.local_install_finishing": "Finishing installation…",
+        "llm.local_install_done": "Done — the package is installed.",
+        "llm.local_install_failed": "Installation failed: {msg}",
+        "llm.local_install_cancelled": "Installation cancelled.",
+        "llm.local_install_cancelling": "Cancelling installation…",
+        "llm.local_install_retry": "Retry",
+        "llm.local_install_wait": "Wait for the package installation to finish.",
+        "llm.hf_group": "Download a model from Hugging Face",
+        "llm.hf_search_label": "Search Hugging Face",
+        "llm.hf_search": "Search",
+        "llm.hf_search_ph": "For example: qwen2.5 7b, gemma 3, llama…",
+        "llm.hf_search_hint": (
+            "An empty query shows the most popular GGUF models. "
+            "Pick a model and its files load automatically."
+        ),
+        "llm.hf_manual": "Enter a repository manually",
+        "llm.hf_not_found": "Nothing found. Try another query.",
+        "llm.hf_results": "Found models",
+        "llm.hf_results_ph": "Click Search first",
+        "llm.hf_files": "Model files",
+        "llm.hf_files_ph": "Choose a repository",
+        "llm.hf_searching": "Searching GGUF models…",
+        "llm.hf_search_failed": "Search failed: {msg}",
+        "llm.hf_found": "Found: {n}",
+        "llm.hf_files_loading": "Loading file list…",
+        "llm.hf_files_failed": "Could not load files: {msg}",
+        "llm.hf_files_found": "Files: {n}",
+        "llm.hf_repo": "Repository",
+        "llm.hf_file": "GGUF file",
+        "llm.hf_revision": "Revision",
+        "llm.hf_auto": "Download automatically on first use",
+        "llm.hf_download": "Download to data/models",
+        "llm.hf_tip": (
+            "Paste owner/model or a full Hugging Face link. The file is saved "
+            "to data/models/<repo>/. For private models set HF_TOKEN in the "
+            "environment."
+        ),
+        "llm.hf_need_fields": "Enter the repository and GGUF filename.",
+        "llm.hf_starting": "Starting download…",
+        "llm.hf_failed": "Download failed: {msg}",
+        "llm.hf_done": "Saved: {name}",
+        "llm.hf_cancelled": "Download cancelled; it will resume next time.",
+        "llm.hf_wait": "Wait for the model download to finish or cancel it.",
         "lang.group": "Language",
         "lang.reply": "Reply language",
         "lang.ui": "Interface language",
@@ -949,6 +1312,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "voice.rt_openai": "OpenAI Realtime model",
         "voice.rt_voice": "OpenAI voice",
         "voice.rt_audio": "Send and play audio",
+        "voice.rt_aec": "Echo cancellation (AEC)",
+        "voice.rt_aec_tip": (
+            "Removes the assistant's voice from the microphone, so speakers can be used."
+        ),
         "voice.rt_wake": "Start on the wake word (Немуся)",
         "voice.rt_fallback": "Offline without internet or key",
         "voice.barge_in": "Allow voice interruption (barge-in)",
@@ -991,15 +1358,24 @@ _STRINGS: dict[str, dict[str, str]] = {
             "How often to re-read tools of the running servers in the background."
         ),
         "mcp.hint": (
-            "External servers (Node.js/Python) give Nemus extra tools. "
-            "Changes apply after you press Save."
+            "External servers (Node.js/Python) give Nemus extra tools. A command "
+            "like «npx … install … --client claude» installs into Claude Desktop: "
+            "import its JSON with «Import…» or press «Paste command…» to build "
+            "the card automatically. Changes apply after you press Save."
         ),
         "mcp.help": (
             "MCP (Model Context Protocol) — external servers that provide extra "
-            "tools for Nemus: file access, the web, databases, and more.\n"
-            "To add a server: pick a preset or type a command yourself, then "
-            "press «Test» and «Save». Ready-made servers: "
-            "https://github.com/modelcontextprotocol/servers"
+            "tools for Nemus: file access, the web, databases, and more.\n\n"
+            "Documentation often shows commands like npx -y @smithery/cli install "
+            "@author/server --client claude. The --client claude flag writes to the "
+            "Claude Desktop config; it does not start a server for Nemus.\n\n"
+            "Two ways:\n"
+            "1. Run the command (Node.js required), then press «Import…» and pick "
+            "claude_desktop_config.json — on Windows that is "
+            "%APPDATA%\\Claude\\claude_desktop_config.json.\n"
+            "2. Fill a card manually: command npx, arguments from the server README "
+            "(often just -y and the package name). Then press «Test» and «Save».\n\n"
+            "Ready-made servers: https://github.com/modelcontextprotocol/servers"
         ),
         "mcp.presets": "Presets:",
         "mcp.presets_tip": (
@@ -1010,7 +1386,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "mcp.preset_add_tip": "Add the selected preset to the server list",
         "mcp.import": "Import…",
         "mcp.import_tip": (
-            "Import servers from mcp_config.json (Claude Desktop format)"
+            "Import servers from claude_desktop_config.json (Claude Desktop "
+            "format), usually %APPDATA%\\Claude\\claude_desktop_config.json"
         ),
         "mcp.import_done": "Imported servers: {n}.",
         "mcp.import_none": "No servers in the file (mcpServers is empty).",
@@ -1045,6 +1422,20 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "mcp.add": "Add server",
         "mcp.add_tip": "Add an empty card and fill in the fields manually",
+        "mcp.paste": "Paste command…",
+        "mcp.paste_tip": (
+            "Paste a run or install command — including Smithery with "
+            "«--client claude»: Nemus turns it into a server card."
+        ),
+        "mcp.paste_title": "MCP server command",
+        "mcp.paste_prompt": (
+            "Paste a command from the docs:\n"
+            "npx -y @smithery/cli install @author/server --client claude"
+        ),
+        "mcp.paste_done": (
+            "Server «{name}» added. Check it with «Test» and save the settings."
+        ),
+        "mcp.paste_fail": "Could not parse the command: {msg}",
         "mcp.delete": "Delete",
         "mcp.delete_tip": "Remove this server from the list",
         "mcp.expand_tip": "Show or hide the server settings",
@@ -1102,6 +1493,26 @@ _STRINGS: dict[str, dict[str, str]] = {
         "tools.workspace": "Workspace folder",
         "tools.workspace_hint": (
             "Folder for the assistant's own scripts and files."
+        ),
+        "tools.cleanup_group": "Old files",
+        "tools.cleanup_days": "Keep",
+        "tools.cleanup_days_suffix": " days",
+        "tools.cleanup_button": "Clean old files",
+        "tools.cleanup_hint": (
+            "Removes old screenshots, images, Telegram attachments and Nemus "
+            "temporary leftovers from the workspace. Recent files, databases "
+            "and models are kept."
+        ),
+        "tools.cleanup_title": "Clean old files",
+        "tools.cleanup_nothing": "No files older than {days} days.",
+        "tools.cleanup_confirm": (
+            "Delete files older than {days} days ({count} files)?\n"
+            "About {size} will be freed."
+        ),
+        "tools.cleanup_done": "Removed files: {count}, freed {size}.",
+        "tools.cleanup_failed": (
+            "Could not remove files: {count} — they may be in use by another "
+            "program."
         ),
         "tools.limits_group": "Agent limits",
         "tools.max_steps": "Max steps per request",

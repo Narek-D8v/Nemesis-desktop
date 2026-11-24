@@ -9,6 +9,7 @@ from nemus.core.tools.registry import ToolRegistry
 from nemus.core.tools.shell import shell_tools
 from nemus.core.tools.system import system_tools
 from nemus.core.tools.web import web_tools
+from nemus.core.tools.website import website_tools
 
 __all__ = [
     "Tool",
@@ -22,4 +23,5 @@ __all__ = [
     "web_tools",
     "system_tools",
     "browser_tools",
+    "website_tools",
 ]

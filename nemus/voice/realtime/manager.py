@@ -66,6 +66,7 @@ class RealtimeManager:
                 "confirm": self.confirm,
                 "system_prompt": self.system_prompt,
                 "barge_in": self.config.voice.barge_in,
+                "aec": getattr(rc, "aec", True),
                 "noise_reducer": self._noise_reducer(),
                 "reply_language": getattr(
                     self.config.assistant, "reply_language", "auto"

@@ -21,6 +21,7 @@ from nemus.core.language import (
 )
 from nemus.utils.logger import logger
 from nemus.utils.redact import redact_secrets
+from nemus.voice.echo import create_echo_canceller
 from nemus.voice.params import SAMPLE_RATE
 from nemus.voice.realtime.audio_io import MicStreamer, SpeakerPlayer
 from nemus.voice.realtime.base import (
@@ -42,6 +43,11 @@ class GeminiLiveSession(BaseRealtimeSession):
     send_rate = SAMPLE_RATE
     receive_rate = 24000
     mic_rate = SAMPLE_RATE
+
+    #: Gemini Live закрывает idle WebSocket примерно через 2 минуты.
+    #: Гейт тишины не отправляет микрофон, поэтому шлём тихий keepalive.
+    KEEPALIVE_INTERVAL_S = 20.0
+    KEEPALIVE_SILENCE_MS = 100
 
     def __init__(
         self,
@@ -71,6 +77,7 @@ class GeminiLiveSession(BaseRealtimeSession):
         self._asst_parts_buf = ""  # текст из modelTurn (text-сессии)
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._detected_lang = ""
+        self._last_send_ts = 0.0
 
         # диагностика задержки: конец речи -> первый звук ответа
         self._voice_ts = 0.0
@@ -99,23 +106,32 @@ class GeminiLiveSession(BaseRealtimeSession):
                     raise RuntimeError(f"Сбой setup Gemini Live: {reply}")
 
                 if self._audio:
-                    self._speaker = SpeakerPlayer(self.receive_rate)
+                    self._speaker = SpeakerPlayer(
+                        self.receive_rate, reference_rate=self.mic_rate
+                    )
                     if not self._speaker.start():
                         self._audio = False
                     else:
+                        echo = (
+                            create_echo_canceller(self.mic_rate) if self.aec else None
+                        )
                         self._mic = MicStreamer(
                             self.mic_rate,
                             self._on_mic_chunk,
                             cleaner=self.noise_reducer,
+                            echo_canceller=echo,
+                            echo_reference=self._speaker.reference,
                         )
                         if not self._mic.start():
                             self._emit_error("Микрофон недоступен — аудиоввод выключен.")
+                self._last_send_ts = time.monotonic()
                 self._emit_state(RealtimeState.READY)
 
                 tasks = [asyncio.create_task(self._recv_loop())]
                 if self._audio and self._mic is not None:
                     tasks.append(asyncio.create_task(self._mic_loop()))
                     tasks.append(asyncio.create_task(self._play_loop()))
+                    tasks.append(asyncio.create_task(self._keepalive_loop()))
                 while self._running:
                     done, _ = await asyncio.wait(
                         tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.5
@@ -160,13 +176,14 @@ class GeminiLiveSession(BaseRealtimeSession):
             # Без этих полей Gemini Live не присылает расшифровку речи
             setup["inputAudioTranscription"] = {}
             setup["outputAudioTranscription"] = {}
-            # Быстрее завершать реплику пользователя (меньше задержка ответа)
+            # Низкая чувствительность не даёт шуму/эху начинать реплику.
+            # 600 мс паузы рекомендованы Gemini, чтобы не резать фразу на куски.
             setup["realtimeInputConfig"] = {
                 "automaticActivityDetection": {
-                    "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
-                    "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
-                    "prefixPaddingMs": 20,
-                    "silenceDurationMs": 400,
+                    "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                    "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                    "prefixPaddingMs": 300,
+                    "silenceDurationMs": 600,
                 }
             }
 
@@ -202,13 +219,25 @@ class GeminiLiveSession(BaseRealtimeSession):
         """Вызывается из потока звука — мостим в цикл asyncio."""
         rms = pcm16_rms(chunk)
         now = time.monotonic()
+        # эхо динамика не должно попадать в модель и запускать новый ход
+        chunks = self._echo_guard(
+            chunk,
+            rms,
+            now,
+            self._speaker,
+            self._drain_play_queue,
+            aec_active=self._mic is not None and self._mic.aec_active,
+        )
+        if chunks is None:
+            return
         self._track_voice(rms, now)
         # затянувшуюся тишину модели не шлём — на ней она галлюцинирует
         if not self._gate_audio(rms, now):
             return
         loop = self._loop
         if loop is not None and not loop.is_closed() and self._running:
-            loop.call_soon_threadsafe(self._mic_queue.put_nowait, chunk)
+            for item in chunks:
+                loop.call_soon_threadsafe(self._mic_queue.put_nowait, item)
 
     def _track_voice(self, rms: float, now: float) -> None:
         """Оценивает начало/конец речи по громкости.
@@ -265,6 +294,25 @@ class GeminiLiveSession(BaseRealtimeSession):
             }
         }
         await self._ws.send(json.dumps(message))
+        self._last_send_ts = time.monotonic()
+
+    def _silence_chunk(self) -> bytes:
+        """PCM16-тишина для keepalive (не попадает в распознавание как речь)."""
+        samples = int(self.send_rate * self.KEEPALIVE_SILENCE_MS / 1000)
+        return b"\x00\x00" * samples
+
+    async def _send_keepalive(self) -> None:
+        """Не даёт Gemini Live закрыть сессию по client inactivity."""
+        if time.monotonic() - self._last_send_ts < self.KEEPALIVE_INTERVAL_S:
+            return
+        await self._send_audio(self._silence_chunk())
+
+    async def _keepalive_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(self.KEEPALIVE_INTERVAL_S)
+            if not self._running:
+                return
+            await self._send_keepalive()
 
     async def _play_loop(self) -> None:
         while self._running:

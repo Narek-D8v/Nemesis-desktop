@@ -54,6 +54,11 @@ DRAIN_TIMEOUT = 1.0
 KILL_WAIT = 10.0
 
 IS_WINDOWS = platform.system() == "Windows"
+#: не показывать консольное окно для дочерних процессов (иначе на Windows
+#: при каждом run_shell/run_python поверх рабочего стола мигает чёрное окно)
+CREATE_NO_WINDOW = (
+    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
+)
 _ENCODINGS = ("utf-8", "cp866", "cp1251")
 
 #: «Ok to proceed? (y/n)», «Continue? [Y/n]», «Press ENTER to continue»…
@@ -115,6 +120,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
                 timeout=15,
+                creationflags=CREATE_NO_WINDOW,
             )
         else:
             import signal
@@ -443,8 +449,8 @@ def run_capture(
     if env_extra:
         env.update(env_extra)
     kwargs: dict[str, Any] = {}
-    if IS_WINDOWS and creationflags:
-        kwargs["creationflags"] = creationflags
+    if IS_WINDOWS:
+        kwargs["creationflags"] = creationflags | CREATE_NO_WINDOW
     proc = subprocess.Popen(
         argv,
         cwd=cwd,
@@ -520,6 +526,7 @@ def run_bounded(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        creationflags=CREATE_NO_WINDOW,
     )
     if stdin_text:
         _write_stdin(proc, stdin_text, close=True)
@@ -845,6 +852,8 @@ class RunShellTool(Tool):
             stderr=subprocess.PIPE,
             env=env,
         )
+        if IS_WINDOWS:
+            kwargs["creationflags"] = CREATE_NO_WINDOW
         return subprocess.Popen(RunShellTool._build_argv(command, shell), **kwargs)
 
     @staticmethod

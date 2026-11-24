@@ -76,7 +76,16 @@ def main() -> int:
     dlg.cb_tts_voice.setCurrentIndex(
         dlg.cb_tts_voice.findData("nova")
     )
-    dlg._save()
+    # Тест не должен писать в настоящий config/config.yaml: иначе после
+    # любого прогона тестов приложение стартует с OpenAI TTS.
+    import nemus.gui.dialogs as dialogs_module
+
+    original_save_config = dialogs_module.save_config
+    dialogs_module.save_config = lambda cfg: None
+    try:
+        dlg._save()
+    finally:
+        dialogs_module.save_config = original_save_config
     assert dlg.config.voice.tts.engine == "openai"
     assert dlg.config.voice.tts.voice == "nova"
 

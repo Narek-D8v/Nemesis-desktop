@@ -185,6 +185,22 @@ def qss() -> str:
         outline: 0;
         padding: 3px;
     }}
+    QListWidget#HFList {{
+        background: {BG_ELEVATED};
+        border: 1px solid {BORDER};
+        border-radius: 10px;
+        padding: 4px;
+        outline: 0;
+        font-size: 12px;
+    }}
+    QListWidget#HFList::item {{
+        padding: 6px 8px;
+        border-radius: 7px;
+    }}
+    QListWidget#HFList::item:selected {{
+        background: rgba(124, 182, 255, 0.16);
+        color: {TEXT};
+    }}
     QListWidget::item {{
         padding: 7px 8px;
         border-radius: 8px;

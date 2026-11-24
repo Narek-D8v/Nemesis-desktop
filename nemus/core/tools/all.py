@@ -13,8 +13,10 @@ from nemus.core.tools.python_exec import python_tools
 from nemus.core.tools.screen import screen_tools
 from nemus.core.tools.shell import shell_tools
 from nemus.core.tools.system import system_tools
+from nemus.core.tools.todo_tool import todo_tools
 from nemus.core.tools.video import video_tools
 from nemus.core.tools.web import web_tools
+from nemus.core.tools.website import website_tools
 
 
 def all_builtin_tools() -> list[Tool]:
@@ -26,9 +28,11 @@ def all_builtin_tools() -> list[Tool]:
     tools.extend(web_tools())
     tools.extend(download_tools())
     tools.extend(system_tools())
+    tools.extend(todo_tools())
     tools.extend(keyboard_tools())
     tools.extend(browser_tools())
     tools.extend(screen_tools())
     tools.extend(presentation_tools())
     tools.extend(video_tools())
+    tools.extend(website_tools())
     return tools

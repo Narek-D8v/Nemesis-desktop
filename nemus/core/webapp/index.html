@@ -1,0 +1,2583 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0c1118">
+<title>Настройки Немуси</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0a0f16;
+  --bg-soft:#0d141d;
+  --surface:#111923;
+  --surface-2:#0d151e;
+  --input:#0a1119;
+  --text:#edf4fc;
+  --muted:#94a4b7;
+  --faint:#6a7b90;
+  --line:rgba(149,173,201,.13);
+  --line-strong:rgba(149,173,201,.23);
+  --accent:#86c8ff;
+  --accent-strong:#4ba6ee;
+  --accent-soft:rgba(134,200,255,.12);
+  --accent-text:#06131f;
+  --ok:#5bd9a6;
+  --ok-soft:rgba(91,217,166,.12);
+  --danger:#ff8585;
+  --danger-soft:rgba(255,133,133,.11);
+  --shadow:0 16px 36px rgba(0,0,0,.3);
+  --radius:16px;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f3f6fa;
+  --bg-soft:#eef2f7;
+  --surface:#ffffff;
+  --surface-2:#f4f7fb;
+  --input:#f8fafc;
+  --text:#15202d;
+  --muted:#637386;
+  --faint:#7e8d9f;
+  --line:rgba(38,60,86,.1);
+  --line-strong:rgba(38,60,86,.18);
+  --accent:#247fc8;
+  --accent-strong:#1a6daf;
+  --accent-soft:rgba(36,127,200,.1);
+  --accent-text:#ffffff;
+  --ok:#12805b;
+  --ok-soft:rgba(18,128,91,.1);
+  --danger:#c84545;
+  --danger-soft:rgba(200,69,69,.08);
+  --shadow:0 16px 34px rgba(30,52,78,.08);
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;min-height:100%}
+body{
+  background:
+    linear-gradient(180deg,rgba(134,200,255,.07),transparent 320px),
+    var(--bg);
+  color:var(--text);
+  font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  -webkit-tap-highlight-color:transparent;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+button,input,select{font:inherit}
+button{color:inherit}
+::selection{background:var(--accent-soft);color:var(--text)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.icon{width:18px;height:18px;flex:0 0 auto;display:block}
+.app{max-width:780px;margin:0 auto;padding:calc(18px + env(safe-area-inset-top)) 16px 34px}
+
+/* Шапка */
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:0 2px 16px}
+.identity{display:flex;align-items:center;gap:12px;min-width:0}
+.logo{
+  width:46px;height:46px;flex:0 0 auto;border-radius:14px;display:grid;place-items:center;
+  background:linear-gradient(150deg,#9bd4ff,var(--accent-strong));
+  color:#06131f;font-size:22px;font-weight:800;letter-spacing:-.04em;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.45),0 8px 20px rgba(75,166,238,.18);
+}
+.identity-text{min-width:0}
+.eyebrow{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:750;letter-spacing:.13em;text-transform:uppercase;color:var(--faint)}
+.eyebrow .version{letter-spacing:0;text-transform:none;font-weight:600;color:var(--faint)}
+h1{margin:2px 0 0;font-size:22px;line-height:1.15;letter-spacing:-.025em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.subtitle{margin:3px 0 0;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top-meta{display:flex;align-items:center;gap:7px;flex:0 0 auto;padding-top:3px}
+.connection{display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:11px;font-weight:650;color:var(--muted);white-space:nowrap}
+.connection-dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+.connection.pending .connection-dot{background:var(--faint);box-shadow:0 0 0 3px var(--line)}
+.connection.offline{color:var(--danger);border-color:var(--danger-soft)}
+.connection.offline .connection-dot{background:var(--danger);box-shadow:0 0 0 3px var(--danger-soft)}
+.version{font-size:11px;font-weight:600;color:var(--faint);white-space:nowrap}
+.icon-button{width:34px;height:34px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--muted);cursor:pointer;display:grid;place-items:center}
+.icon-button:hover{color:var(--text);border-color:var(--line-strong)}
+.theme-sun{display:block}
+.theme-moon{display:none}
+:root[data-theme="light"] .theme-sun{display:none}
+:root[data-theme="light"] .theme-moon{display:block}
+.demo-banner{display:flex;align-items:center;gap:9px;margin:0 2px 14px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:12px;background:var(--accent-soft);color:var(--muted);font-size:12px;line-height:1.45}
+.demo-badge{flex:0 0 auto;padding:2px 7px;border-radius:6px;background:var(--accent);color:var(--accent-text);font-size:9.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
+
+/* Навигация */
+.tabs{
+  position:sticky;top:0;z-index:20;margin:0 -16px 18px;padding:9px 16px 10px;
+  background:var(--bg);border-bottom:1px solid transparent;
+}
+.tabs.is-stuck{border-bottom-color:var(--line)}
+.tabs-scroll{display:flex;gap:6px;overflow-x:auto;padding:1px 1px 2px;scrollbar-width:none;-ms-overflow-style:none}
+.tabs-scroll::-webkit-scrollbar{display:none}
+.tab{
+  flex:0 0 auto;display:inline-flex;align-items:center;gap:7px;min-height:38px;
+  padding:8px 12px;border:1px solid transparent;border-radius:10px;
+  background:transparent;color:var(--muted);font-size:12.5px;font-weight:650;
+  cursor:pointer;transition:background .15s,color .15s,border-color .15s;
+}
+.tab:hover{color:var(--text);background:var(--surface-2)}
+.tab .icon{width:16px;height:16px;color:var(--faint)}
+.tab.active{background:var(--surface);border-color:var(--line-strong);color:var(--text)}
+.tab.active .icon{color:var(--accent)}
+.subnav-wrap{display:flex;margin:-4px 0 14px;overflow-x:auto;scrollbar-width:none}
+.subnav-wrap::-webkit-scrollbar{display:none}
+.subnav{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:11px;background:var(--surface-2)}
+.subnav button{min-height:32px;padding:6px 12px;border:0;border-radius:8px;background:transparent;color:var(--muted);font-size:12.5px;font-weight:600;white-space:nowrap;cursor:pointer}
+.subnav button:hover{color:var(--text)}
+.subnav button.active{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.16)}
+
+/* Заголовок раздела */
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 2px 12px}
+.section-heading{display:flex;align-items:center;gap:11px;min-width:0}
+.section-icon{width:40px;height:40px;flex:0 0 auto;border-radius:12px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent)}
+.section-icon .icon{width:20px;height:20px}
+.section-kicker{font-size:10px;font-weight:750;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.section-title{margin:1px 0 0;font-size:24px;line-height:1.15;letter-spacing:-.025em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.section-note{margin:3px 0 0;color:var(--muted);font-size:12px;line-height:1.4}
+.count-badge{flex:0 0 auto;padding:5px 9px;border:1px solid var(--line);border-radius:999px;color:var(--faint);font-size:10.5px;font-weight:700;white-space:nowrap}
+
+/* Панели и строки */
+.stack{display:flex;flex-direction:column;gap:12px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.panel+.panel{margin-top:12px}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;padding:10px 15px;border-bottom:1px solid var(--line)}
+.panel-title{font-size:10.5px;font-weight:750;letter-spacing:.11em;text-transform:uppercase;color:var(--faint)}
+.panel-actions{display:flex;align-items:center;gap:7px}
+.field-row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;padding:14px 15px;border-top:1px solid var(--line)}
+.field-row:first-child,.panel-head+.field-row,.panel-head+.form,.panel-head+.empty{border-top:0}
+.field-row.wide{grid-template-columns:minmax(0,1fr)}
+.field-label{font-size:14px;font-weight:600;line-height:1.35;word-break:break-word}
+.field-hint{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.4;word-break:break-word}
+.row-state{display:block;max-height:0;margin-top:0;overflow:hidden;color:var(--ok);font-size:11px;font-weight:650;opacity:0;transition:max-height .18s,opacity .18s,margin .18s}
+.row-state.show{max-height:18px;margin-top:3px;opacity:1}
+.field-control{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
+.field-row.wide .field-control{width:100%;justify-content:flex-start}
+.field-row.is-saving .field-label{opacity:.6}
+
+/* Поля */
+input,select,textarea{
+  width:100%;min-width:0;min-height:42px;padding:9px 12px;
+  border:1px solid var(--line-strong);border-radius:10px;
+  background:var(--input);color:var(--text);outline:none;
+  transition:border-color .15s,box-shadow .15s;
+}
+textarea{min-height:120px;resize:vertical;line-height:1.5;font-family:inherit}
+input::placeholder,textarea::placeholder{color:var(--faint)}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+input:disabled,select:disabled,textarea:disabled,button:disabled{cursor:default;opacity:.45}
+.field-row[data-kind="long"] .input-row{align-items:flex-start}
+input[type=number]{font-variant-numeric:tabular-nums}
+.input-row{display:flex;gap:8px;align-items:center;width:100%}
+.input-wrap{position:relative;flex:1;min-width:0}
+.input-wrap input{padding-right:40px}
+.reveal-btn{position:absolute;right:3px;top:3px;width:34px;height:36px;border:0;border-radius:8px;background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer}
+.reveal-btn:hover{color:var(--text);background:var(--surface-2)}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  min-height:42px;padding:9px 13px;border:1px solid transparent;border-radius:10px;
+  background:var(--accent);color:var(--accent-text);font-size:13px;font-weight:700;
+  cursor:pointer;white-space:nowrap;transition:filter .15s,background .15s;
+}
+.btn:hover{filter:brightness(1.06)}
+.btn.secondary{background:var(--surface-2);border-color:var(--line);color:var(--text);font-weight:600}
+.btn.danger{background:var(--danger-soft);border-color:var(--danger);color:var(--danger)}
+.btn.small{min-height:32px;padding:5px 10px;border-radius:8px;font-size:11.5px}
+.btn.save-btn{min-width:96px}
+.select{position:relative;min-width:170px}
+.select select{appearance:none;padding-right:34px;cursor:pointer}
+.select::after{content:"";position:absolute;right:14px;top:50%;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:translateY(-72%) rotate(45deg);pointer-events:none}
+.switch{
+  display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0;
+  border:0;background:transparent;color:var(--muted);font-size:11.5px;font-weight:700;
+  cursor:pointer;white-space:nowrap;
+}
+.switch-track{position:relative;width:42px;height:24px;flex:0 0 auto;border-radius:999px;background:var(--line-strong);transition:background .18s}
+.switch-track::after{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#c8d5e3;transition:transform .18s,background .18s}
+.switch[aria-checked="true"] .switch-track{background:var(--ok)}
+.switch[aria-checked="true"] .switch-track::after{transform:translateX(18px);background:#fff}
+.switch[aria-checked="true"] .switch-text{color:var(--ok)}
+.switch-text{min-width:24px;text-align:left}
+.stepper{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--line-strong);border-radius:10px;background:var(--input)}
+.stepper button{width:34px;height:34px;border:0;border-radius:8px;background:transparent;color:var(--text);font-size:18px;line-height:1;cursor:pointer}
+.stepper button:hover{background:var(--surface-2)}
+.stepper input{width:82px;min-height:34px;padding:0;border:0;background:transparent;text-align:center;font-weight:650;box-shadow:none}
+.stepper input:focus{box-shadow:none}
+.stepper .unit{padding-right:7px;color:var(--muted);font-size:12px;white-space:nowrap}
+
+/* Выбор модели */
+.model-wrap{position:relative;flex:1;min-width:0}
+.model-wrap input{padding-right:42px}
+.model-open{position:absolute;right:3px;top:3px;width:34px;height:36px;border:0;border-radius:8px;background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer}
+.model-open:hover{color:var(--text);background:var(--surface-2)}
+.model-open .icon{width:15px;height:15px}
+.model-sheet{position:fixed;inset:0;z-index:80;display:flex;align-items:flex-end;justify-content:center;background:rgba(2,7,12,.58);padding:12px 12px calc(12px + env(safe-area-inset-bottom));backdrop-filter:blur(3px)}
+.model-card{width:min(680px,100%);max-height:min(82vh,620px);display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line-strong);border-radius:20px;background:var(--surface);box-shadow:var(--shadow)}
+.model-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:15px 16px 10px}
+.model-card-title{font-size:16px;font-weight:750;letter-spacing:-.01em}
+.model-card-sub{margin-top:2px;color:var(--muted);font-size:11.5px}
+.model-tools{display:flex;gap:7px;padding:0 16px 10px}
+.model-search{position:relative;flex:1;min-width:0}
+.model-search .icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--faint);pointer-events:none}
+.model-search input{min-height:40px;padding-left:34px}
+.model-filter{min-height:40px;padding:7px 11px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--muted);font-size:11.5px;font-weight:700;cursor:pointer;white-space:nowrap}
+.model-filter.active{border-color:var(--ok);background:var(--ok-soft);color:var(--ok)}
+.model-list{flex:1;min-height:80px;overflow:auto;border-top:1px solid var(--line);overscroll-behavior:contain}
+.model-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 16px;border:0;border-top:1px solid var(--line);background:transparent;color:var(--text);text-align:left;cursor:pointer}
+.model-option:first-child{border-top:0}
+.model-option:hover{background:var(--surface-2)}
+.model-option.is-current{background:var(--accent-soft)}
+.model-name{min-width:0;font:12.5px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.model-tags{display:flex;flex:0 0 auto;align-items:center;gap:5px}
+.model-free{padding:2px 6px;border-radius:5px;background:var(--ok-soft);color:var(--ok);font-size:9px;font-weight:800;letter-spacing:.05em}
+.model-paid{padding:2px 6px;border-radius:5px;background:var(--surface-2);color:var(--faint);font-size:9px;font-weight:700}
+.model-check{color:var(--accent);font-size:14px;font-weight:800}
+.model-empty{padding:26px 18px;color:var(--muted);text-align:center;font-size:12.5px;line-height:1.5}
+.model-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;border-top:1px solid var(--line);color:var(--faint);font-size:11px}
+.model-refresh{display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;color:var(--accent);font-size:11.5px;font-weight:650;cursor:pointer;padding:4px 0}
+.model-refresh .icon{width:13px;height:13px}
+
+/* Локальные GGUF */
+.local-list{display:flex;flex-direction:column;border-top:1px solid var(--line)}
+.local-row{padding:11px 15px;border-top:1px solid var(--line)}
+.local-row:first-child{border-top:0}
+.local-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.local-main{min-width:0}
+.local-name{font:12px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.local-meta{display:flex;flex-wrap:wrap;gap:5px 10px;margin-top:4px;color:var(--faint);font-size:10.5px}
+.local-state{flex:0 0 auto;padding:2px 6px;border-radius:5px;background:var(--surface-2);color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.05em}
+.local-state.partial{background:var(--accent-soft);color:var(--accent)}
+.local-state.active{background:var(--ok-soft);color:var(--ok)}
+.local-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+
+/* Hugging Face */
+.hf-tools{padding:12px 15px;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line)}
+.hf-search-row{display:flex;gap:7px}
+.hf-search-row .input-wrap{flex:1}
+.hf-hint{color:var(--muted);font-size:11.5px;line-height:1.45}
+.hf-results{display:flex;flex-direction:column;border-top:1px solid var(--line)}
+.hf-result{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:10px 15px;border:0;border-top:1px solid var(--line);background:transparent;color:var(--text);text-align:left;cursor:pointer}
+.hf-result:first-child{border-top:0}
+.hf-result:hover{background:var(--surface-2)}
+.hf-result.active{background:var(--accent-soft)}
+.hf-result-main{min-width:0}
+.hf-repo{font:12px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.hf-meta{margin-top:3px;color:var(--faint);font-size:10.5px}
+.hf-actions{flex:0 0 auto;display:flex;align-items:center;gap:6px}
+.hf-open{flex:0 0 auto;color:var(--accent);font-size:10.5px;font-weight:700;white-space:nowrap}
+.hf-files{border-top:1px solid var(--line)}
+.hf-file{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 15px;border-top:1px solid var(--line)}
+.hf-file:first-child{border-top:0}
+.hf-file-name{min-width:0;font:11.5px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.hf-file-size{flex:0 0 auto;color:var(--faint);font-size:10.5px}
+.hf-progress{padding:11px 15px;border-top:1px solid var(--line);background:var(--surface-2)}
+.hf-progress-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11.5px;color:var(--muted)}
+.hf-bar{height:6px;margin-top:7px;overflow:hidden;border-radius:999px;background:var(--line-strong)}
+.hf-bar>span{display:block;height:100%;width:0;border-radius:inherit;background:var(--accent);transition:width .2s}
+.hf-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+
+/* MCP */
+.server{padding:14px 15px;border-top:1px solid var(--line)}
+.panel-head+.server,.server:first-child{border-top:0}
+.server-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.server-title{display:flex;align-items:center;gap:7px;min-width:0;font-size:14px;font-weight:650;line-height:1.3;word-break:break-word}
+.server-dot{width:7px;height:7px;flex:0 0 auto;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+.server.is-off .server-dot{background:var(--faint);box-shadow:0 0 0 3px var(--line)}
+.server.is-off .server-title,.server.is-off .command-row,.server.is-off .server-meta{opacity:.55}
+.badge{padding:2px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent);font-size:9px;font-weight:800;letter-spacing:.08em}
+.command-row{display:flex;align-items:flex-start;gap:6px;margin-top:8px}
+.endpoint-cmd{display:block;flex:1;min-width:0;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--muted);font:11.5px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.copy-btn{width:30px;height:30px;flex:0 0 auto;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--muted);display:grid;place-items:center;cursor:pointer}
+.copy-btn:hover{color:var(--text);border-color:var(--line-strong)}
+.copy-btn .icon{width:14px;height:14px}
+.server-meta{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:7px;color:var(--faint);font-size:11px}
+.server-meta code{font:11px ui-monospace,SFMono-Regular,Consolas,monospace}
+.server-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
+.form{padding:14px 15px;border-top:1px solid var(--line);background:var(--surface-2)}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.form-field.full{grid-column:1/-1}
+.form-field label{display:block;margin:0 0 4px 2px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.02em}
+.form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+
+/* Скиллы */
+.skills-toolbar{padding:11px 15px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:9px}
+.skill-search{position:relative}
+.skill-search .icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--faint);pointer-events:none}
+.skill-search input{min-height:38px;padding-left:34px;font-size:12.5px}
+.filter-bar{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}
+.filter-bar::-webkit-scrollbar{display:none}
+.filter-btn{min-height:30px;padding:5px 10px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);font-size:11.5px;font-weight:650;white-space:nowrap;cursor:pointer}
+.filter-btn:hover{color:var(--text)}
+.filter-btn.active{background:var(--surface-2);border-color:var(--line);color:var(--text)}
+.skill-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 15px;border-top:1px solid var(--line);min-height:48px}
+.skill-row:first-child{border-top:0}
+.skill-name{min-width:0;font-size:13px;font-weight:550;line-height:1.35;word-break:break-word}
+.skill-row .switch{min-height:40px}
+.skill-row.is-muted .skill-name{opacity:.55}
+
+/* О программе */
+.about-hero{display:flex;align-items:center;gap:13px;padding:18px 16px;border-bottom:1px solid var(--line)}
+.about-logo{width:52px;height:52px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(150deg,#9bd4ff,var(--accent-strong));color:#06131f;font-size:24px;font-weight:800}
+.about-name{font-size:18px;font-weight:750;letter-spacing:-.02em;line-height:1.2}
+.about-version{margin-top:2px;color:var(--muted);font-size:12px}
+.info-row{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:13px 15px;border-top:1px solid var(--line)}
+.info-row:first-child{border-top:0}
+.info-label{font-size:13px;font-weight:600;white-space:nowrap}
+.info-value{color:var(--muted);font-size:12.5px;text-align:right;line-height:1.45}
+.tip{margin:12px 2px 0;color:var(--muted);font-size:11.5px;line-height:1.5;text-align:center}
+
+/* Пустые состояния и ошибки */
+.empty{display:flex;flex-direction:column;align-items:center;gap:7px;padding:28px 18px;color:var(--muted);text-align:center;font-size:13px;line-height:1.5}
+.empty-icon{display:grid;place-items:center;color:var(--faint)}
+.empty-icon .icon{width:26px;height:26px}
+.error-card{margin:18px auto;max-width:440px;padding:24px 20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow);text-align:center}
+.error-icon{width:46px;height:46px;margin:0 auto 12px;border-radius:14px;display:grid;place-items:center;background:var(--danger-soft);color:var(--danger)}
+.error-icon .icon{width:22px;height:22px}
+.error-card h2{margin:0 0 6px;font-size:18px;letter-spacing:-.02em}
+.error-card p{margin:0 0 16px;color:var(--muted);font-size:13px;line-height:1.5}
+
+/* Загрузка */
+.loading{padding-top:2px}
+.skeleton{position:relative;overflow:hidden;border-radius:10px;background:var(--surface-2)}
+.skeleton::after{content:"";position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,rgba(255,255,255,.06),transparent);animation:shimmer 1.4s infinite}
+.skeleton-title{width:42%;height:30px;margin:0 2px 14px}
+.skeleton-panel{padding:4px 15px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.skeleton-row{height:54px;margin:12px 0;border-radius:11px}
+@keyframes shimmer{to{transform:translateX(100%)}}
+
+/* Уведомление */
+.toast{
+  position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));z-index:60;
+  display:flex;align-items:center;gap:8px;max-width:min(92vw,520px);
+  padding:10px 14px;border:1px solid var(--line-strong);border-radius:12px;
+  background:var(--surface);color:var(--text);box-shadow:var(--shadow);
+  font-size:12.5px;line-height:1.4;text-align:left;opacity:0;pointer-events:none;
+  transform:translate(-50%,10px);transition:opacity .18s,transform .18s;
+}
+.toast .icon{width:16px;height:16px;color:var(--ok)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast.bad{border-color:var(--danger)}
+.toast.bad .icon{color:var(--danger)}
+.footer{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:22px;color:var(--faint);font-size:11px;text-align:center}
+.footer-dot{width:4px;height:4px;border-radius:50%;background:var(--ok)}
+
+@media(max-width:560px){
+  .app{padding-left:13px;padding-right:13px}
+  .tabs{margin-left:-13px;margin-right:-13px;padding-left:13px;padding-right:13px}
+  .logo{width:43px;height:43px;border-radius:13px;font-size:21px}
+  h1{font-size:20px}
+  .version{display:none}
+  .subtitle{font-size:11.5px}
+  .section-title{font-size:22px}
+  .field-row{grid-template-columns:minmax(0,1fr);gap:10px}
+  .field-row[data-kind="bool"]{grid-template-columns:minmax(0,1fr) auto;gap:12px}
+  .field-control{justify-content:flex-start;width:100%}
+  .field-row[data-kind="bool"] .field-control{width:auto;justify-content:flex-end}
+  .select,.stepper{width:100%}
+  .stepper input{flex:1}
+  .form-grid{grid-template-columns:1fr}
+  .info-row{flex-direction:column;gap:4px}
+  .info-value{text-align:left}
+}
+@media(hover:hover){
+  .field-row:hover{background:rgba(255,255,255,.012)}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" aria-hidden="true" style="position:absolute">
+  <defs>
+    <symbol id="i-spark" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.2l1.7 4.8 4.8 1.7-4.8 1.7L12 16.2l-1.7-4.8L5.5 9.7l4.8-1.7z"/><path d="M18.5 15.5l.7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7z"/></g></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M9 21h6"/></g></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19zM15 9.5a3.5 3.5 0 0 1 0 5M17.5 6.5a7.5 7.5 0 0 1 0 11"/></g></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5H11l-1 8.5L19 10.5h-6.5z"/></g></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.2-5 4.1 10 2.2-5H21"/></g></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 5.3a5.2 5.2 0 0 0-7.4 0L12 6.7l-1.4-1.4a5.2 5.2 0 0 0-7.4 7.4L12 21.5l8.8-8.8a5.2 5.2 0 0 0 0-7.4z"/></g></symbol>
+    <symbol id="i-music" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></g></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2.5 13.3 21.5l-2.6-8.2-8.2-2.6zM21.5 2.5 10.7 13.3"/></g></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M18.5 7H20M4 17h1.5M11 17h9"/><circle cx="15.5" cy="7" r="2.2"/><circle cx="8" cy="17" r="2.2"/></g></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M6.5 8h11v4a5.5 5.5 0 0 1-11 0zM12 17.5V21"/></g></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h14v16H6a2 2 0 0 0-2 2zM4 21a2 2 0 0 1 2-2h14M8 7h8"/></g></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.5h.01"/></g></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4.5 4.5L19 7"/></g></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2.7 20h18.6zM12 9v5"/><path d="M12 17h.01"/></g></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></g></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6.5 7l1 13h9l1-13M10 11v5M14 11v5"/></g></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10zM14 6l4 4"/></g></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></g></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></g></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18M10.6 6.1A9.7 9.7 0 0 1 12 6c6 0 9.5 6 9.5 6a16 16 0 0 1-3.3 3.9M6.4 6.7A16 16 0 0 0 2.5 12S6 18 12 18c1.4 0 2.6-.3 3.8-.8"/></g></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></g></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></g></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4.5-4.5M12 15 7.5 10.5M4 20h16"/></g></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.3 9A7 7 0 0 0 6 6.5L4 11m16 2-2 4.5A7 7 0 0 1 5.7 15"/></g></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></g></symbol>
+  </defs>
+</svg>
+<div class="app">
+  <header class="top">
+    <div class="identity">
+      <div class="logo" aria-hidden="true">N</div>
+      <div class="identity-text">
+        <div class="eyebrow">Настройки</div>
+        <h1 id="title">Немуся</h1>
+        <p class="subtitle" id="subtitle">Панель управления ассистентом</p>
+      </div>
+    </div>
+    <div class="top-meta">
+      <div class="connection pending" id="connection">
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span id="connection-text">Загрузка</span>
+      </div>
+      <span class="version" id="version"></span>
+      <button class="icon-button preview-only" id="theme-toggle" type="button"
+              aria-label="Сменить тему" title="Сменить тему" hidden>
+        <svg class="icon theme-sun" aria-hidden="true"><use href="#i-sun"></use></svg>
+        <svg class="icon theme-moon" aria-hidden="true"><use href="#i-moon"></use></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="demo-banner" id="demo-banner" hidden>
+    <span class="demo-badge">Демо</span>
+    <span>Предпросмотр интерфейса. Изменения не сохраняются.</span>
+  </div>
+
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Разделы настроек"></nav>
+
+  <main id="content" role="tabpanel">
+    <div class="loading" aria-label="Загрузка настроек">
+      <div class="skeleton skeleton-title"></div>
+      <div class="skeleton-panel">
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <span class="footer-dot" aria-hidden="true"></span>
+    Немуся · панель управления
+  </footer>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+(() => {
+  "use strict";
+
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  const demoMode = !tg || !tg.initData;
+  const content = document.getElementById("content");
+  const tabs = document.getElementById("tabs");
+  const toastEl = document.getElementById("toast");
+  const titleEl = document.getElementById("title");
+  const subtitleEl = document.getElementById("subtitle");
+  const versionEl = document.getElementById("version");
+  const connectionEl = document.getElementById("connection");
+  const connectionText = document.getElementById("connection-text");
+  const demoBanner = document.getElementById("demo-banner");
+  const themeButton = document.getElementById("theme-toggle");
+
+  const GROUPS = [
+    { id: "model", label: "Модель", icon: "spark", sections: ["llm"] },
+    { id: "voice", label: "Голос", icon: "mic", sections: ["voice", "tts"] },
+    { id: "character", label: "Характер", icon: "heart", sections: ["character"] },
+    { id: "auto", label: "Авто", icon: "bolt", sections: ["autopilot", "healing"] },
+    { id: "channels", label: "Каналы", icon: "send", sections: ["telegram", "spotify"] },
+    { id: "tools", label: "Инструменты", icon: "sliders", sections: ["tools", "mcp", "skills"] },
+    { id: "about", label: "О программе", icon: "info", sections: ["about"] },
+  ];
+  const SECTION_ICONS = {
+    llm: "spark", voice: "mic", tts: "volume", character: "heart",
+    autopilot: "bolt", healing: "pulse",
+    spotify: "music", telegram: "send", tools: "sliders", mcp: "plug",
+    skills: "book", about: "info",
+  };
+
+  let state = null;
+  let groups = [];
+  let current = localStorage.getItem("nemus.settings.section") || "llm";
+  let currentGroup = "model";
+  const lastSectionByGroup = {};
+  let editingMcp = -1;
+  let addingMcp = false;
+  let busy = false;
+  let toastTimer = 0;
+  let skillsView = null;
+  let skillFilter = "all";
+  let themeOverride = demoMode ? (localStorage.getItem("nemus.preview.theme") || "") : "";
+  const modelCache = new Map();
+  let modelSheet = null;
+  let localLoading = false;
+  let localBusy = false;
+  let localState = { models: [], loaded: false, status: "" };
+  let hfBusy = false;
+  let hfDownload = null;
+  let hfPollTimer = 0;
+  let hfState = {
+    query: "",
+    repo: "",
+    files: [],
+    selected: "",
+    status: "",
+    results: [],
+    searchDone: false,
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const make = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  };
+  const icon = (name, className) => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "icon" + (className ? " " + className : ""));
+    svg.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", "#i-" + name);
+    svg.append(use);
+    return svg;
+  };
+  const haptic = (style) => {
+    try {
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred(style || "light");
+    } catch (_) { /* необязательно */ }
+  };
+  const plural = (n, one, few, many) => {
+    const value = Math.abs(n) % 100;
+    const tail = value % 10;
+    if (value > 10 && value < 20) return many;
+    if (tail > 1 && tail < 5) return few;
+    if (tail === 1) return one;
+    return many;
+  };
+  const fmtBytes = (value) => {
+    let size = Math.max(0, Number(value) || 0);
+    for (const unit of ["Б", "КиБ", "МиБ", "ГиБ"]) {
+      if (size < 1024 || unit === "ГиБ") {
+        return unit === "Б" ? Math.round(size) + " Б" : size.toFixed(1) + " " + unit;
+      }
+      size /= 1024;
+    }
+    return size.toFixed(1) + " ГиБ";
+  };
+  const providerLabel = (name) => {
+    const labels = (state && state.models && state.models.provider_labels) || {};
+    return labels[name] || name || "провайдер";
+  };
+  const num = (value) => new Intl.NumberFormat("ru-RU").format(Number(value) || 0);
+
+  function applyTheme() {
+    const systemLight = window.matchMedia
+      ? window.matchMedia("(prefers-color-scheme: light)").matches
+      : false;
+    let light = tg ? tg.colorScheme === "light" : systemLight;
+    if (themeOverride) light = themeOverride === "light";
+    document.documentElement.dataset.theme = light ? "light" : "dark";
+    const themeColor = light ? "#f3f6fa" : "#0c1118";
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", themeColor);
+    if (!tg) return;
+    const params = tg.themeParams || {};
+    const root = document.documentElement.style;
+    const map = {
+      bg_color: "--bg",
+      secondary_bg_color: "--surface",
+      text_color: "--text",
+      hint_color: "--muted",
+      link_color: "--accent",
+      button_color: "--accent",
+      button_text_color: "--accent-text",
+      destructive_text_color: "--danger",
+    };
+    for (const key of Object.keys(map)) {
+      if (params[key]) root.setProperty(map[key], params[key]);
+    }
+    try {
+      if (tg.setHeaderColor) tg.setHeaderColor(params.bg_color || themeColor);
+      if (tg.setBackgroundColor) tg.setBackgroundColor(params.bg_color || themeColor);
+    } catch (_) { /* старые клиенты Telegram */ }
+  }
+
+  function setConnection(text, online) {
+    connectionText.textContent = text;
+    connectionEl.classList.toggle("offline", online === false);
+    connectionEl.classList.toggle("pending", online === "pending");
+  }
+
+  function toast(message, bad) {
+    toastEl.replaceChildren(icon(bad ? "alert" : "check"), make("span", null, message || ""));
+    toastEl.classList.toggle("bad", Boolean(bad));
+    toastEl.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("show"), 3000);
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.append(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+      }
+      toast("Команда скопирована");
+    } catch (_) {
+      toast("Не удалось скопировать", true);
+    }
+  }
+
+  async function api(path, options, timeoutMs) {
+    const initData = (tg && tg.initData) || "";
+    const headers = Object.assign(
+      { "Content-Type": "application/json", "X-Telegram-Init-Data": initData },
+      (options && options.headers) || {}
+    );
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
+    let response;
+    try {
+      response = await fetch(path, Object.assign({ cache: "no-store", signal: controller.signal }, options, { headers }));
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        throw new Error("Бот не ответил вовремя. Проверь, что он запущен.");
+      }
+      throw new Error("Нет связи с ботом. Проверь, что бот запущен.");
+    } finally {
+      clearTimeout(timer);
+    }
+    let data = {};
+    try { data = await response.json(); } catch (_) { /* пустой ответ */ }
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || data.message || ("Ошибка " + response.status));
+    }
+    return data;
+  }
+
+  function loadingMarkup() {
+    const box = make("div", "loading");
+    box.append(make("div", "skeleton skeleton-title"));
+    const panel = make("div", "skeleton-panel");
+    for (let i = 0; i < 4; i += 1) panel.append(make("div", "skeleton skeleton-row"));
+    box.append(panel);
+    return box;
+  }
+
+  function showError(message) {
+    setConnection("Нет связи", false);
+    const card = make("div", "error-card");
+    const errorIcon = make("div", "error-icon");
+    errorIcon.append(icon("alert"));
+    card.append(errorIcon);
+    card.append(make("h2", null, "Не удалось загрузить"));
+    card.append(make("p", null, message));
+    const retry = make("button", "btn", "Попробовать снова");
+    retry.type = "button";
+    retry.addEventListener("click", load);
+    card.append(retry);
+    content.replaceChildren(card);
+  }
+
+  async function load() {
+    content.replaceChildren(loadingMarkup());
+    setConnection("Загрузка", "pending");
+    try {
+      state = await api("/api/settings");
+      try {
+        const health = await api("/api/health");
+        if (!Array.isArray(health.features) || !health.features.includes("models")) {
+          toast("Бот запущен со старым кодом — перезапусти его", true);
+        }
+      } catch (_) { /* старый /api/health тоже подойдёт */ }
+      titleEl.textContent = state.assistant || "Немуся";
+      subtitleEl.textContent = "Настройки ассистента";
+      versionEl.textContent = "v" + (state.version || "");
+      document.title = (state.assistant || "Немуся") + " — настройки";
+      buildGroups();
+      if (!sectionById(current)) current = (state.sections[0] || {}).id || "llm";
+      currentGroup = (groupOf(current) || groups[0] || {}).id || "model";
+      lastSectionByGroup[currentGroup] = current;
+      setConnection("На связи", true);
+      renderTabs();
+      render();
+      prefetchModels();
+      loadLocalModels();
+      pollHfDownload();
+    } catch (error) {
+      showError(error.message);
+    }
+  }
+
+  async function prefetchModels() {
+    const providerField = fieldById("llm", "provider");
+    if (!providerField || !providerField.value) return;
+    try {
+      await fetchModels(providerField.value, false);
+    } catch (_) { /* каталог загрузится при открытии списка */ }
+  }
+
+  function sectionById(id) {
+    return state && state.sections ? state.sections.find((item) => item.id === id) : null;
+  }
+
+  function buildGroups() {
+    const known = new Set();
+    for (const group of GROUPS) for (const id of group.sections) known.add(id);
+    const extra = state.sections.filter((item) => !known.has(item.id)).map((item) => item.id);
+    groups = GROUPS.map((group) => ({
+      ...group,
+      sections: group.sections.filter((id) => sectionById(id)),
+    })).filter((group) => group.sections.length);
+    if (extra.length) {
+      groups.push({ id: "more", label: "Ещё", icon: "grid", sections: extra });
+    }
+  }
+
+  function groupOf(sectionId) {
+    return groups.find((group) => group.sections.includes(sectionId)) || groups[0] || null;
+  }
+
+  function fieldById(sectionId, fieldId) {
+    const section = sectionById(sectionId);
+    return section && section.fields ? section.fields.find((item) => item.id === fieldId) : null;
+  }
+
+  function renderTabs() {
+    tabs.replaceChildren();
+    if (!state || !groups.length) return;
+    const scroll = make("div", "tabs-scroll");
+    scroll.setAttribute("role", "tablist");
+    scroll.setAttribute("aria-label", "Разделы настроек");
+    for (const group of groups) {
+      const active = group.id === currentGroup;
+      const button = make("button", "tab" + (active ? " active" : ""));
+      button.type = "button";
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.dataset.group = group.id;
+      button.append(icon(group.icon));
+      button.append(make("span", null, group.label));
+      button.addEventListener("click", () => switchGroup(group.id));
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        event.preventDefault();
+        const step = event.key === "ArrowRight" ? 1 : -1;
+        const index = groups.findIndex((item) => item.id === group.id);
+        const next = groups[(index + step + groups.length) % groups.length];
+        switchGroup(next.id);
+        requestAnimationFrame(() => {
+          const target = tabs.querySelector('[data-group="' + next.id + '"]');
+          if (target) target.focus();
+        });
+      });
+      scroll.append(button);
+    }
+    tabs.append(scroll);
+    requestAnimationFrame(() => {
+      const active = scroll.querySelector(".tab.active");
+      if (active) active.scrollIntoView({ block: "nearest", inline: "center" });
+    });
+  }
+
+  function switchGroup(id) {
+    const group = groups.find((item) => item.id === id);
+    if (!group) return;
+    const remembered = lastSectionByGroup[id];
+    const target = remembered && group.sections.includes(remembered) ? remembered : group.sections[0];
+    if (target === current) {
+      currentGroup = id;
+      renderTabs();
+      return;
+    }
+    switchSection(target);
+  }
+
+  function switchSection(id) {
+    if (id === current) return;
+    if (busy) {
+      toast("Сначала дождись сохранения");
+      return;
+    }
+    const group = groupOf(id);
+    if (!group) return;
+    current = id;
+    currentGroup = group.id;
+    lastSectionByGroup[group.id] = id;
+    editingMcp = -1;
+    addingMcp = false;
+    skillsView = null;
+    localStorage.setItem("nemus.settings.section", current);
+    renderTabs();
+    render();
+    window.scrollTo({ top: 0, behavior: "auto" });
+    haptic("light");
+  }
+
+  function subnav(section) {
+    const group = groupOf(section.id);
+    if (!group || group.sections.length < 2) return null;
+    const wrap = make("div", "subnav-wrap");
+    const nav = make("div", "subnav");
+    nav.setAttribute("role", "tablist");
+    nav.setAttribute("aria-label", group.label);
+    for (const id of group.sections) {
+      const item = sectionById(id);
+      if (!item) continue;
+      const active = id === section.id;
+      const button = make("button", active ? "active" : "", item.title);
+      button.type = "button";
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.addEventListener("click", () => switchSection(id));
+      nav.append(button);
+    }
+    wrap.append(nav);
+    return wrap;
+  }
+
+  function setRowDisabled(row, disabled) {
+    row.querySelectorAll("input,select,textarea,button").forEach((node) => { node.disabled = disabled; });
+  }
+
+  function flash(row, text) {
+    const label = row.querySelector(".row-state");
+    if (!label) return;
+    label.textContent = text || "Сохранено";
+    label.classList.add("show");
+    clearTimeout(label._hideTimer);
+    label._hideTimer = setTimeout(() => label.classList.remove("show"), 1800);
+  }
+
+  function fieldIsDirty(row) {
+    const field = row._field;
+    const input = row.querySelector("input, textarea");
+    if (!field || !input) return false;
+    return field.secret ? input.value.trim().length > 0 : input.value !== String(field.value ?? "");
+  }
+
+  function updateSaveButton(row) {
+    const button = row.querySelector(".save-btn");
+    if (!button || button.dataset.phase === "saving" || button.dataset.phase === "done") return;
+    button.disabled = row.classList.contains("is-saving") || !fieldIsDirty(row);
+  }
+
+  function setSavePhase(row, phase) {
+    const button = row.querySelector(".save-btn");
+    if (!button) return;
+    clearTimeout(button._phaseTimer);
+    button.dataset.phase = phase;
+    if (phase === "saving") {
+      button.textContent = "Сохраняю…";
+      button.disabled = true;
+    } else if (phase === "done") {
+      button.textContent = "Сохранено";
+      button.disabled = true;
+      button._phaseTimer = setTimeout(() => {
+        button.dataset.phase = "idle";
+        button.textContent = "Сохранить";
+        updateSaveButton(row);
+      }, 1300);
+    } else {
+      button.dataset.phase = "idle";
+      button.textContent = "Сохранить";
+      updateSaveButton(row);
+    }
+  }
+
+  function sectionHead(section) {
+    const head = make("div", "section-head");
+    const heading = make("div", "section-heading");
+    const iconBox = make("div", "section-icon");
+    iconBox.append(icon(SECTION_ICONS[section.id] || "grid"));
+    heading.append(iconBox);
+    const text = make("div");
+    const group = groupOf(section.id);
+    if (group) text.append(make("div", "section-kicker", group.label));
+    text.append(make("h2", "section-title", section.title));
+    if (section.note) text.append(make("p", "section-note", section.note));
+    heading.append(text);
+    head.append(heading);
+    let count = 0;
+    if (section.id === "skills" && state.skills) count = (state.skills.entries || []).length;
+    else if (section.id === "mcp" && state.mcp) count = (state.mcp.servers || []).length;
+    else count = (section.fields || []).length;
+    if (count) {
+      head.append(make("span", "count-badge", count + " " + plural(count, "пункт", "пункта", "пунктов")));
+    }
+    return head;
+  }
+
+  async function fetchModels(provider, force) {
+    if (!provider) throw new Error("Сначала выбери провайдера.");
+    if (demoMode) {
+      return {
+        provider,
+        live: false,
+        current: "",
+        models: [
+          { id: "gemini/gemini-3.5-flash", free: true },
+          { id: "gemini/gemini-3.1-pro-preview", free: false },
+          { id: "openrouter/google/gemma-4-31b-it:free", free: true },
+          { id: "openrouter/anthropic/claude-sonnet-4.6", free: false },
+        ],
+      };
+    }
+    if (!force && modelCache.has(provider)) return modelCache.get(provider);
+    const suffix = force ? "&refresh=1" : "";
+    const data = await api(
+      "/api/models?provider=" + encodeURIComponent(provider) + suffix
+    );
+    modelCache.set(provider, data);
+    return data;
+  }
+
+  function closeModelSheet() {
+    if (!modelSheet) return;
+    modelSheet.remove();
+    modelSheet = null;
+  }
+
+  function openModelSheet(field, row, input) {
+    closeModelSheet();
+    const providerField = fieldById("llm", "provider");
+    const provider = (providerField && providerField.value) || "";
+    let data = null;
+    let loading = true;
+    let error = "";
+    let needle = "";
+    let freeOnly = false;
+
+    const overlay = make("div", "model-sheet");
+    const card = make("div", "model-card");
+    overlay.append(card);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeModelSheet();
+    });
+
+    const head = make("div", "model-card-head");
+    const headText = make("div");
+    headText.append(make("div", "model-card-title", "Выбор модели"));
+    headText.append(make("div", "model-card-sub", providerLabel(provider)));
+    const close = make("button", "icon-button");
+    close.type = "button";
+    close.setAttribute("aria-label", "Закрыть");
+    close.append(icon("x"));
+    close.addEventListener("click", closeModelSheet);
+    head.append(headText, close);
+    card.append(head);
+
+    const tools = make("div", "model-tools");
+    const searchWrap = make("div", "model-search");
+    searchWrap.append(icon("search"));
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "Поиск по названию…";
+    search.autocomplete = "off";
+    search.setAttribute("aria-label", "Поиск модели");
+    searchWrap.append(search);
+    const freeButton = make("button", "model-filter", "Бесплатные");
+    freeButton.type = "button";
+    freeButton.addEventListener("click", () => {
+      freeOnly = !freeOnly;
+      freeButton.classList.toggle("active", freeOnly);
+      freeButton.setAttribute("aria-pressed", freeOnly ? "true" : "false");
+      draw();
+    });
+    tools.append(searchWrap, freeButton);
+    card.append(tools);
+
+    const list = make("div", "model-list");
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "Модели");
+    card.append(list);
+    const foot = make("div", "model-foot");
+    const count = make("span");
+    const refresh = make("button", "model-refresh");
+    refresh.type = "button";
+    refresh.append(icon("refresh"), make("span", null, "Обновить"));
+    refresh.addEventListener("click", () => load(true));
+    foot.append(count, refresh);
+    card.append(foot);
+
+    function draw() {
+      list.replaceChildren();
+      if (loading) {
+        const box = make("div", "model-empty");
+        box.append(make("div", null, "Загружаю список моделей…"));
+        list.append(box);
+        count.textContent = "";
+        refresh.disabled = true;
+        return;
+      }
+      refresh.disabled = false;
+      if (error) {
+        const box = make("div", "model-empty");
+        box.append(make("div", null, error));
+        const retry = make("button", "btn secondary small", "Повторить");
+        retry.type = "button";
+        retry.addEventListener("click", () => load(false));
+        box.append(retry);
+        list.append(box);
+        count.textContent = "";
+        return;
+      }
+      const models = (data && data.models) || [];
+      const query = needle.trim().toLowerCase();
+      const visible = models.filter((item) => {
+        if (freeOnly && !item.free) return false;
+        return !query || String(item.id).toLowerCase().includes(query);
+      });
+      if (!visible.length) {
+        const box = make("div", "model-empty");
+        if (!models.length && provider === "llama_cpp") {
+          box.append(make("div", null, "Локальных GGUF пока нет."));
+          const toHf = make("button", "btn secondary small", "Скачать модель");
+          toHf.type = "button";
+          toHf.addEventListener("click", () => {
+            closeModelSheet();
+            const target = document.getElementById("hf-panel");
+            if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+          box.append(toHf);
+        } else {
+          box.append(make("div", null, "Ничего не нашлось. Можно ввести название вручную."));
+        }
+        list.append(box);
+      }
+      for (const item of visible) {
+        const option = make(
+          "button",
+          "model-option" + (item.id === input.value ? " is-current" : "")
+        );
+        option.type = "button";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", item.id === input.value ? "true" : "false");
+        const name = make("span", "model-name", item.id);
+        const tags = make("span", "model-tags");
+        tags.append(
+          make("span", item.free ? "model-free" : "model-paid", item.free ? "FREE" : "PAID")
+        );
+        if (item.id === input.value) tags.append(make("span", "model-check", "✓"));
+        option.append(name, tags);
+        option.addEventListener("click", () => {
+          const changed = input.value !== item.id;
+          input.value = item.id;
+          updateSaveButton(row);
+          closeModelSheet();
+          haptic("light");
+          if (changed) saveField(field, item.id, row);
+        });
+        list.append(option);
+      }
+      const source = data && data.live ? "живой каталог" : "встроенный список";
+      count.textContent = visible.length + " из " + models.length + " · " + source;
+    }
+
+    async function load(force) {
+      loading = true;
+      error = "";
+      draw();
+      try {
+        data = await fetchModels(provider, force);
+      } catch (exc) {
+        error = exc.message;
+      } finally {
+        loading = false;
+        draw();
+      }
+    }
+
+    search.addEventListener("input", () => {
+      needle = search.value;
+      draw();
+    });
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape") closeModelSheet();
+      },
+      { once: true }
+    );
+    document.body.append(overlay);
+    modelSheet = overlay;
+    draw();
+    load(false);
+    setTimeout(() => search.focus(), 50);
+  }
+
+  function fieldRow(section, field) {
+    const inputId = "f_" + section.id + "_" + field.id.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const isModel = section.id === "llm" && field.id === "model";
+    const wide = field.kind === "text" || field.kind === "long" || field.kind === "ids";
+    const row = make("div", "field-row" + (wide ? " wide" : ""));
+    row.dataset.field = field.id;
+    row.dataset.kind = field.kind;
+    row._field = field;
+
+    const labelBox = make("div", "field-label-box");
+    const label = make(wide ? "label" : "div", "field-label", field.label);
+    if (wide) label.htmlFor = inputId;
+    labelBox.append(label);
+    const hint = field.secret
+      ? "Хранится в keyring. Оставь пустым, чтобы не менять."
+      : (field.hint || (isModel ? "Список — живой каталог провайдера; можно ввести своё название." : ""));
+    if (hint) labelBox.append(make("div", "field-hint", hint));
+    labelBox.append(make("span", "row-state"));
+    row.append(labelBox);
+
+    const control = make("div", "field-control");
+    row.append(control);
+
+    if (field.kind === "bool") {
+      const button = make("button", "switch");
+      button.type = "button";
+      button.setAttribute("role", "switch");
+      button.setAttribute("aria-checked", field.bool ? "true" : "false");
+      button.setAttribute("aria-label", field.label);
+      button.append(make("span", "switch-text", field.bool ? "Включено" : "Выключено"));
+      button.append(make("span", "switch-track"));
+      button.addEventListener("click", () => saveField(field, field.bool ? "false" : "true", row));
+      control.append(button);
+      return row;
+    }
+
+    if (field.kind === "choice") {
+      const wrap = make("div", "select");
+      const select = document.createElement("select");
+      select.id = inputId;
+      select.setAttribute("aria-label", field.label);
+      const choices = (field.choices || []).slice();
+      if (!choices.includes(field.value)) choices.unshift(field.value);
+      for (const choice of choices) {
+        const option = document.createElement("option");
+        option.value = choice;
+        option.textContent = section.id === "llm" && field.id === "provider"
+          ? providerLabel(choice) : choice;
+        option.selected = choice === field.value;
+        select.append(option);
+      }
+      select.addEventListener("change", () => saveField(field, select.value, row));
+      wrap.append(select);
+      control.append(wrap);
+      return row;
+    }
+
+    if (field.kind === "step" || field.kind === "pct") {
+      const stepper = make("div", "stepper");
+      const minus = make("button", null, "−");
+      minus.type = "button";
+      minus.setAttribute("aria-label", "Уменьшить");
+      const input = document.createElement("input");
+      input.type = "number";
+      input.id = inputId;
+      input.setAttribute("aria-label", field.label);
+      input.inputMode = "decimal";
+      input.min = String(field.minimum);
+      input.max = String(field.maximum);
+      input.step = String(field.step || 1);
+      input.value = String(parseFloat(field.value) || 0);
+      const plus = make("button", null, "+");
+      plus.type = "button";
+      plus.setAttribute("aria-label", "Увеличить");
+      const commit = () => saveField(field, input.value, row);
+      const bump = (direction) => {
+        const step = Number(field.step) || 1;
+        const min = Number(field.minimum);
+        const max = Number(field.maximum);
+        let next = (Number(input.value) || 0) + direction * step;
+        next = Math.max(min, Math.min(max, next));
+        next = Math.round(next * 1000) / 1000;
+        input.value = String(next);
+        commit();
+      };
+      minus.addEventListener("click", () => bump(-1));
+      plus.addEventListener("click", () => bump(1));
+      input.addEventListener("change", commit);
+      stepper.append(minus, input);
+      if (field.unit) stepper.append(make("span", "unit", field.unit));
+      stepper.append(plus);
+      control.append(stepper);
+      return row;
+    }
+
+    const inputRow = make("div", "input-row");
+    const inputWrap = make("div", isModel ? "model-wrap" : "input-wrap");
+    const isLong = field.kind === "long";
+    const input = document.createElement(isLong ? "textarea" : "input");
+    input.id = inputId;
+    if (isLong) {
+      input.rows = 6;
+    } else {
+      input.type = field.secret ? "password" : "text";
+    }
+    input.value = field.secret ? "" : String(field.value ?? "");
+    input.placeholder = field.secret
+      ? (field.has_value ? "••••••  (не менять)" : "не задан")
+      : (isModel
+        ? "Выбери из списка или введи вручную"
+        : (field.kind === "ids" ? "123456789, 987654321" : ""));
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.setAttribute("aria-label", field.label);
+    inputWrap.append(input);
+    if (field.secret) {
+      const reveal = make("button", "reveal-btn");
+      reveal.type = "button";
+      reveal.setAttribute("aria-label", "Показать значение");
+      reveal.append(icon("eye"));
+      reveal.addEventListener("click", () => {
+        const shown = input.type === "text";
+        input.type = shown ? "password" : "text";
+        reveal.replaceChildren(icon(shown ? "eye" : "eye-off"));
+        reveal.setAttribute("aria-label", shown ? "Показать значение" : "Скрыть значение");
+      });
+      inputWrap.append(reveal);
+    }
+    if (isModel) {
+      const open = make("button", "model-open");
+      open.type = "button";
+      open.setAttribute("aria-label", "Выбрать модель из списка");
+      open.setAttribute("aria-haspopup", "listbox");
+      open.append(icon("chevron"));
+      open.addEventListener("click", () => openModelSheet(field, row, input));
+      inputWrap.append(open);
+    }
+    const save = make("button", "btn save-btn", "Сохранить");
+    save.type = "button";
+    save.disabled = true;
+    const commit = () => {
+      if (field.secret && !input.value.trim()) {
+        toast("Секрет не изменён");
+        return;
+      }
+      if (!fieldIsDirty(row)) return;
+      saveField(field, input.value, row);
+    };
+    save.addEventListener("click", commit);
+    input.addEventListener("input", () => updateSaveButton(row));
+    if (!isLong) {
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        }
+      });
+    }
+    inputRow.append(inputWrap, save);
+    control.append(inputRow);
+    return row;
+  }
+
+  function renderFields(section) {
+    const panel = make("div", "panel");
+    if (!section.fields || !section.fields.length) {
+      panel.append(make("div", "empty", "В этом разделе нет параметров."));
+      return panel;
+    }
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Параметры"));
+    panel.append(head);
+    const advanced = section.id === "character"
+      ? fieldById("character", "ch_advanced") : null;
+    for (const field of section.fields) {
+      if (section.id === "character" && field.id === "ch_prompt"
+          && !(advanced && advanced.bool)) continue;
+      panel.append(fieldRow(section, field));
+    }
+    return panel;
+  }
+
+  async function loadLocalModels(force) {
+    if (demoMode) {
+      localState = { models: [], loaded: true, status: "Предпросмотр." };
+      return;
+    }
+    if (localLoading) return;
+    localLoading = true;
+    try {
+      const data = await api("/api/models/local");
+      localState.models = data.models || [];
+      localState.loaded = true;
+      localState.status = "";
+    } catch (error) {
+      localState.status = error.message;
+      localState.loaded = true;
+    } finally {
+      localLoading = false;
+      if (state && current === "llm") render({ keepScroll: true });
+    }
+  }
+
+  async function localAction(action, item) {
+    if (demoMode) {
+      toast("Предпросмотр: изменения не сохраняются");
+      return;
+    }
+    if (localBusy) return;
+    if (action === "delete" && !confirm("Удалить " + item.filename + "?")) return;
+    localBusy = true;
+    try {
+      const data = await api("/api/models/" + action, {
+        method: "POST",
+        body: JSON.stringify({ model: item.model }),
+      });
+      if (data.settings) state = data.settings;
+      toast(data.message || "Готово");
+      haptic("light");
+      if (action === "resume") {
+        hfDownload = data.download || hfDownload;
+        pollHfDownload();
+      }
+      if (action === "use") modelCache.delete("llama_cpp");
+      localState.loaded = false;
+      await loadLocalModels(true);
+    } catch (error) {
+      toast(error.message, true);
+      haptic("rigid");
+    } finally {
+      localBusy = false;
+    }
+  }
+
+  function localPanel() {
+    const panel = make("div", "panel");
+    panel.id = "local-panel";
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Локальные GGUF"));
+    const completed = localState.models.filter((item) => !item.partial).length;
+    const partial = localState.models.filter((item) => item.partial).length;
+    if (localState.loaded) {
+      head.append(
+        make("span", "count-badge", completed + (partial ? " + " + partial + " част." : ""))
+      );
+    }
+    panel.append(head);
+    if (!localState.loaded || localLoading) {
+      panel.append(make("div", "empty", "Смотрю папку локальных моделей…"));
+      return panel;
+    }
+    if (localState.status) {
+      panel.append(make("div", "empty", localState.status));
+      return panel;
+    }
+    if (!localState.models.length) {
+      panel.append(make("div", "empty", "Пока нет .gguf. Скачай модель ниже — она появится здесь."));
+      return panel;
+    }
+    const list = make("div", "local-list");
+    for (const item of localState.models) {
+      const row = make("div", "local-row");
+      const top = make("div", "local-head");
+      const main = make("div", "local-main");
+      main.append(make("div", "local-name", item.filename));
+      const meta = make("div", "local-meta");
+      meta.append(make("span", null, fmtBytes(item.size)));
+      if (item.source) meta.append(make("span", null, item.source));
+      if (item.partial && !item.can_resume) meta.append(make("span", null, "источник неизвестен"));
+      main.append(meta);
+      top.append(main);
+      top.append(
+        make(
+          "span",
+          "local-state" + (item.partial ? " partial" : (item.is_active ? " active" : "")),
+          item.partial ? "ЧАСТИЧНО" : (item.is_active ? "АКТИВНА" : "ГОТОВА")
+        )
+      );
+      row.append(top);
+      const actions = make("div", "local-actions");
+      if (!item.partial && !item.is_active) {
+        const use = make("button", "btn small", "Использовать");
+        use.type = "button";
+        use.disabled = localBusy;
+        use.addEventListener("click", () => localAction("use", item));
+        actions.append(use);
+      }
+      if (item.partial) {
+        const resume = make("button", "btn small", "Докачать");
+        resume.type = "button";
+        resume.disabled = localBusy || !item.can_resume;
+        if (!item.can_resume) resume.title = "Не знаю репозиторий: выбери файл в Hugging Face и запусти скачивание";
+        resume.addEventListener("click", () => localAction("resume", item));
+        actions.append(resume);
+      }
+      const remove = make("button", "btn danger small", "Удалить");
+      remove.type = "button";
+      remove.disabled = localBusy || item.external || (item.is_active && !item.partial);
+      if (item.external) remove.title = "Файл вне папки моделей — удалять его отсюда нельзя";
+      else if (item.is_active && !item.partial) remove.title = "Сначала выбери другую модель";
+      remove.addEventListener("click", () => localAction("delete", item));
+      actions.append(remove);
+      row.append(actions);
+      list.append(row);
+    }
+    panel.append(list);
+    return panel;
+  }
+
+  function hfProgressPanel() {
+    const status = hfDownload;
+    if (!status || !status.state || status.state === "idle") return null;
+    const box = make("div", "hf-progress");
+    box.id = "hf-progress";
+    box.dataset.state = status.state;
+    const head = make("div", "hf-progress-head");
+    const phase = status.message || "";
+    const title = make("span", "hf-progress-title", status.state === "done"
+      ? "Готово"
+      : (phase && (status.state === "running" || status.state === "starting")
+        ? phase + (status.percent !== null && status.percent !== undefined
+          ? " · " + status.percent + "%" : "")
+        : (status.percent !== null && status.percent !== undefined
+          ? "Скачиваю · " + status.percent + "%"
+          : (status.state === "starting" ? "Подготовка…" : "Скачиваю…"))));
+    const meta = make("span", "hf-progress-meta", status.total > 0
+      ? fmtBytes(status.done) + " / " + fmtBytes(status.total)
+      : (status.done ? fmtBytes(status.done) : ""));
+    head.append(title, meta);
+    box.append(head);
+    if (status.state === "running" || status.state === "starting") {
+      const bar = make("div", "hf-bar");
+      const fill = make("span");
+      fill.style.width = (status.percent || 0) + "%";
+      bar.append(fill);
+      box.append(bar);
+      const actions = make("div", "hf-actions");
+      const cancel = make("button", "btn secondary small", "Отменить");
+      cancel.type = "button";
+      cancel.addEventListener("click", cancelHfDownload);
+      actions.append(cancel);
+      box.append(actions);
+    } else if (status.state === "done") {
+      box.append(make("div", "hf-hint", status.message || "Модель скачана."));
+      const actions = make("div", "hf-actions");
+      const use = make("button", "btn small", "Сделать активной");
+      use.type = "button";
+      use.disabled = !status.model;
+      use.addEventListener("click", () => useHfModel(status.model));
+      actions.append(use);
+      box.append(actions);
+    } else {
+      box.append(make("div", "hf-hint", status.message || "Загрузка не удалась."));
+    }
+    return box;
+  }
+
+  function hfPanel() {
+    const panel = make("div", "panel");
+    panel.id = "hf-panel";
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Модели Hugging Face"));
+    head.append(make("span", "badge", "GGUF"));
+    panel.append(head);
+
+    const tools = make("div", "hf-tools");
+    tools.append(
+      make("div", "hf-hint", "Скачай GGUF в папку локальных моделей, затем сделай его активным. Поиск без запроса покажет популярные модели.")
+    );
+    const row = make("div", "hf-search-row");
+    const input = document.createElement("input");
+    input.type = "search";
+    input.placeholder = "Например, qwen3 gguf";
+    input.value = hfState.query;
+    input.autocomplete = "off";
+    input.setAttribute("aria-label", "Поиск моделей на Hugging Face");
+    input.addEventListener("input", () => { hfState.query = input.value; });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      searchHf();
+    });
+    const button = make("button", "btn", hfBusy ? "Ищу…" : "Искать");
+    button.type = "button";
+    button.disabled = hfBusy;
+    button.addEventListener("click", searchHf);
+    row.append(input, button);
+    tools.append(row);
+    if (hfState.status) tools.append(make("div", "hf-hint", hfState.status));
+    panel.append(tools);
+
+    if (hfState.results.length) {
+      const results = make("div", "hf-results");
+      for (const item of hfState.results) {
+        const option = make("div", "hf-result" + (item.repo_id === hfState.repo ? " active" : ""));
+        option.tabIndex = 0;
+        option.setAttribute("role", "button");
+        const main = make("div", "hf-result-main");
+        main.append(make("div", "hf-repo", item.repo_id));
+        const meta = make("div", "hf-meta", "⬇ " + num(item.downloads) + " · ♥ " + num(item.likes));
+        if (item.gated) meta.append(document.createTextNode(" · 🔒"));
+        main.append(meta);
+        option.append(main);
+        const actions = make("div", "hf-actions");
+        const download = make("button", "btn secondary small", "Скачать");
+        download.type = "button";
+        download.disabled = hfBusy || Boolean(hfDownload && ["starting", "running"].includes(hfDownload.state));
+        download.title = "Скачать рекомендуемый GGUF и склеить шарды";
+        download.addEventListener("click", (event) => {
+          event.stopPropagation();
+          startHfRepoDownload(item.repo_id);
+        });
+        actions.append(download);
+        option.append(actions);
+        const pick = () => chooseHfRepo(item.repo_id);
+        option.addEventListener("click", pick);
+        option.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            pick();
+          }
+        });
+        results.append(option);
+      }
+      panel.append(results);
+    } else if (hfState.searchDone) {
+      panel.append(make("div", "empty", "Ничего не нашлось. Попробуй другой запрос."));
+    }
+
+    if (hfState.repo && hfState.files.length) {
+      const files = make("div", "hf-files");
+      for (const file of hfState.files) {
+        const entry = make("div", "hf-file");
+        const main = make("div");
+        main.append(make("div", "hf-file-name", file.filename));
+        const sizeText = file.size ? fmtBytes(file.size) : "размер неизвестен";
+        main.append(make(
+          "div",
+          "hf-file-size",
+          sizeText + (file.parts > 1 ? " · " + file.parts + " части, склеятся" : "")
+        ));
+        entry.append(main);
+        const download = make("button", "btn secondary small", "Скачать");
+        download.type = "button";
+        download.disabled = hfBusy || Boolean(hfDownload && ["starting", "running"].includes(hfDownload.state));
+        download.addEventListener("click", () => startHfDownload(file.filename));
+        entry.append(download);
+        files.append(entry);
+      }
+      panel.append(files);
+    } else if (hfState.repo && !hfBusy) {
+      panel.append(make("div", "empty", "В репозитории нет подходящих .gguf-файлов."));
+    }
+
+    const progress = hfProgressPanel();
+    if (progress) panel.append(progress);
+    return panel;
+  }
+
+  async function searchHf() {
+    if (demoMode) {
+      toast("Предпросмотр: поиск моделей недоступен");
+      return;
+    }
+    if (hfBusy) return;
+    hfBusy = true;
+    hfState.status = "Ищу GGUF-модели…";
+    hfState.results = [];
+    hfState.repo = "";
+    hfState.files = [];
+    hfState.searchDone = false;
+    render({ keepScroll: true });
+    try {
+      const data = await api(
+        "/api/hf/search?q=" + encodeURIComponent(hfState.query.trim()), null, 30000
+      );
+      hfState.results = data.models || [];
+      hfState.searchDone = true;
+      hfState.status = hfState.results.length
+        ? "Найдено: " + hfState.results.length
+        : "Ничего не найдено.";
+      haptic("light");
+    } catch (error) {
+      hfState.status = error.message;
+      toast(error.message, true);
+    } finally {
+      hfBusy = false;
+      render({ keepScroll: true });
+    }
+    // Как в GUI: сразу открываем файлы первого результата, чтобы кнопки
+    // «Скачать» были видны без лишнего клика.
+    if (hfState.results.length) chooseHfRepo(hfState.results[0].repo_id);
+  }
+
+  async function chooseHfRepo(repo) {
+    if (demoMode) {
+      toast("Предпросмотр: список файлов недоступен");
+      return;
+    }
+    if (hfBusy) return;
+    hfState.repo = repo;
+    hfState.files = [];
+    hfBusy = true;
+    hfState.status = "Загружаю файлы " + repo + "…";
+    render({ keepScroll: true });
+    try {
+      const data = await api(
+        "/api/hf/files?repo=" + encodeURIComponent(repo), null, 30000
+      );
+      hfState.files = data.files || [];
+      const splitCount = hfState.files.filter((file) => file.split).length;
+      hfState.status = "Файлов: " + hfState.files.length
+        + (splitCount ? " (разбитых: " + splitCount + ")" : "");
+      haptic("light");
+    } catch (error) {
+      hfState.status = error.message;
+      toast(error.message, true);
+    } finally {
+      hfBusy = false;
+      render({ keepScroll: true });
+    }
+  }
+
+  async function startHfRepoDownload(repo) {
+    if (demoMode) {
+      toast("Предпросмотр: загрузка недоступна");
+      return;
+    }
+    if (hfBusy || (hfDownload && ["starting", "running"].includes(hfDownload.state))) return;
+    hfBusy = true;
+    hfState.status = "Выбираю файл " + repo + "…";
+    render({ keepScroll: true });
+    try {
+      const data = await api("/api/hf/download", {
+        method: "POST",
+        body: JSON.stringify({
+          repo: repo,
+          file: "",
+          revision: "main",
+          prefer: hfState.query,
+        }),
+      });
+      hfDownload = data.download || hfDownload;
+      hfState.status = data.message || "Загрузка началась.";
+      toast(data.message || "Загрузка началась");
+      haptic("light");
+      pollHfDownload();
+    } catch (error) {
+      hfState.status = error.message;
+      toast(error.message, true);
+      haptic("rigid");
+    } finally {
+      hfBusy = false;
+      render({ keepScroll: true });
+    }
+  }
+
+  async function startHfDownload(filename) {
+    if (demoMode) {
+      toast("Предпросмотр: загрузка недоступна");
+      return;
+    }
+    if (!hfState.repo || hfBusy) return;
+    hfBusy = true;
+    render({ keepScroll: true });
+    try {
+      const data = await api("/api/hf/download", {
+        method: "POST",
+        body: JSON.stringify({ repo: hfState.repo, file: filename, revision: "main" }),
+      });
+      hfDownload = data.download || hfDownload;
+      hfState.status = "Загрузка началась.";
+      toast(data.message || "Загрузка началась");
+      haptic("light");
+      pollHfDownload();
+    } catch (error) {
+      toast(error.message, true);
+      haptic("rigid");
+    } finally {
+      hfBusy = false;
+      render({ keepScroll: true });
+    }
+  }
+
+  async function cancelHfDownload() {
+    try {
+      const data = await api("/api/hf/cancel", { method: "POST", body: "{}" });
+      hfDownload = data.download || hfDownload;
+      toast(data.message || "Останавливаю…");
+      render({ keepScroll: true });
+      pollHfDownload();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  }
+
+  async function useHfModel(model) {
+    if (demoMode) {
+      toast("Предпросмотр: модель не переключается");
+      return;
+    }
+    if (!model) return;
+    try {
+      const data = await api("/api/models/use", {
+        method: "POST",
+        body: JSON.stringify({ model }),
+      });
+      state = data.settings || state;
+      modelCache.clear();
+      toast(data.message || "Модель выбрана");
+      haptic("light");
+      render({ keepScroll: true });
+    } catch (error) {
+      toast(error.message, true);
+    }
+  }
+
+  async function pollHfDownload() {
+    if (demoMode) return;
+    clearTimeout(hfPollTimer);
+    try {
+      const data = await api("/api/hf/download");
+      const next = data.download || null;
+      const previous = hfDownload;
+      hfDownload = next;
+      if (!next || next.state === "idle") return;
+      if ([ "starting", "running" ].includes(next.state)) {
+        if (!document.getElementById("hf-progress")) {
+          render({ keepScroll: true });
+        } else {
+          updateHfProgress();
+        }
+        hfPollTimer = setTimeout(pollHfDownload, 1000);
+      } else if (!previous || previous.state !== next.state) {
+        if (next.state === "done") {
+          modelCache.delete("llama_cpp");
+          localState.loaded = false;
+          loadLocalModels(true);
+        }
+        render({ keepScroll: true });
+      }
+    } catch (_) {
+      hfPollTimer = setTimeout(pollHfDownload, 3000);
+    }
+  }
+
+  function updateHfProgress() {
+    const status = hfDownload;
+    const box = document.getElementById("hf-progress");
+    if (!box || !status) return;
+    const title = box.querySelector(".hf-progress-title");
+    const meta = box.querySelector(".hf-progress-meta");
+    const fill = box.querySelector(".hf-bar > span");
+    const phase = status.message || "";
+    if (title) title.textContent = phase
+      ? phase + (status.percent !== null && status.percent !== undefined
+        ? " · " + status.percent + "%" : "")
+      : (status.percent !== null && status.percent !== undefined
+        ? "Скачиваю · " + status.percent + "%" : "Скачиваю…");
+    if (meta) meta.textContent = status.total > 0
+      ? fmtBytes(status.done) + " / " + fmtBytes(status.total) : (status.done ? fmtBytes(status.done) : "");
+    if (fill) fill.style.width = (status.percent || 0) + "%";
+  }
+
+  function syncRow(row, sectionId, field) {
+    const button = row.querySelector(".switch");
+    if (button) {
+      button.setAttribute("aria-checked", field.bool ? "true" : "false");
+      const text = button.querySelector(".switch-text");
+      if (text) text.textContent = field.bool ? "Включено" : "Выключено";
+      return;
+    }
+    const select = row.querySelector("select");
+    if (select) {
+      select.value = String(field.value ?? "");
+      return;
+    }
+    const input = row.querySelector("input, textarea");
+    if (!input) return;
+    if (field.kind === "step" || field.kind === "pct") {
+      input.value = String(parseFloat(field.value) || 0);
+    } else if (field.secret) {
+      input.value = "";
+      input.placeholder = field.has_value ? "••••••  (не менять)" : "не задан";
+    } else if (document.activeElement !== input) {
+      input.value = String(field.value ?? "");
+    }
+    updateSaveButton(row);
+  }
+
+  async function saveField(field, value, row) {
+    if (demoMode) {
+      if (field.secret) {
+        toast("Предпросмотр: секреты не сохраняются");
+        return;
+      }
+      if (field.kind === "bool") field.bool = value === "true";
+      else field.value = value;
+      syncRow(row, current, field);
+      flash(row, "Предпросмотр");
+      haptic("light");
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    const sectionId = current;
+    row.classList.add("is-saving");
+    setRowDisabled(row, true);
+    setSavePhase(row, "saving");
+    try {
+      const data = await api("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          section: sectionId,
+          field: field.id,
+          value: field.kind === "bool" ? value === "true" : value,
+        }),
+      });
+      state = data.settings || state;
+      const fresh = fieldById(sectionId, field.id);
+      if (fresh) Object.assign(field, fresh);
+      syncRow(row, sectionId, field);
+      setSavePhase(row, "done");
+      flash(row, "Сохранено");
+      haptic("light");
+      if (sectionId === "llm" && field.id === "provider") prefetchModels();
+    } catch (error) {
+      syncRow(row, sectionId, field);
+      setSavePhase(row, "idle");
+      toast(error.message, true);
+      haptic("rigid");
+    } finally {
+      busy = false;
+      row.classList.remove("is-saving");
+      setRowDisabled(row, false);
+      updateSaveButton(row);
+    }
+    if (sectionId === "character" && field.id === "ch_advanced") {
+      render({ keepScroll: true });
+    }
+  }
+
+  function autostartPanel() {
+    if (state.autostart === null || state.autostart === undefined) return null;
+    const panel = make("div", "panel");
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Система"));
+    panel.append(head);
+    const row = make("div", "field-row");
+    row.dataset.kind = "bool";
+    const labelBox = make("div", "field-label-box");
+    labelBox.append(make("div", "field-label", "Автозапуск демона"));
+    labelBox.append(make("div", "field-hint", "Windows запускает бота после входа в систему."));
+    labelBox.append(make("span", "row-state"));
+    row.append(labelBox);
+    const control = make("div", "field-control");
+    const button = make("button", "switch");
+    button.type = "button";
+    button.setAttribute("role", "switch");
+    button.setAttribute("aria-checked", state.autostart ? "true" : "false");
+    button.append(make("span", "switch-text", state.autostart ? "Включён" : "Выключен"));
+    button.append(make("span", "switch-track"));
+    button.addEventListener("click", () => setAutostart(!state.autostart, row, button));
+    control.append(button);
+    row.append(control);
+    panel.append(row);
+    return panel;
+  }
+
+  async function setAutostart(enabled, row, button) {
+    if (demoMode) {
+      state.autostart = enabled;
+      button.setAttribute("aria-checked", enabled ? "true" : "false");
+      button.querySelector(".switch-text").textContent = enabled ? "Включён" : "Выключен";
+      flash(row, "Предпросмотр");
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    row.classList.add("is-saving");
+    setRowDisabled(row, true);
+    try {
+      const data = await api("/api/autostart", {
+        method: "POST", body: JSON.stringify({ enabled }),
+      });
+      state = data.settings || state;
+      button.setAttribute("aria-checked", state.autostart ? "true" : "false");
+      button.querySelector(".switch-text").textContent = state.autostart ? "Включён" : "Выключен";
+      flash(row, data.message || "Готово");
+      haptic("light");
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      busy = false;
+      row.classList.remove("is-saving");
+      setRowDisabled(row, false);
+    }
+  }
+
+  function mcpForm(server) {
+    const form = make("div", "form");
+    const grid = make("div", "form-grid");
+    const values = server || { name: "", command: "", args: "", cwd: ".", env: "" };
+    const fields = [
+      ["name", "Название", "необязательно", false],
+      ["cwd", "Рабочая папка", ".", false],
+      ["command", "Команда", "например, npx", true],
+      ["args", "Аргументы", "-y @modelcontextprotocol/server-filesystem", true],
+      ["env", "Переменные", "KEY=значение, KEY2=значение", true],
+    ];
+    const inputs = {};
+    for (const entry of fields) {
+      const key = entry[0];
+      const field = make("div", "form-field" + (entry[3] ? " full" : ""));
+      const label = make("label", null, entry[1]);
+      const id = "mcp_" + (server ? "edit_" + server.index : "add") + "_" + key;
+      label.htmlFor = id;
+      const input = document.createElement("input");
+      input.id = id;
+      input.value = values[key] || "";
+      input.placeholder = entry[2];
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        if (server) saveMcp(server.index, inputs);
+        else addMcp(inputs);
+      });
+      inputs[key] = input;
+      field.append(label, input);
+      grid.append(field);
+    }
+    form.append(grid);
+    const actions = make("div", "form-actions");
+    const save = make("button", "btn", server ? "Сохранить" : "Добавить сервер");
+    save.type = "button";
+    save.addEventListener("click", () => {
+      if (server) saveMcp(server.index, inputs);
+      else addMcp(inputs);
+    });
+    const cancel = make("button", "btn secondary", "Отмена");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => { editingMcp = -1; addingMcp = false; render(); });
+    actions.append(save, cancel);
+    form.append(actions);
+    return { form, inputs };
+  }
+
+  function mcpAddPanel() {
+    const panel = make("div", "panel");
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Новый MCP-сервер"));
+    panel.append(head);
+    panel.append(mcpForm(null).form);
+    return panel;
+  }
+
+  function renderMcpPanel() {
+    const panel = make("div", "panel");
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Серверы MCP"));
+    const actions = make("div", "panel-actions");
+    const add = make("button", "btn small", "＋ Добавить");
+    add.type = "button";
+    add.addEventListener("click", () => {
+      addingMcp = true;
+      editingMcp = -1;
+      render({ keepScroll: true });
+    });
+    actions.append(add);
+    head.append(actions);
+    panel.append(head);
+    const servers = (state.mcp && state.mcp.servers) || [];
+    if (!servers.length) {
+      const empty = make("div", "empty");
+      const emptyIcon = make("div", "empty-icon");
+      emptyIcon.append(icon("plug"));
+      empty.append(emptyIcon);
+      empty.append(make("div", null, "Пока ни одного сервера. Добавь первый — команда и аргументы, как в строке запуска."));
+      const addFirst = make("button", "btn secondary small", "Добавить сервер");
+      addFirst.type = "button";
+      addFirst.addEventListener("click", () => {
+        addingMcp = true;
+        editingMcp = -1;
+        render({ keepScroll: true });
+      });
+      empty.append(addFirst);
+      panel.append(empty);
+      return panel;
+    }
+    for (const server of servers) {
+      const endpoint = make("div", "server" + (server.enabled ? "" : " is-off"));
+      const top = make("div", "server-head");
+      const name = make("div", "server-title");
+      name.append(make("span", "server-dot"));
+      name.append(document.createTextNode(server.name || ("Сервер " + (server.index + 1))));
+      name.append(make("span", "badge", "MCP"));
+      top.append(name);
+      const toggle = make("button", "switch");
+      toggle.type = "button";
+      toggle.setAttribute("role", "switch");
+      toggle.setAttribute("aria-checked", server.enabled ? "true" : "false");
+      toggle.setAttribute("aria-label", "Сервер " + (server.name || server.command));
+      toggle.append(make("span", "switch-text", server.enabled ? "Вкл" : "Выкл"));
+      toggle.append(make("span", "switch-track"));
+      toggle.addEventListener("click", () => mcpAction({ action: "toggle", index: server.index }));
+      top.append(toggle);
+      endpoint.append(top);
+      if (editingMcp === server.index) {
+        endpoint.append(mcpForm(server).form);
+      } else {
+        const command = server.command + (server.args ? " " + server.args : "");
+        const commandRow = make("div", "command-row");
+        commandRow.append(make("code", "endpoint-cmd", command));
+        const copy = make("button", "copy-btn");
+        copy.type = "button";
+        copy.setAttribute("aria-label", "Скопировать команду");
+        copy.title = "Скопировать команду";
+        copy.append(icon("copy"));
+        copy.addEventListener("click", () => copyText(command));
+        commandRow.append(copy);
+        endpoint.append(commandRow);
+        const meta = make("div", "server-meta");
+        if (server.cwd && server.cwd !== ".") meta.append(make("span", null, "cwd: " + server.cwd));
+        if (server.env) meta.append(make("span", null, "env: заданы"));
+        if (meta.childNodes.length) endpoint.append(meta);
+        const rowActions = make("div", "server-actions");
+        const edit = make("button", "btn secondary small", "Изменить");
+        edit.type = "button";
+        edit.addEventListener("click", () => {
+          editingMcp = server.index;
+          addingMcp = false;
+          render({ keepScroll: true });
+        });
+        const remove = make("button", "btn danger small", "Удалить");
+        remove.type = "button";
+        remove.addEventListener("click", () => {
+          if (confirm("Удалить сервер " + (server.name || server.command) + "?")) {
+            mcpAction({ action: "delete", index: server.index });
+          }
+        });
+        rowActions.append(edit, remove);
+        endpoint.append(rowActions);
+      }
+      panel.append(endpoint);
+    }
+    return panel;
+  }
+
+  async function mcpAction(payload) {
+    if (demoMode) {
+      if (payload.action === "toggle") {
+        const server = state.mcp.servers.find((item) => item.index === payload.index);
+        if (server) server.enabled = !server.enabled;
+        render({ keepScroll: true });
+        return;
+      }
+      toast("Предпросмотр: изменения не сохраняются");
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    const scroll = window.scrollY;
+    try {
+      const data = await api("/api/mcp", { method: "POST", body: JSON.stringify(payload) });
+      state = data.settings || state;
+      editingMcp = -1;
+      addingMcp = false;
+      render({ keepScroll: true, scroll });
+      toast(data.message || "Готово");
+      haptic("light");
+    } catch (error) {
+      toast(error.message, true);
+      haptic("rigid");
+    } finally {
+      busy = false;
+    }
+  }
+
+  function addMcp(inputs) {
+    const command = [inputs.command.value.trim(), inputs.args.value.trim()].filter(Boolean).join(" ");
+    if (!command) { toast("Укажи команду сервера", true); return; }
+    mcpAction({
+      action: "add",
+      command,
+      fields: { name: inputs.name.value, cwd: inputs.cwd.value, env: inputs.env.value },
+    });
+  }
+
+  function saveMcp(index, inputs) {
+    mcpAction({
+      action: "update",
+      index,
+      fields: {
+        name: inputs.name.value,
+        command: inputs.command.value,
+        args: inputs.args.value,
+        cwd: inputs.cwd.value,
+        env: inputs.env.value,
+      },
+    });
+  }
+
+  function skillsSummary() {
+    const panel = make("div", "panel");
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Видимость"));
+    panel.append(head);
+    const row = make("div", "field-row");
+    row.dataset.kind = "bool";
+    const labelBox = make("div", "field-label-box");
+    labelBox.append(make("div", "field-label", "Скиллы включены"));
+    labelBox.append(make("div", "field-hint", "Главный переключатель. Отдельные скиллы можно включать ниже."));
+    labelBox.append(make("span", "row-state"));
+    row.append(labelBox);
+    const control = make("div", "field-control");
+    const button = make("button", "switch");
+    button.type = "button";
+    button.setAttribute("role", "switch");
+    button.setAttribute("aria-checked", state.skills.enabled ? "true" : "false");
+    button.append(make("span", "switch-text", state.skills.enabled ? "Включены" : "Выключены"));
+    button.append(make("span", "switch-track"));
+    button.addEventListener("click", () => toggleGlobalSkills(!state.skills.enabled, row, button));
+    control.append(button);
+    row.append(control);
+    panel.append(row);
+    return panel;
+  }
+
+  async function toggleGlobalSkills(enabled, row, button) {
+    if (demoMode) {
+      state.skills.enabled = enabled;
+      button.setAttribute("aria-checked", enabled ? "true" : "false");
+      button.querySelector(".switch-text").textContent = enabled ? "Включены" : "Выключены";
+      content.querySelectorAll(".skill-row").forEach((item) => {
+        item.classList.toggle("is-muted", !enabled);
+        const toggle = item.querySelector(".switch");
+        if (toggle) toggle.disabled = !enabled;
+      });
+      flash(row, "Предпросмотр");
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    row.classList.add("is-saving");
+    setRowDisabled(row, true);
+    try {
+      const data = await api("/api/skills", {
+        method: "POST", body: JSON.stringify({ enabled }),
+      });
+      state = data.settings || state;
+      button.setAttribute("aria-checked", state.skills.enabled ? "true" : "false");
+      button.querySelector(".switch-text").textContent = state.skills.enabled ? "Включены" : "Выключены";
+      content.querySelectorAll(".skill-row").forEach((item) => {
+        item.classList.toggle("is-muted", !state.skills.enabled);
+        const toggle = item.querySelector(".switch");
+        if (toggle) toggle.disabled = !state.skills.enabled;
+      });
+      flash(row, data.message || "Готово");
+      haptic("light");
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      busy = false;
+      row.classList.remove("is-saving");
+      setRowDisabled(row, false);
+    }
+  }
+
+  function renderSkills() {
+    const fragment = document.createDocumentFragment();
+    fragment.append(skillsSummary());
+    const panel = make("div", "panel");
+    const head = make("div", "panel-head");
+    head.append(make("div", "panel-title", "Установленные скиллы"));
+    panel.append(head);
+    const entries = (state.skills && state.skills.entries) || [];
+    skillsView = null;
+    if (!entries.length) {
+      panel.append(make("div", "empty", "Скиллы не найдены."));
+      fragment.append(panel);
+      return fragment;
+    }
+    const toolbar = make("div", "skills-toolbar");
+    let search = null;
+    if (entries.length > 4) {
+      const searchWrap = make("div", "skill-search");
+      searchWrap.append(icon("search"));
+      search = document.createElement("input");
+      search.type = "search";
+      search.placeholder = "Найти скилл…";
+      search.setAttribute("aria-label", "Поиск по скиллам");
+      search.autocomplete = "off";
+      searchWrap.append(search);
+      toolbar.append(searchWrap);
+    }
+    const filterBar = make("div", "filter-bar");
+    const filters = [["all", "Все"], ["on", "Включённые"], ["off", "Выключенные"]];
+    const buttons = {};
+    for (const [id, label] of filters) {
+      const button = make("button", "filter-btn" + (skillFilter === id ? " active" : ""), label);
+      button.type = "button";
+      button.dataset.filter = id;
+      button.setAttribute("aria-pressed", skillFilter === id ? "true" : "false");
+      button.addEventListener("click", () => {
+        skillFilter = id;
+        for (const key of Object.keys(buttons)) {
+          const active = key === id;
+          buttons[key].classList.toggle("active", active);
+          buttons[key].setAttribute("aria-pressed", active ? "true" : "false");
+        }
+        apply();
+      });
+      buttons[id] = button;
+      filterBar.append(button);
+    }
+    toolbar.append(filterBar);
+    panel.append(toolbar);
+
+    const list = make("div", "skill-list");
+    for (const entry of entries) {
+      const row = make("div", "skill-row" + (state.skills.enabled ? "" : " is-muted"));
+      row.dataset.name = String(entry.name).toLowerCase();
+      row.dataset.enabled = entry.enabled ? "true" : "false";
+      row.append(make("div", "skill-name", entry.name));
+      const button = make("button", "switch");
+      button.type = "button";
+      button.setAttribute("role", "switch");
+      button.setAttribute("aria-checked", entry.enabled ? "true" : "false");
+      button.setAttribute("aria-label", "Скилл " + entry.name);
+      button.append(make("span", "switch-text", entry.enabled ? "Вкл" : "Выкл"));
+      button.append(make("span", "switch-track"));
+      button.disabled = !state.skills.enabled;
+      button.addEventListener("click", () => toggleSkill(entry.name, !entry.enabled, button, row));
+      row.append(button);
+      list.append(row);
+    }
+    panel.append(list);
+    const none = make("div", "empty skill-none", "Ничего не нашлось.");
+    none.hidden = true;
+    panel.append(none);
+
+    function apply() {
+      const needle = search ? search.value.trim().toLowerCase() : "";
+      let visible = 0;
+      let onCount = 0;
+      for (const row of list.querySelectorAll(".skill-row")) {
+        const on = row.dataset.enabled === "true";
+        if (on) onCount += 1;
+        const match = (!needle || row.dataset.name.includes(needle))
+          && (skillFilter === "all" || (skillFilter === "on" && on) || (skillFilter === "off" && !on));
+        row.hidden = !match;
+        if (match) visible += 1;
+      }
+      none.hidden = visible > 0;
+      const counts = { all: entries.length, on: onCount, off: entries.length - onCount };
+      for (const [id, label] of filters) {
+        if (buttons[id]) buttons[id].textContent = label + " " + counts[id];
+      }
+    }
+    if (search) search.addEventListener("input", apply);
+    skillsView = { apply };
+    apply();
+    fragment.append(panel);
+    return fragment;
+  }
+
+  async function toggleSkill(name, enabled, button, row) {
+    if (demoMode) {
+      const entry = state.skills.entries.find((item) => item.name === name);
+      if (entry) entry.enabled = enabled;
+      button.setAttribute("aria-checked", enabled ? "true" : "false");
+      button.querySelector(".switch-text").textContent = enabled ? "Вкл" : "Выкл";
+      if (row) row.dataset.enabled = enabled ? "true" : "false";
+      if (skillsView) skillsView.apply();
+      haptic("light");
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    button.disabled = true;
+    try {
+      const data = await api("/api/skill", {
+        method: "POST", body: JSON.stringify({ name, enabled }),
+      });
+      state = data.settings || state;
+      const entry = state.skills.entries.find((item) => item.name === name);
+      if (entry) {
+        button.setAttribute("aria-checked", entry.enabled ? "true" : "false");
+        button.querySelector(".switch-text").textContent = entry.enabled ? "Вкл" : "Выкл";
+        if (row) row.dataset.enabled = entry.enabled ? "true" : "false";
+      }
+      if (skillsView) skillsView.apply();
+      haptic("light");
+    } catch (error) {
+      toast(error.message, true);
+      button.setAttribute("aria-checked", enabled ? "false" : "true");
+      button.querySelector(".switch-text").textContent = enabled ? "Выкл" : "Вкл";
+      if (row) row.dataset.enabled = enabled ? "false" : "true";
+      if (skillsView) skillsView.apply();
+    } finally {
+      busy = false;
+      button.disabled = !state.skills.enabled;
+    }
+  }
+
+  function aboutPanel() {
+    const fragment = document.createDocumentFragment();
+    const hero = make("div", "panel");
+    const top = make("div", "about-hero");
+    top.append(make("div", "about-logo", "N"));
+    const text = make("div");
+    text.append(make("div", "about-name", state.assistant || "Немуся"));
+    text.append(make("div", "about-version", "Версия " + (state.version || "—")));
+    top.append(text);
+    hero.append(top);
+    const rows = [
+      ["Интерфейс", "Telegram Mini App"],
+      ["Доступ", "Подпись Telegram initData и allowed_users"],
+      ["Сохранение", "Сразу в config/config.yaml"],
+      ["Перезапуск", "Нужен для модели, инструментов и токена бота"],
+    ];
+    for (const [label, value] of rows) {
+      const row = make("div", "info-row");
+      const infoLabel = make("div", "info-label", label);
+      const infoValue = make("div", "info-value", value);
+      row.append(infoLabel, infoValue);
+      hero.append(row);
+    }
+    fragment.append(hero);
+    fragment.append(make("p", "tip", "Открывается командой /panel в личке с ботом."));
+    return fragment;
+  }
+
+  function render(options) {
+    if (!state) return;
+    applyTheme();
+    const settings = options || {};
+    const section = state.sections.find((item) => item.id === current) || state.sections[0];
+    if (!section) return;
+    const scroll = settings.scroll !== undefined ? settings.scroll : window.scrollY;
+    const fragment = document.createDocumentFragment();
+    fragment.append(sectionHead(section));
+    const sectionNav = subnav(section);
+    if (sectionNav) fragment.append(sectionNav);
+    if (section.id === "about") {
+      fragment.append(aboutPanel());
+    } else if (section.id === "skills") {
+      fragment.append(renderSkills());
+    } else if (section.id === "mcp") {
+      fragment.append(renderFields(section));
+      if (addingMcp) fragment.append(mcpAddPanel());
+      fragment.append(renderMcpPanel());
+    } else {
+      fragment.append(renderFields(section));
+      if (section.id === "llm") {
+        fragment.append(localPanel());
+        fragment.append(hfPanel());
+      }
+      if (section.id === "telegram") {
+        const auto = autostartPanel();
+        if (auto) fragment.append(auto);
+      }
+    }
+    content.replaceChildren(fragment);
+    if (settings.keepScroll) {
+      requestAnimationFrame(() => window.scrollTo({ top: scroll, behavior: "auto" }));
+    }
+  }
+
+  function demoField(id, label, kind, value, extra) {
+    return Object.assign({
+      id, label, kind, value,
+      choices: [], minimum: 0, maximum: 0, step: 1, unit: "",
+      secret: false, hint: "", has_value: true, bool: null,
+    }, extra || {});
+  }
+
+  function demoState() {
+    return {
+      ok: true,
+      version: "0.2.0",
+      assistant: "Немуся",
+      autostart: true,
+      models: {
+        default_provider: "gemini",
+        default_model: "gpt-4.1-mini",
+        provider_labels: {
+          openrouter: "OpenRouter",
+          gemini: "Google Gemini",
+          anthropic: "Anthropic Claude",
+          openai: "OpenAI",
+          ollama: "Ollama (локально)",
+          llama_cpp: "llama.cpp (локально, GGUF)",
+        },
+        local_models_dir: "data/models",
+      },
+      sections: [
+        {
+          id: "llm", title: "LLM", icon: "🤖", note: "Ключи хранятся в keyring.",
+          fields: [
+            demoField("name", "Имя ассистента", "text", "Немуся"),
+            demoField("provider", "Провайдер", "choice", "openai", { choices: ["openai", "anthropic", "gemini"] }),
+            demoField("model", "Модель", "text", "gpt-4.1-mini"),
+            demoField("model_path", "Файл локальной модели", "text", "data/models/tiny.gguf"),
+            demoField("temp", "Температура", "step", "0.7", { minimum: 0, maximum: 2, step: 0.1 }),
+            demoField("max_tokens", "Max tokens", "step", "4096", { minimum: 256, maximum: 200000, step: 256 }),
+            demoField("key_openai", "Ключ OpenAI", "text", "", { secret: true }),
+          ],
+        },
+        {
+          id: "voice", title: "Голос", icon: "🎙", note: "",
+          fields: [
+            demoField("wake", "Wake word включён", "bool", "true", { bool: true }),
+            demoField("wake_engine", "Движок wake word", "choice", "vosk", { choices: ["vosk", "porcupine", "off"] }),
+            demoField("realtime", "Realtime включён", "bool", "false", { bool: false }),
+            demoField("companion_followup", "Ждать продолжение", "step", "15", { minimum: 5, maximum: 300, step: 5, unit: "с" }),
+            demoField("barge_in", "Прерывать голосом", "bool", "true", { bool: true }),
+          ],
+        },
+        {
+          id: "tts", title: "Озвучка", icon: "🔊", note: "",
+          fields: [
+            demoField("tts_enabled", "Озвучивать ответы", "bool", "true", { bool: true }),
+            demoField("tts_voice", "Голос", "choice", "alloy", { choices: ["alloy", "nova", "echo"] }),
+            demoField("tts_speed", "Скорость", "step", "1", { minimum: 0.5, maximum: 2, step: 0.1, unit: "×" }),
+          ],
+        },
+        {
+          id: "autopilot", title: "Автопилот", icon: "🤖", note: "",
+          fields: [
+            demoField("auto_enabled", "Автопилот включён", "bool", "true", { bool: true }),
+            demoField("auto_poll", "Интервал проверки", "step", "30", { minimum: 2, maximum: 300, step: 2, unit: "с" }),
+            demoField("auto_limit", "Лимит уведомлений в час", "step", "10", { minimum: 1, maximum: 100, step: 1 }),
+            demoField("auto_quiet", "Тихие часы", "text", "23:00–08:00"),
+          ],
+        },
+        {
+          id: "healing", title: "Self-healing", icon: "🩹", note: "",
+          fields: [
+            demoField("heal_enabled", "Self-healing включён", "bool", "true", { bool: true }),
+            demoField("heal_propose", "Генерировать патч", "bool", "true", { bool: true }),
+            demoField("heal_apply", "Применять автоматически", "bool", "false", { bool: false }),
+          ],
+        },
+        {
+          id: "spotify", title: "Spotify", icon: "🎵", note: "",
+          fields: [
+            demoField("sp_enabled", "Spotify включён", "bool", "false", { bool: false }),
+            demoField("sp_id", "Client ID", "text", ""),
+            demoField("sp_secret", "Client Secret", "text", "", { secret: true, has_value: true }),
+            demoField("sp_device", "Устройство", "text", ""),
+          ],
+        },
+        {
+          id: "telegram", title: "Telegram", icon: "✈️", note: "",
+          fields: [
+            demoField("hints", "Показывать подсказки", "bool", "true", { bool: true }),
+            demoField("advanced", "Живой ответ и rich-сообщения", "bool", "true", { bool: true }),
+            demoField("allowed_users", "Разрешённые ID", "ids", "123456789, 987654321"),
+            demoField("web_app_url", "Публичный адрес Mini App", "text", ""),
+          ],
+        },
+        {
+          id: "tools", title: "Инструменты", icon: "🛠", note: "",
+          fields: [
+            demoField("perm", "Режим разрешений", "choice", "smart", { choices: ["full-auto", "smart", "confirm-all"] }),
+            demoField("auto_allow", "Авторазрешение", "ids", "read_file, write_file"),
+            demoField("workspace", "Рабочая папка", "text", "."),
+            demoField("max_steps", "Лимит шагов", "step", "50", { minimum: 5, maximum: 1000, step: 5 }),
+            demoField("budget", "Бюджет времени", "step", "300", { minimum: 30, maximum: 7200, step: 30, unit: "с" }),
+          ],
+        },
+        {
+          id: "mcp", title: "MCP", icon: "🧩", note: "",
+          fields: [
+            demoField("enabled", "MCP включён", "bool", "true", { bool: true }),
+            demoField("refresh", "Обновлять список", "choice", "60", { choices: ["30", "60", "300", "900"] }),
+          ],
+        },
+        {
+          id: "skills", title: "Скиллы", icon: "📚", note: "",
+          fields: [],
+        },
+        { id: "about", title: "О программе", icon: "ℹ️", note: "", fields: [] },
+      ],
+      mcp: {
+        enabled: true,
+        refresh_seconds: 60,
+        servers: [
+          { index: 0, name: "filesystem", command: "npx", args: "-y @modelcontextprotocol/server-filesystem", cwd: ".", env: "", enabled: true },
+          { index: 1, name: "github", command: "npx", args: "-y @modelcontextprotocol/server-github", cwd: ".", env: "GITHUB_TOKEN=***", enabled: false },
+        ],
+      },
+      skills: {
+        enabled: true,
+        entries: [
+          { name: "code-craft", enabled: true },
+          { name: "frontend-design", enabled: true },
+          { name: "pdf-reader", enabled: false },
+          { name: "webapp-testing", enabled: true },
+          { name: "brainstorming", enabled: true },
+          { name: "skill-creator", enabled: false },
+          { name: "canvas-design", enabled: true },
+          { name: "zip-handler", enabled: true },
+        ],
+      },
+    };
+  }
+
+  themeButton.addEventListener("click", () => {
+    const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+    themeOverride = next;
+    localStorage.setItem("nemus.preview.theme", next);
+    applyTheme();
+  });
+
+  if (tg) {
+    try {
+      tg.ready();
+      tg.expand();
+      if (tg.onEvent) tg.onEvent("themeChanged", applyTheme);
+    } catch (_) { /* старый клиент */ }
+  }
+
+  window.addEventListener("scroll", () => {
+    tabs.classList.toggle("is-stuck", window.scrollY > 6);
+  }, { passive: true });
+  if (!demoMode) {
+    window.addEventListener("offline", () => setConnection("Нет сети", false));
+    window.addEventListener("online", () => setConnection("На связи", true));
+  }
+
+  if (demoMode) {
+    themeButton.hidden = false;
+    demoBanner.hidden = false;
+    state = demoState();
+    localState.loaded = true;
+    localState.status = "";
+    titleEl.textContent = state.assistant;
+    subtitleEl.textContent = "Настройки ассистента";
+    versionEl.textContent = "v" + state.version;
+    document.title = "Настройки Немуси — предпросмотр";
+    buildGroups();
+    if (!sectionById(current)) current = "llm";
+    currentGroup = (groupOf(current) || groups[0] || {}).id || "model";
+    lastSectionByGroup[currentGroup] = current;
+    setConnection("Демо", true);
+    renderTabs();
+    render();
+  } else {
+    applyTheme();
+    load();
+  }
+})();
+</script>
+</body>
+</html>
