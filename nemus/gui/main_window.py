@@ -325,6 +325,9 @@ class MainWindow(QMainWindow):
 
         self.orb = WaveformWidget()
         self.orb.set_state(AssistState.IDLE)
+        # realtime-инструменты временно ставят THINKING; предыдущий статус
+        # запоминается стеком, чтобы «Думаю…» не осталось после их завершения
+        self._realtime_states: list[AssistState] = []
         orb_container = QWidget()
         orb_layout = QHBoxLayout(orb_container)
         orb_layout.setContentsMargins(0, 0, 0, 0)
@@ -858,18 +861,23 @@ class MainWindow(QMainWindow):
         """
         if phase == "start":
             self.chat.add_tool_card(name, args)
+            self._realtime_states.append(self.orb.state)
             self.set_state(AssistState.THINKING)
             return
         ok = phase == "ok"
-        self.chat.add_system(
-            i18n.tr(
-                "tool.result",
-                name=name,
-                status=i18n.tr("tool.ok" if ok else "tool.fail"),
+        try:
+            self.chat.add_system(
+                i18n.tr(
+                    "tool.result",
+                    name=name,
+                    status=i18n.tr("tool.ok" if ok else "tool.fail"),
+                )
             )
-        )
-        if not ok and detail:
-            self.chat.add_error(detail)
+            if not ok and detail:
+                self.chat.add_error(detail)
+        finally:
+            if self._realtime_states:
+                self.set_state(self._realtime_states.pop())
 
     # ----------------------------------------------------------------- agent
     def submit_text(self, text: str) -> None:
@@ -930,10 +938,13 @@ class MainWindow(QMainWindow):
             self.chat.stream_end(event.text)
             if event.text.strip():
                 self.speak_request.emit(event.text)
+            self._realtime_states.clear()
             self.set_state(AssistState.IDLE)
         elif event.kind == "error":
             self.chat.thought_end()
             self.chat.add_error(event.error if event.error else event.text)
+            self._realtime_states.clear()
+            self.set_state(AssistState.IDLE)
 
     def _on_confirm_requested(self, payload: Any) -> None:
         tool, args = payload
@@ -945,6 +956,7 @@ class MainWindow(QMainWindow):
         self.chat.thought_end()
         self.chat.stream_end()
         self._set_busy(False)
+        self._realtime_states.clear()
         self.set_state(AssistState.IDLE)
         self._worker = None
         # первая реплика могла назвать диалог — обновляем кнопку и список

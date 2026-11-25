@@ -2986,6 +2986,211 @@ def test_run_task_uses_draft() -> None:
     print("ok  draft включается только в личке, при advanced_ui и без retry")
 
 
+class _StatusBot:
+    """Фейковый Bot: статус, финальные сообщения и удаление без сети."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str, dict]] = []
+        self.edits: list[tuple[str, dict]] = []
+        self.deleted: list[int] = []
+
+    async def send_message(self, chat_id: int, text: str, **kwargs: object):
+        self.sent.append((chat_id, text, dict(kwargs)))
+        return SimpleNamespace(message_id=100 + len(self.sent))
+
+    async def edit_message_text(self, text: str, **kwargs: object) -> None:
+        self.edits.append((text, dict(kwargs)))
+
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        self.deleted.append(message_id)
+
+    async def send_chat_action(self, chat_id: int, action: str) -> None:
+        pass
+
+
+def _task_bot(
+    events: list[object], *, chat_type: str = "group", api: object = None
+) -> TelegramBot:
+    """Бот с фейковым агентом: события задаёт тест, сети нет."""
+    cfg = Config()
+    instance = TelegramBot(
+        cfg,
+        SimpleNamespace(
+            llm=None,
+            registry=ToolRegistry(),
+            permissions=PermissionManager(cfg),
+            telegram_memory=None,
+        ),
+    )
+    fake = _StatusBot()
+    instance._app = SimpleNamespace(bot=fake)
+    instance._api = api  # type: ignore[assignment]
+
+    def run(text, images=None, stop=None, observe=True):
+        for event in events:
+            if isinstance(event, BaseException):
+                raise event
+            yield event
+
+    instance.agent = SimpleNamespace(run=run)
+    instance._prepare_session = lambda chat_id: None
+
+    async def _noop(*args: object, **kwargs: object) -> None:
+        return None
+
+    instance._keep_typing = _noop  # type: ignore[method-assign]
+    instance._maybe_show_first_hint = _noop  # type: ignore[method-assign]
+    assert chat_type in ("group", "private")
+    return instance
+
+
+def _run_task(bot: TelegramBot, *, chat_type: str = "group") -> None:
+    import asyncio
+
+    asyncio.run(
+        bot._run_task_for(
+            chat_id=7,
+            user_id=2,
+            message_id=None,
+            text="задача",
+            chat_type=chat_type,
+        )
+    )
+
+
+def test_telegram_status_cleared_on_terminal_paths() -> None:
+    """«Думаю…» не висит после final, error, stopped и исключения."""
+    import asyncio
+
+    scenarios = [
+        SimpleNamespace(kind="final", text="готово"),
+        SimpleNamespace(kind="error", error="сбой", text=""),
+        SimpleNamespace(kind="stopped", text="часть"),
+    ]
+    for event in scenarios:
+        bot = _task_bot([event])
+        _run_task(bot)
+        assert bot._active_progress is None, event
+        assert bot._active_context is None, event
+        assert bot._chat_id is None and bot._current_task_id is None
+        fake = bot._app.bot
+        if event.kind == "error":
+            assert fake.edits and "сбой" in fake.edits[-1][0], fake.edits
+            assert "Думаю" not in fake.edits[-1][0], fake.edits
+        else:
+            assert fake.deleted, "статусное сообщение должно быть закрыто"
+            texts = [text for _, text, _ in fake.sent]
+            assert any(
+                "готово" in text or "Остановлено" in text for text in texts
+            ), texts
+
+    # исключение в отправке финала и отмена задачи тоже не оставляют статус
+    bot = _task_bot([SimpleNamespace(kind="final", text="готово")])
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("внезапный сбой")
+
+    bot._maybe_show_first_hint = boom  # type: ignore[method-assign]
+    try:
+        _run_task(bot)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("исключение должно проброситься наружу")
+    assert bot._active_progress is None
+
+    bot = _task_bot([SimpleNamespace(kind="final", text="готово")])
+
+    async def cancelled(*args: object, **kwargs: object) -> None:
+        raise asyncio.CancelledError()
+
+    bot._send_final = cancelled  # type: ignore[method-assign]
+    try:
+        _run_task(bot)
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("отмена должна проброситься наружу")
+    assert bot._active_progress is None
+    print("ok  Telegram: статус сбрасывается на final/error/stopped и при отмене")
+
+
+def test_progress_close_is_idempotent() -> None:
+    """Повторный close (старый путь + finally) ничего не ломает."""
+    import asyncio
+
+    import nemus.core.telegram_bot as telegram_bot
+
+    fake = _StatusBot()
+    progress = telegram_bot._Progress(fake, 7)
+
+    async def scenario() -> None:
+        await progress.start("⏳ Думаю…")
+        await progress.close()
+        await progress.close()
+
+    asyncio.run(scenario())
+    assert fake.deleted == [101], fake.deleted
+
+    api = _DraftAPI()
+    fake2 = _StatusBot()
+    draft = telegram_bot._DraftProgress(api, fake2, 7)
+
+    async def draft_scenario() -> None:
+        await draft.start("⏳ Думаю…")
+        await draft.note("🔧 шаг")
+        await draft.close()
+        before = len(api.drafts)
+        await draft.close()
+        assert len(api.drafts) == before, "второй close не должен трогать draft"
+
+    asyncio.run(draft_scenario())
+    assert draft._keepalive is None
+    assert "Думаю" not in draft._render(), draft._render()
+    print("ok  Telegram: close и draft-close идемпотентны")
+
+
+def test_final_send_failure_falls_back_to_plain_text() -> None:
+    """Если rich и HTML не отправлены, ответ остаётся простым текстом."""
+    import asyncio
+    from unittest.mock import patch
+
+    import nemus.core.telegram_bot as telegram_bot
+
+    class _BrokenRichAPI(_DraftAPI):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rich_failures = 0
+
+        async def send_rich_message(self, **kwargs: object) -> int:
+            self.rich_failures += 1
+            raise RuntimeError("rich недоступен")
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("HTML недоступен")
+
+    for chat_type, api in (("group", None), ("private", _BrokenRichAPI())):
+        bot = _task_bot(
+            [SimpleNamespace(kind="final", text="готово")],
+            chat_type=chat_type,
+            api=api,
+        )
+        with patch.object(telegram_bot, "start_message", boom):
+            _run_task(bot, chat_type=chat_type)
+        assert bot._active_progress is None
+        fake = bot._app.bot
+        texts = [text for _, text, _ in fake.sent] + [
+            text for text, _ in fake.edits
+        ]
+        assert any("готово" in text and "Думаю" not in text for text in texts), texts
+        assert not fake.deleted, "резервный текст должен остаться в чате"
+        if api is not None:
+            assert api.rich_failures == 1, api.rich_failures
+            # пустой draft показал бы «Thinking…» — cleanup не шлёт новый draft
+            assert len(api.drafts) == 1, api.drafts
+    print("ok  Telegram: при падении rich/HTML финал уходит простым текстом")
+
+
 def test_stopped_generation_update() -> None:
     """Stop принимается только для своей задачи и своего draft."""
     import asyncio
@@ -4087,6 +4292,9 @@ def main() -> int:
     test_draft_progress()
     test_draft_keepalive_fallback()
     test_run_task_uses_draft()
+    test_telegram_status_cleared_on_terminal_paths()
+    test_progress_close_is_idempotent()
+    test_final_send_failure_falls_back_to_plain_text()
     test_stopped_generation_update()
     test_stop_denies_pending_confirmation()
     test_last_tasks_set_inside_lock()

@@ -447,10 +447,13 @@ class NemusApp:
         logger.info(f"Навык wake word «{skill.name}» → {skill.tool}")
         self.window.chat.add_user(text)
         self.window.set_state(AssistState.THINKING)
-        result = self.core.registry.execute(skill.tool, skill.arguments)
-        reply = result.content if result.ok else f"Не получилось: {result.content}"
-        self.window.chat.add_assistant(reply, self.config.assistant.name)
-        self.window.set_state(AssistState.IDLE)
+        try:
+            result = self.core.registry.execute(skill.tool, skill.arguments)
+            reply = result.content if result.ok else f"Не получилось: {result.content}"
+            self.window.chat.add_assistant(reply, self.config.assistant.name)
+        finally:
+            # сбой навыка не должен оставлять GUI в «Думаю…»
+            self.window.set_state(AssistState.IDLE)
         self._handle_speak_request(reply)
         return True
 

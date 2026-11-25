@@ -144,6 +144,32 @@ def main() -> int:
     assert i18n.tr("download.cancelled") not in text, text
     print("ok  GUI: отмена и ошибка файла/торрента без модели")
 
+    # realtime-инструмент не должен оставлять «Думаю…» после завершения
+    from nemus.core.state import AssistState
+    from types import SimpleNamespace
+
+    window.set_state(AssistState.SPEAKING)
+    window.show_realtime_tool("probe", {}, "start")
+    assert i18n.tr("state.thinking") in window.state_label.text(), (
+        window.state_label.text()
+    )
+    window.show_realtime_tool("probe", {}, "ok")
+    assert i18n.tr("state.thinking") not in window.state_label.text(), (
+        window.state_label.text()
+    )
+    assert i18n.tr("state.speaking") in window.state_label.text(), (
+        window.state_label.text()
+    )
+    window.show_realtime_tool("probe2", {}, "start")
+    window._on_agent_event(
+        SimpleNamespace(kind="error", error="сбой realtime", text="")
+    )
+    assert i18n.tr("state.thinking") not in window.state_label.text(), (
+        window.state_label.text()
+    )
+    window.set_state(AssistState.IDLE)
+    print("ok  GUI: realtime-инструмент возвращает previous state и не липнет")
+
     window.submit_text("Сколько будет 7*6?")
     # пока агент думает, в чате должен быть статус «Думаю…», а не «Слушаю…»
     assert i18n.tr("state.thinking") in window.state_label.text(), (

@@ -450,6 +450,7 @@ class _Progress:
         self._download = ""
         self._tail = ""
         self._last = 0.0
+        self._closed = False
 
     def _render(self) -> str:
         parts = [self._base, *self._notes, self._download]
@@ -495,25 +496,33 @@ class _Progress:
             pass  # «message is not modified» и гонки правок — не повод падать
 
     async def close(self) -> None:
+        """Удаляет статус; повторные вызовы (старый путь + finally) безопасны."""
+        if self._closed:
+            return
+        self._closed = True
         if self.message_id is None:
             return
+        message_id = self.message_id
+        self.message_id = None
         try:
-            await self.bot.delete_message(self.chat_id, self.message_id)
+            await self.bot.delete_message(self.chat_id, message_id)
         except Exception:  # noqa: BLE001
             pass
-        self.message_id = None
 
     async def fail(self, text: str, reply_markup: Any | None = None) -> None:
+        self._closed = True
         if self.message_id is None:
             await start_message(
                 self.bot, self.chat_id, text, reply_markup=reply_markup
             )
             return
+        message_id = self.message_id
+        self.message_id = None
         try:
             await self.bot.edit_message_text(
                 f"❌ {text}"[:3900],
                 chat_id=self.chat_id,
-                message_id=self.message_id,
+                message_id=message_id,
                 reply_markup=reply_markup,
             )
         except Exception:  # noqa: BLE001
@@ -523,6 +532,39 @@ class _Progress:
                 f"❌ {text}",
                 reply_markup=reply_markup,
             )
+            # редактирование не прошло — статус всё ещё висит в чате
+            try:
+                await self.bot.delete_message(self.chat_id, message_id)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def plain(self, text: str) -> None:
+        """Показывает ответ простым текстом, если отправка с разметкой упала."""
+        plain_text = clip_utf16(
+            (text or "Ответ не отправлен").strip()[:3900], 3900
+        )
+        self._closed = True
+        if self.message_id is not None:
+            message_id = self.message_id
+            try:
+                await self.bot.edit_message_text(
+                    plain_text, chat_id=self.chat_id, message_id=message_id
+                )
+                self.message_id = None
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await self.bot.send_message(self.chat_id, plain_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Telegram: простой ответ не отправлен: %s", exc)
+        if self.message_id is not None:
+            message_id = self.message_id
+            self.message_id = None
+            try:
+                await self.bot.delete_message(self.chat_id, message_id)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class _DraftProgress:
@@ -647,15 +689,27 @@ class _DraftProgress:
             await progress.tail(self._tail, force=True)
         self._fallback = progress
 
+    def _clear_text(self) -> None:
+        """Очищает состояние черновика (пустой draft = «Thinking…» в Telegram)."""
+        self._base = ""
+        self._notes = []
+        self._download = ""
+        self._tail = ""
+
     async def close(self) -> None:
+        """Снимает черновик «Думаю…»; повторный вызов ничего не делает."""
+        if self._closed:
+            return
         self._closed = True
         self._cancel_keepalive()
+        self._clear_text()
         if self._fallback is not None:
             await self._fallback.close()
 
     async def fail(self, text: str, reply_markup: Any | None = None) -> None:
         self._closed = True
         self._cancel_keepalive()
+        self._clear_text()
         if self._fallback is not None:
             await self._fallback.fail(text, reply_markup=reply_markup)
             return
@@ -665,6 +719,22 @@ class _DraftProgress:
             f"❌ {text}",
             reply_markup=reply_markup,
         )
+
+    async def plain(self, text: str) -> None:
+        """Черновик нельзя редактировать — шлём ответ обычным сообщением."""
+        self._closed = True
+        self._cancel_keepalive()
+        self._clear_text()
+        if self._fallback is not None:
+            await self._fallback.plain(text)
+            return
+        plain_text = clip_utf16(
+            (text or "Ответ не отправлен").strip()[:3900], 3900
+        )
+        try:
+            await self.bot.send_message(self.chat_id, plain_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Telegram: простой ответ не отправлен: %s", exc)
 
 
 async def start_message(
@@ -777,6 +847,8 @@ class TelegramBot:
         self._draft_id: int | None = None
         self._draft_chat_id: int | None = None
         self._active_progress: Any | None = None
+        #: отложенная заметка «Останавливаю…» от кнопки Stop
+        self._stop_note_task: asyncio.Task | None = None
         #: снимок контекста работающей задачи для /btw
         self._active_context: dict[str, Any] | None = None
         #: поток текущей задачи, чтобы stop() дождался его, а не бросал в фоне
@@ -3742,6 +3814,30 @@ class TelegramBot:
             reply_markup=self._keyboard(rows),
         )
 
+    async def _send_final_or_plain(
+        self,
+        progress: Any,
+        chat_id: int,
+        message_id: int | None,
+        text: str,
+        *,
+        stopped: bool = False,
+        rich: bool = True,
+    ) -> None:
+        """Отправляет финал; если разметка не ушла — оставляет простой текст."""
+        try:
+            await self._send_final(
+                chat_id, message_id, text, stopped=stopped, rich=rich
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Telegram: финальный ответ не отправлен (%s) — показываю текстом",
+                self._mask(str(exc)),
+            )
+            await progress.plain(text)
+        else:
+            await progress.close()
+
     async def _run_task_for(
         self,
         chat_id: int,
@@ -3820,38 +3916,43 @@ class TelegramBot:
             else:
                 progress = _Progress(self._app.bot, chat_id)
             self._active_progress = progress
-            await progress.start("⏳ Думаю…")
-            typing = asyncio.create_task(self._keep_typing(chat_id))
-            queue: asyncio.Queue = asyncio.Queue()
-            loop = asyncio.get_running_loop()
-
-            def push(event: Any) -> None:
-                try:
-                    loop.call_soon_threadsafe(queue.put_nowait, event)
-                except RuntimeError:
-                    pass  # бота остановили посреди задачи
-
-            def work() -> None:
-                try:
-                    for event in self.agent.run(
-                        text, images=images, stop=stop_event, observe=observe
-                    ):
-                        push(event)
-                except Exception as exc:  # noqa: BLE001
-                    push(AgentEvent(kind="error", error=str(exc)))
-                finally:
-                    push(None)
-
-            agent_thread = threading.Thread(
-                target=work, name="telegram-agent", daemon=True
-            )
-            self._agent_thread = agent_thread
-            agent_thread.start()
-
-            final_text = ""
-            error = ""
-            stopped = False
+            typing: asyncio.Task | None = None
+            agent_thread: threading.Thread | None = None
+            # Всё выполнение задачи — включая финальную отправку и ранние
+            # return — живёт внутри outer finally: статус не должен залипать
+            # ни при ошибке, ни при отмене, ни при падении форматирования.
             try:
+                await progress.start("⏳ Думаю…")
+                typing = asyncio.create_task(self._keep_typing(chat_id))
+                queue: asyncio.Queue = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+
+                def push(event: Any) -> None:
+                    try:
+                        loop.call_soon_threadsafe(queue.put_nowait, event)
+                    except RuntimeError:
+                        pass  # бота остановили посреди задачи
+
+                def work() -> None:
+                    try:
+                        for event in self.agent.run(
+                            text, images=images, stop=stop_event, observe=observe
+                        ):
+                            push(event)
+                    except Exception as exc:  # noqa: BLE001
+                        push(AgentEvent(kind="error", error=str(exc)))
+                    finally:
+                        push(None)
+
+                agent_thread = threading.Thread(
+                    target=work, name="telegram-agent", daemon=True
+                )
+                self._agent_thread = agent_thread
+                agent_thread.start()
+
+                final_text = ""
+                error = ""
+                stopped = False
                 while True:
                     event = await queue.get()
                     if event is None:
@@ -3879,12 +3980,74 @@ class TelegramBot:
                         final_text = event.text or final_text
                     elif event.kind == "error":
                         error = event.error or event.text
+
+                if stopped:
+                    final_text = (final_text or "").strip()
+                    stopped_text = (
+                        f"{final_text}\n\n⏹ Остановлено."
+                        if final_text
+                        else "⏹ Остановила задачу."
+                    )
+                    await self._send_final_or_plain(
+                        progress,
+                        chat_id,
+                        message_id,
+                        stopped_text,
+                        stopped=True,
+                        rich=chat_type == "private",
+                    )
+                    return
+                if error:
+                    await progress.fail(
+                        error_text(self._mask(error)),
+                        reply_markup=self._error_keyboard(chat_id),
+                    )
+                    return
+                final_text = (final_text or "").strip()
+                if not final_text:
+                    await progress.fail(
+                        error_text(
+                            "Пустой ответ модели. Попробуйте переформулировать задачу."
+                        ),
+                        reply_markup=self._error_keyboard(chat_id),
+                    )
+                    return
+                groups = parse_choices(final_text) or parse_grilling_choices(
+                    final_text
+                )
+                if groups:
+                    await self._send_brainstorm(
+                        chat_id,
+                        message_id,
+                        groups,
+                        user_id=user_id,
+                        chat_type=chat_type,
+                    )
+                    return
+                await self._send_final_or_plain(
+                    progress,
+                    chat_id,
+                    message_id,
+                    final_text,
+                    rich=chat_type == "private",
+                )
+                await self._maybe_show_first_hint(chat_id)
+                # Агент в общем наборе инструментов часто отвечает эмодзи в тексте,
+                # а не вызывает react_telegram. Спрашиваем отдельно и ставим сами,
+                # только если агент уже не поставил реакцию.
+                if message_id and not self._reaction_set:
+                    asyncio.create_task(
+                        self._auto_react(text, final_text, chat_id, message_id)
+                    )
             finally:
-                typing.cancel()
-                try:
-                    await typing
-                except asyncio.CancelledError:
-                    pass
+                if typing is not None:
+                    typing.cancel()
+                    try:
+                        await typing
+                    except asyncio.CancelledError:
+                        pass
+                await self._cancel_stop_note()
+                await progress.close()
                 self._chat_id = None
                 self._user_id = None
                 self._message_id = None
@@ -3895,62 +4058,8 @@ class TelegramBot:
                 self._stop_event = None
                 self._current_task_id = None
                 self._current_task_chat = None
-                if self._agent_thread is agent_thread:
+                if agent_thread is not None and self._agent_thread is agent_thread:
                     self._agent_thread = None
-
-            if stopped:
-                await progress.close()
-                final_text = (final_text or "").strip()
-                stopped_text = (
-                    f"{final_text}\n\n⏹ Остановлено."
-                    if final_text
-                    else "⏹ Остановила задачу."
-                )
-                await self._send_final(
-                    chat_id,
-                    message_id,
-                    stopped_text,
-                    stopped=True,
-                    rich=chat_type == "private",
-                )
-                return
-            if error:
-                await progress.fail(
-                    error_text(self._mask(error)),
-                    reply_markup=self._error_keyboard(chat_id),
-                )
-                return
-            final_text = (final_text or "").strip()
-            if not final_text:
-                await progress.fail(
-                    error_text("Пустой ответ модели. Попробуйте переформулировать задачу."),
-                    reply_markup=self._error_keyboard(chat_id),
-                )
-                return
-            await progress.close()
-            groups = parse_choices(final_text) or parse_grilling_choices(
-                final_text
-            )
-            if groups:
-                await self._send_brainstorm(
-                    chat_id,
-                    message_id,
-                    groups,
-                    user_id=user_id,
-                    chat_type=chat_type,
-                )
-                return
-            await self._send_final(
-                chat_id, message_id, final_text, rich=chat_type == "private"
-            )
-            await self._maybe_show_first_hint(chat_id)
-            # Агент в общем наборе инструментов часто отвечает эмодзи в тексте,
-            # а не вызывает react_telegram. Спрашиваем отдельно и ставим сами,
-            # только если агент уже не поставил реакцию.
-            if message_id and not self._reaction_set:
-                asyncio.create_task(
-                    self._auto_react(text, final_text, chat_id, message_id)
-                )
 
     # ---------------------------------------------------------- настройки
     def _autostart_state(self, *, force: bool = False) -> bool | None:
@@ -4702,12 +4811,26 @@ class TelegramBot:
         progress = self._active_progress
         if progress is not None:
             try:
-                asyncio.get_running_loop().create_task(
+                self._stop_note_task = asyncio.get_running_loop().create_task(
                     progress.note("⏹ Останавливаю…")
                 )
             except RuntimeError:
                 pass  # задача уже завершилась
         return True
+
+    async def _cancel_stop_note(self) -> None:
+        """Гасит заметку Stop до закрытия прогресса, чтобы не было гонки."""
+        task = getattr(self, "_stop_note_task", None)
+        self._stop_note_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def _deny_pending_confirmations(self, chat_id: int) -> None:
         """Отклоняет все ждущие подтверждения этого чата."""
