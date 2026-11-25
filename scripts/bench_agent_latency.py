@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import nemus.core.agent as agent_module  # noqa: E402
 from nemus.config import Config  # noqa: E402
-from nemus.core.agent import Agent  # noqa: E402
+from nemus.core.agent import Agent, _character_prompt_block  # noqa: E402
 from nemus.core.llm import StreamEvent  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
 from nemus.core.providers import LLMResponse, ProviderError  # noqa: E402
@@ -40,10 +40,12 @@ class StubLLM:
     def __init__(
         self,
         *,
+        config: Config | None = None,
         complete_delay: float = 0.010,
         stream_delay: float = 0.020,
         fail_stream_calls: int = 0,
     ) -> None:
+        self.config = config
         self.complete_delay = complete_delay
         self.stream_delay = stream_delay
         self.fail_stream_calls = fail_stream_calls
@@ -51,9 +53,16 @@ class StubLLM:
         self.stream_calls = 0
         self.complete_seconds = 0.0
         self.stream_seconds = 0.0
+        self.last_messages: list[Any] | None = None
+        self.character_block = ""
 
     def complete(self, messages: list[Any], **overrides: Any) -> LLMResponse:
         self.complete_calls += 1
+        self.last_messages = messages
+        # Считаем блок в момент вызова: состояние эмоций уже обновлено
+        # _observe_emotions(), как и перед настоящим запросом к модели.
+        if self.config is not None:
+            self.character_block = _character_prompt_block(self.config)
         started = time.perf_counter()
         time.sleep(self.complete_delay)
         self.complete_seconds += time.perf_counter() - started
@@ -84,9 +93,12 @@ def _isolated_config() -> Config:
 
 def build_agent(cfg: Config, llm: StubLLM | None = None) -> Agent:
     """Агент с пустым реестром инструментов и заглушкой LLM."""
+    llm = llm or StubLLM()
+    if llm.config is None:
+        llm.config = cfg
     return Agent(
         cfg,
-        llm=llm or StubLLM(),  # type: ignore[arg-type]
+        llm=llm,  # type: ignore[arg-type]
         registry=ToolRegistry(),
         permissions=PermissionManager(cfg),
         memory=None,
@@ -106,6 +118,14 @@ def test_simple_request_uses_fast_path_with_character_enabled() -> None:
     # полный цикл даже не начинался (prompt refresh и tool-схемы не трогались).
     assert llm.complete_calls == 1, llm.complete_calls
     assert llm.stream_calls == 0, llm.stream_calls
+    # Проверяем и содержимое быстрого промпта: характер не должен тихо
+    # исчезнуть из системного сообщения при включённом character.enabled.
+    assert llm.last_messages is not None, "быстрый путь не передал сообщения в LLM"
+    assert llm.last_messages[0].role == "system"
+    assert llm.character_block, "_character_prompt_block вернул пусто при включённом характере"
+    assert llm.character_block in str(llm.last_messages[0].content), (
+        "в быстром системном промпте нет блока характера"
+    )
 
 
 def _instrument(agent: Agent) -> dict[str, float]:
