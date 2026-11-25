@@ -135,6 +135,24 @@ def test_model_download_publishes_unified_event() -> None:
     print("ok  model download adapter is additive")
 
 
+def test_model_progress_without_legacy_listener_is_single() -> None:
+    """Без legacy-подписчика одна загрузка модели даёт одно событие в шине."""
+    unified: list[DownloadEvent] = []
+    token = subscribe_download(unified.append)
+    assert not hf_download._LISTENERS, "тест не должен наследовать чужих слушателей"
+    try:
+        hf_download._publish(
+            hf_download.ModelDownloadEvent(
+                phase="progress", repo="owner", filename="model.gguf",
+                done=1, total=2,
+            )
+        )
+    finally:
+        unsubscribe_download(token)
+    assert len(unified) == 1, unified
+    print("ok  model progress delivered once on the unified bus")
+
+
 def main() -> int:
     test_download_event_bus_and_bar()
     test_percent_none_and_unknown_bar()
@@ -142,6 +160,7 @@ def main() -> int:
     test_new_download_id_is_unique()
     test_concurrent_publish_reaches_listeners()
     test_model_download_publishes_unified_event()
+    test_model_progress_without_legacy_listener_is_single()
     print("\nDOWNLOAD EVENT TESTS PASSED")
     return 0
 

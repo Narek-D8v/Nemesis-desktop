@@ -118,19 +118,27 @@ class RealtimeBridge(QObject):
         self.window = window
         self._ready = threading.Event()
         self._value = False
+        self._confirm_args: dict[str, Any] | None = None
         self.confirm_requested.connect(self._on_confirm_requested)
 
     def confirm(self, tool: Tool, args: dict[str, Any]) -> bool:
         """Вызывается из потока realtime-сессии (блокирует его до ответа GUI)."""
         self._ready.clear()
         self._value = False
+        self._confirm_args = args
         self.confirm_requested.emit((tool, dict(args)))
         self._ready.wait()
         return self._value
 
     def _on_confirm_requested(self, payload: Any) -> None:
         tool, args = payload
-        self._value = ConfirmDialog.ask(tool, args, self.window)
+        allowed = ConfirmDialog.ask(tool, args, self.window)
+        from nemus.core.tools.torrents import grant_torrent_consent
+
+        extra = grant_torrent_consent(tool, args, allowed)
+        if allowed and extra and self._confirm_args is not None:
+            self._confirm_args.update(extra)
+        self._value = allowed
         self._ready.set()
 
 

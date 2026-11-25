@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -53,6 +55,39 @@ class _TooLarge(Exception):
 
 class _Cancelled(Exception):
     """Загрузка отменена через ``DownloadControls``."""
+
+
+#: одноразовые токены, выданные ботом/GUI после нажатия кнопки согласия
+_CONSENT: dict[str, str] = {}
+_CONSENT_LOCK = threading.Lock()
+
+
+def issue_torrent_consent(source: str = "") -> str:
+    """Выдаёт токен после реального пользовательского согласия."""
+    token = secrets.token_urlsafe(24)
+    with _CONSENT_LOCK:
+        _CONSENT[token] = str(source or "")
+    return token
+
+
+def consume_torrent_consent(token: str, source: str = "") -> bool:
+    """Проверяет и сразу сжигает токен; источник должен совпадать."""
+    key = str(token or "")
+    with _CONSENT_LOCK:
+        expected = _CONSENT.pop(key, None)
+    if expected is None:
+        return False
+    return not source or expected == source
+
+
+def grant_torrent_consent(
+    tool: Any, args: dict[str, Any], allowed: bool
+) -> dict[str, Any]:
+    """Дополнительные аргументы агента после одобрения торрента в UI."""
+    if not allowed or getattr(tool, "name", "") != "torrent_download":
+        return {}
+    source = str(args.get("magnet") or args.get("torrent_url") or "").strip()
+    return {"consent_token": issue_torrent_consent(source)}
 
 
 def _libtorrent() -> Any:
@@ -105,8 +140,9 @@ class TorrentDownloadTool(Tool):
         "когда обычная загрузка и браузер не помогли. Принимает только magnet "
         "или HTTPS-ссылку на .torrent, которую прямо прислал пользователь: "
         "сам торренты не ищет. Требует явного согласия пользователя (в Telegram "
-        "— инлайн-кнопка, в GUI — ConfirmDialog). Возвращает путь, размер и "
-        "SHA-256; публикует прогресс с kind=torrent."
+        "— инлайн-кнопка, в GUI — ConfirmDialog). Без токена согласия, выданного "
+        "ботом или GUI, не запускается. Возвращает путь, размер и SHA-256; "
+        "публикует прогресс с kind=torrent."
     )
     parameters = {
         "type": "object",
@@ -139,6 +175,9 @@ class TorrentDownloadTool(Tool):
     root: Path = PROJECT_ROOT / "data" / "downloads"
     #: реестр отмены; тесты и UI могут подменить свой
     controls: DownloadControls = download_controls
+    #: одноразовый токен, который выдают бот/GUI после нажатия пользователем
+    #: кнопки согласия. Не входит в JSON-схему: модель не может выдать его сама.
+    consent_token: str = ""
     #: внешний task_id; пустой → генерируется сам
     task_id: str = ""
     #: task_id последнего вызова, чтобы UI мог показать/отменить задачу
@@ -150,6 +189,7 @@ class TorrentDownloadTool(Tool):
         torrent_url: str = "",
         filename: str = "",
         max_mb: int = DEFAULT_MAX_MB,
+        consent_token: str = "",
         **_: object,
     ) -> ToolResult:
         raw_magnet = str(magnet or "").strip()
@@ -170,6 +210,12 @@ class TorrentDownloadTool(Tool):
                 )
         except ValueError as exc:
             return ToolResult.failure(str(exc))
+
+        if not consume_torrent_consent(consent_token, source):
+            return ToolResult.failure(
+                "Торрент не запущен: нужно согласие пользователя через "
+                "инлайн-кнопку в Telegram или ConfirmDialog в GUI."
+            )
 
         try:
             limit_mb = max(1, min(int(max_mb or DEFAULT_MAX_MB), HARD_MAX_MB))
@@ -358,4 +404,10 @@ def torrent_tools() -> list[Tool]:
     return [TorrentDownloadTool()]
 
 
-__all__ = ["LIBTORRENT_INSTALL_HINT", "TorrentDownloadTool", "torrent_tools"]
+__all__ = [
+    "LIBTORRENT_INSTALL_HINT",
+    "TorrentDownloadTool",
+    "grant_torrent_consent",
+    "issue_torrent_consent",
+    "torrent_tools",
+]

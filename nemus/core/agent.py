@@ -2655,12 +2655,37 @@ class Agent:
         self.history.append(Message(role="user", content=parts))
         # в историю БД картинки не пишем
 
+    _INSTALL_TOOL_CONFIRM = frozenset({"verify_installer", "install_verified"})
+
+    def _confirmation_args(self, tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет в окно подтверждения вердикт проверки установщика.
+
+        Копия нужна, чтобы информационный предпросмотр не попал в сам вызов
+        инструмента и не подменил аргументы, пришедшие от модели.
+        """
+        if tool.name not in self._INSTALL_TOOL_CONFIRM:
+            return args
+        from nemus.core.tools.system import verification_confirmation
+
+        payload = dict(args)
+        try:
+            payload["verification"] = verification_confirmation(
+                path=str(args.get("path", "") or ""),
+                expected_sha256=str(args.get("expected_sha256", "") or ""),
+                explicit_piracy_request=bool(args.get("explicit_piracy_request", False)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload["verification"] = {"error": str(exc)[:300]}
+        return payload
+
     def _execute_tool(self, tool: Tool, args: dict[str, Any]) -> ToolResult:
         decision = self.permissions.check(tool, args)
         if decision == Decision.DENY:
             return ToolResult.failure(f"Инструмент '{tool.name}' запрещён политикой.")
         if decision == Decision.ASK:
-            if self.confirm is None or not self.confirm(tool, args):
+            if self.confirm is None or not self.confirm(
+                tool, self._confirmation_args(tool, args)
+            ):
                 return ToolResult.failure(
                     f"Пользователь отклонил вызов инструмента '{tool.name}'."
                 )

@@ -44,7 +44,6 @@ from nemus.core.download_events import (
 from nemus.core.providers.hf_download import (
     ModelDownloadEvent,
     format_bytes,
-    subscribe_model_download,
     unsubscribe_model_download,
 )
 from nemus.core.skill_commands import parse_skill_commands
@@ -246,7 +245,8 @@ class MainWindow(QMainWindow):
         self._download_token = ""
         self.model_download_event.connect(self._on_model_download_event)
         self.download_event.connect(self._on_download_event)
-        subscribe_model_download(self._download_listener)
+        # hf_download публикует модели и в общую шину: legacy-подписка давала
+        # бы по два обновления на каждое событие.
         self._download_token = subscribe_download(self._emit_download)
         self.destroyed.connect(self._unsubscribe_downloads)
         self._download_hide_timer = QTimer(self)
@@ -949,8 +949,11 @@ class MainWindow(QMainWindow):
     def _on_confirm_requested(self, payload: Any) -> None:
         tool, args = payload
         allowed = ConfirmDialog.ask(tool, args, self)
+        from nemus.core.tools.torrents import grant_torrent_consent
+
+        extra = grant_torrent_consent(tool, args, allowed)
         if self._worker is not None:
-            self._worker.resolve_confirmation(allowed)
+            self._worker.resolve_confirmation(allowed, extra=extra)
 
     def _on_run_finished(self) -> None:
         self.chat.thought_end()

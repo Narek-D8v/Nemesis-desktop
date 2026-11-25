@@ -29,6 +29,12 @@ _INSTALL_RE = re.compile(
 )
 #: инструменты, через которые выполняются такие команды
 _COMMAND_TOOLS = frozenset({"run_shell", "run_python"})
+#: инструменты, которым нужно отдельное согласие человека даже в full-auto.
+#: ``confirmed=True``/``explicit_piracy_request=True`` приходят от модели и
+#: поэтому сами по себе подтверждением не являются.
+_FORCED_ASK_TOOLS = frozenset(
+    {"download_file", "verify_installer", "install_verified", "torrent_download"}
+)
 
 
 def is_install_command(args: dict[str, Any] | None) -> bool:
@@ -53,7 +59,7 @@ class PermissionManager:
             return Decision.DENY
         # Установка меняет ноутбук: даже full-auto не должен тихо её выполнять.
         if self.confirm_installs:
-            if tool.name == "download_file":
+            if tool.name in _FORCED_ASK_TOOLS:
                 return Decision.ASK
             if tool.name in _COMMAND_TOOLS and is_install_command(args):
                 return Decision.ASK

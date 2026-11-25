@@ -895,6 +895,50 @@ def test_telegram_download_bar_uses_task_id() -> None:
     print("ok  Telegram: параллельные загрузки показаны по task_id")
 
 
+def test_model_progress_reaches_telegram_once() -> None:
+    """Одно событие модели = одно обновление строки (без legacy-дубля)."""
+    import asyncio
+
+    from nemus.core.providers import hf_download  # noqa: PLC0415
+
+    class _ProgressStub:
+        def __init__(self) -> None:
+            self.chat_id = 7
+            self.lines: list[str] = []
+
+        async def download(self, text: str, *, force: bool = False) -> None:
+            self.lines.append(text)
+
+    loop = asyncio.new_event_loop()
+    progress = _ProgressStub()
+    bot = object.__new__(TelegramBot)
+    bot._loop = loop
+    bot._active_progress = progress
+    bot._download_rows = {}
+    bot._chat_id = 7
+    bot._notify_chat_id = 7
+    bot._download_token = ""
+    legacy_before = len(hf_download._LISTENERS)
+    try:
+        bot._subscribe_download()
+        assert len(hf_download._LISTENERS) == legacy_before, (
+            "Telegram не должен подписываться на legacy-канал модели"
+        )
+        hf_download._publish(
+            hf_download.ModelDownloadEvent(
+                phase="progress", repo="owner", filename="model.gguf",
+                done=84, total=125,
+            )
+        )
+        loop.run_until_complete(asyncio.sleep(0.01))
+        assert len(progress.lines) == 1, progress.lines
+        assert "model.gguf" in progress.lines[0], progress.lines
+    finally:
+        bot._unsubscribe_download()
+        loop.close()
+    print("ok  Telegram: событие модели приходит один раз через общую шину")
+
+
 def test_never_started_bot_does_not_subscribe_download() -> None:
     """Незапущенный бот не оставляет слушателя в общей шине."""
     import nemus.core.download_events as download_events
@@ -3069,7 +3113,13 @@ def test_telegram_status_cleared_on_terminal_paths() -> None:
     ]
     for event in scenarios:
         bot = _task_bot([event])
+        # строка без terminal-события не должна перейти в следующую задачу
+        bot._download_rows = {
+            (7, "stale"): "⬇️ setup.exe: 40%",
+            (8, "other-chat"): "⬇️ driver.zip: 10%",
+        }
         _run_task(bot)
+        assert bot._download_rows == {(8, "other-chat"): "⬇️ driver.zip: 10%"}
         assert bot._active_progress is None, event
         assert bot._active_context is None, event
         assert bot._chat_id is None and bot._current_task_id is None
@@ -3152,7 +3202,6 @@ def test_progress_close_is_idempotent() -> None:
 
 def test_final_send_failure_falls_back_to_plain_text() -> None:
     """Если rich и HTML не отправлены, ответ остаётся простым текстом."""
-    import asyncio
     from unittest.mock import patch
 
     import nemus.core.telegram_bot as telegram_bot
@@ -3967,10 +4016,12 @@ def test_torrent_tool_publishes_progress(tmp_path: Path) -> None:
     old_interval = torrent_mod.POLL_INTERVAL
     torrent_mod._libtorrent = lambda: fake_lt
     torrent_mod.POLL_INTERVAL = 0
+    magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
     try:
         result = tool.execute(
-            magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            magnet=magnet,
             filename=name,
+            consent_token=torrent_mod.issue_torrent_consent(magnet),
         )
     finally:
         torrent_mod._libtorrent = old_lib
@@ -4181,6 +4232,122 @@ def test_torrent_inline_button_gate() -> None:
     print("ok  инлайн-согласие торрента: только своя кнопка и :y даёт доступ")
 
 
+def test_torrent_direct_call_refused_and_inline_td_authorizes(tmp_path: Path) -> None:
+    """Прямой вызов и поддельный токен не работают; td:y выдаёт токен боту."""
+    import asyncio
+    import threading
+    import time
+    from unittest.mock import patch  # noqa: PLC0415
+
+    from nemus.core.tools import torrents as torrent_mod
+
+    magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+    tool = torrent_mod.TorrentDownloadTool()
+    tool.root = tmp_path / "downloads"
+    refused = tool.execute(magnet=magnet, filename="setup.exe")
+    assert not refused.ok and "согласие" in refused.content.casefold(), refused.content
+    forged = tool.execute(magnet=magnet, consent_token="forged")
+    assert not forged.ok and "согласие" in forged.content.casefold(), forged.content
+
+    cfg = Config()
+    cfg.telegram.allowed_users = [7]
+    bot = object.__new__(TelegramBot)
+    bot.cfg = cfg.telegram
+    bot._pending = {}
+    bot._stop_event = None
+    bot._chat_id = 42
+    bot._user_id = 7
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict]] = []
+
+        async def send_message(
+            self, chat_id: int, text: str, **kwargs: object
+        ) -> SimpleNamespace:
+            self.sent.append((text, kwargs))
+            return SimpleNamespace(
+                message_id=1,
+                edit_reply_markup=lambda **_: asyncio.sleep(0),
+            )
+
+    class _Query:
+        def __init__(self, data: str) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=7)
+            self.message = SimpleNamespace(chat_id=42, message_id=1)
+            self.answers: list[str] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append(text)
+
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            return None
+
+        async def edit_message_reply_markup(self, **kwargs: object) -> None:
+            return None
+
+    loop = asyncio.new_event_loop()
+    fake = _FakeBot()
+    bot._loop = loop
+    bot._app = SimpleNamespace(bot=fake)
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+    results: list[bool] = []
+    args = {"magnet": magnet, "filename": "setup.exe"}
+    agent_thread = threading.Thread(
+        target=lambda: results.append(
+            bot._confirm(SimpleNamespace(name="torrent_download"), args)
+        ),
+        daemon=True,
+    )
+    try:
+        agent_thread.start()
+        deadline = time.monotonic() + 5
+        while not fake.sent and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert fake.sent, "бот должен показать инлайн-кнопку td:"
+        buttons = [
+            button
+            for row in fake.sent[0][1]["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        yes = next(
+            button.callback_data for button in buttons if button.callback_data.endswith(":y")
+        )
+        assert yes.startswith("td:42:7:"), yes
+
+        query = _Query(yes)
+
+        def click() -> None:
+            update = SimpleNamespace(
+                callback_query=query,
+                effective_user=SimpleNamespace(id=7),
+                effective_chat=SimpleNamespace(id=42, type="private"),
+            )
+            asyncio.run_coroutine_threadsafe(bot._on_callback(update, None), loop).result(
+                timeout=5
+            )
+
+        click()
+        agent_thread.join(timeout=5)
+        assert results == [True], results
+        assert args.get("consent_token"), args
+
+        def _missing() -> object:
+            raise ImportError("No module named 'libtorrent'")
+
+        with patch.object(torrent_mod, "_libtorrent", _missing):
+            reached_gate = tool.execute(**args)
+        assert not reached_gate.ok, reached_gate.content
+        assert "pip install python-libtorrent" in reached_gate.content, reached_gate.content
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=5)
+        loop.close()
+    print("ok  торрент: прямой вызов запрещён, td:y выдаёт токен согласия")
+
+
 def test_torrent_input_and_dependency_guards(tmp_path: Path) -> None:
     """Только явный-source; без libtorrent — failure с подсказкой, не crash."""
     from nemus.core.tools import torrents as torrent_mod
@@ -4199,10 +4366,12 @@ def test_torrent_input_and_dependency_guards(tmp_path: Path) -> None:
         raise ImportError("No module named 'libtorrent'")
 
     torrent_mod._libtorrent = _missing
+    magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
     try:
         result = tool.execute(
-            magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            magnet=magnet,
             filename="setup.exe",
+            consent_token=torrent_mod.issue_torrent_consent(magnet),
         )
     finally:
         torrent_mod._libtorrent = old_lib
@@ -4274,6 +4443,9 @@ def main() -> int:
         test_torrent_add_uses_libtorrent_2x_attribute_api(folder / "api2")
         test_torrent_add_falls_back_to_legacy_dict_params(folder / "api1")
         test_torrent_input_and_dependency_guards(folder / "guards")
+        test_torrent_direct_call_refused_and_inline_td_authorizes(
+            folder / "consent"
+        )
     test_torrent_inline_button_gate()
     test_reaction_list_complete()
     test_reaction_choice()
@@ -4288,6 +4460,7 @@ def main() -> int:
     test_rich_final_fallback()
     test_progress_download_line()
     test_telegram_download_bar_uses_task_id()
+    test_model_progress_reaches_telegram_once()
     test_never_started_bot_does_not_subscribe_download()
     test_draft_progress()
     test_draft_keepalive_fallback()

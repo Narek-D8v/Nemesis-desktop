@@ -24,18 +24,24 @@ class AgentWorker(QThread):
         self.text = text
         self._confirm_ready = threading.Event()
         self._confirm_value = False
+        self._confirm_args: dict[str, Any] | None = None
 
     # --------------------------------------------- вызывается рабочим потоком
     def _request_confirmation(self, tool: Tool, args: dict[str, Any]) -> bool:
         self._confirm_ready.clear()
         self._confirm_value = False
+        self._confirm_args = args
         self.confirm_requested.emit((tool, dict(args)))
         self._confirm_ready.wait()
         return self._confirm_value
 
     # --------------------------------------------- вызывается главным потоком
-    def resolve_confirmation(self, allowed: bool) -> None:
-        """Разрешает или отклоняет подтверждение."""
+    def resolve_confirmation(
+        self, allowed: bool, extra: dict[str, Any] | None = None
+    ) -> None:
+        """Разрешает подтверждение и добавляет выданные UI аргументы (токен)."""
+        if allowed and extra and self._confirm_args is not None:
+            self._confirm_args.update(extra)
         self._confirm_value = allowed
         self._confirm_ready.set()
 

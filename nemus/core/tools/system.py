@@ -655,6 +655,32 @@ class VerifyInstallerTool(Tool):
         )
 
 
+def verification_confirmation(
+    path: str = "",
+    expected_sha256: str = "",
+    explicit_piracy_request: bool = False,
+) -> dict[str, str]:
+    """Короткий вердикт для окна подтверждения установки/проверки.
+
+    Только информирует человека: инструмент при Execute всё равно повторяет
+    проверку. ``warning`` (неподписанный файл по явной просьбе) показывается
+    пользователю до нажатия кнопки, а не только после запуска.
+    """
+    result = VerifyInstallerTool().execute(
+        path=path,
+        expected_sha256=expected_sha256,
+        explicit_piracy_request=explicit_piracy_request,
+    )
+    fields = {"ok": "true" if result.ok else "false"}
+    for line in result.content.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in {
+            "verdict", "defender", "signature", "sha256", "warning"
+        }:
+            fields[key.strip()] = value.strip()[:300]
+    return fields
+
+
 class InstallVerifiedTool(Tool):
     name = "install_verified"
     description = (

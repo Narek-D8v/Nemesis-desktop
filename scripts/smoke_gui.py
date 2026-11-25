@@ -92,9 +92,17 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication([])
     core = build_fake_core()
+    from nemus.core.providers import hf_download  # noqa: PLC0415
+
+    legacy_before = len(hf_download._LISTENERS)
     window = MainWindow(core)
     window.show()
+    assert len(hf_download._LISTENERS) == legacy_before, (
+        "GUI не должен подписываться на legacy-канал модели"
+    )
 
+    emitted: list[DownloadEvent] = []
+    window.download_event.connect(emitted.append)
     publish_download(
         DownloadEvent(
             kind="file",
@@ -106,12 +114,41 @@ def main() -> int:
         )
     )
     QApplication.processEvents()
+    assert len(emitted) == 1, "одно событие должно давать один Qt-сигнал"
     assert "setup.exe" in window.download_label.text(), (
         window.download_label.text()
     )
     assert "67%" in window.download_label.text(), window.download_label.text()
     assert window.download_bar.value() == 670, window.download_bar.value()
     print("ok  GUI: прогресс файла показывает имя и проценты")
+
+    # Подтверждение торрента в GUI выдаёт токен, который инструмент принимает
+    from nemus.core.tools.base import RiskLevel, Tool, ToolResult  # noqa: PLC0415
+    from nemus.core.tools.torrents import (  # noqa: PLC0415
+        consume_torrent_consent,
+        grant_torrent_consent,
+    )
+    from nemus.gui.worker import AgentWorker  # noqa: PLC0415
+
+    class _TorrentStub(Tool):
+        name = "torrent_download"
+        description = "stub"
+        parameters = {"type": "object", "properties": {}}
+        risk = RiskLevel.DANGEROUS
+
+        def execute(self, **_: object) -> ToolResult:
+            return ToolResult.success("stub")
+
+    worker = AgentWorker(core.agent, "test")
+    torrent_args = {"magnet": "magnet:?xt=urn:btih:gui"}
+    worker._confirm_args = torrent_args
+    extra = grant_torrent_consent(_TorrentStub(), torrent_args, True)
+    worker.resolve_confirmation(True, extra=extra)
+    assert torrent_args["consent_token"] == extra["consent_token"]
+    assert consume_torrent_consent(
+        torrent_args["consent_token"], torrent_args["magnet"]
+    )
+    print("ok  GUI: ConfirmDialog выдаёт одноразовый токен согласия на торрент")
 
     from nemus.gui import i18n
 
@@ -145,8 +182,9 @@ def main() -> int:
     print("ok  GUI: отмена и ошибка файла/торрента без модели")
 
     # realtime-инструмент не должен оставлять «Думаю…» после завершения
-    from nemus.core.state import AssistState
     from types import SimpleNamespace
+
+    from nemus.core.state import AssistState
 
     window.set_state(AssistState.SPEAKING)
     window.show_realtime_tool("probe", {}, "start")

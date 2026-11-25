@@ -115,6 +115,110 @@ def test_install_command_requires_confirmation_in_full_auto() -> None:
     print("ok  PermissionManager: установки требуют подтверждения")
 
 
+def test_permission_matrix_for_install_and_torrent_tools() -> None:
+    """Пользовательский гейт включён во всех режимах, пока confirm_installs=true."""
+    from nemus.core.tools.all import all_builtin_tools  # noqa: PLC0415
+
+    tools = {item.name: item for item in all_builtin_tools()}
+    names = ("download_file", "verify_installer", "install_verified", "torrent_download")
+    assert set(names) <= set(tools), set(tools)
+    args = {"path": "setup.exe", "magnet": "magnet:?xt=urn:btih:test"}
+
+    for mode in ("full-auto", "smart", "confirm-all"):
+        for enabled in (True, False):
+            config = Config()
+            config.tools.permission_mode = mode
+            config.tools.confirm_installs = enabled
+            manager = PermissionManager(config)
+            decisions = {name: manager.check(tools[name], args) for name in names}
+            if enabled:
+                assert set(decisions.values()) == {Decision.ASK}, (mode, decisions)
+                # обычная установка через shell по-прежнему под гейтом
+                assert manager.check(_Shell(), {"command": "winget install X.Y"}) == (
+                    Decision.ASK
+                )
+                continue
+            # осознанное отключение confirm_installs возвращает правила режима
+            if mode == "full-auto":
+                expected = {name: Decision.ALLOW for name in names}
+            elif mode == "smart":
+                expected = {
+                    "download_file": Decision.ASK,
+                    "verify_installer": Decision.ALLOW,
+                    "install_verified": Decision.ASK,
+                    "torrent_download": Decision.ASK,
+                }
+            else:
+                expected = {name: Decision.ASK for name in names}  # auto_allow пуст
+            assert decisions == expected, (mode, decisions, expected)
+    print("ok  PermissionManager: матрица режимов и confirm_installs")
+
+
+def test_agent_install_gate_uses_real_confirmation() -> None:
+    """Модель не может запустить установку своим confirmed=True без кнопки."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    from nemus.core.agent import Agent  # noqa: PLC0415
+    from nemus.core.tools.all import all_builtin_tools  # noqa: PLC0415
+
+    class _Registry:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def execute(self, name: str, args: dict[str, object]) -> ToolResult:
+            self.calls.append((name, dict(args)))
+            return ToolResult.success("installer would have run")
+
+    tool = next(item for item in all_builtin_tools() if item.name == "install_verified")
+    args = {"path": "setup.exe", "confirmed": True, "explicit_piracy_request": True}
+    payloads: list[dict[str, object]] = []
+    registry = _Registry()
+
+    def make_agent(enabled: bool, confirm: object) -> Agent:
+        config = Config()
+        config.tools.permission_mode = "full-auto"
+        config.tools.confirm_installs = enabled
+        agent = object.__new__(Agent)
+        agent.permissions = PermissionManager(config)  # type: ignore[attr-defined]
+        agent.confirm = confirm  # type: ignore[attr-defined]
+        agent.registry = registry  # type: ignore[attr-defined]
+        return agent
+
+    verdict = {
+        "ok": "true",
+        "verdict": "warning",
+        "warning": "подпись отсутствует; нужно отдельное подтверждение",
+    }
+    with patch(
+        "nemus.core.tools.system.verification_confirmation", return_value=verdict
+    ) as preview:
+
+        def approve(_tool: object, confirm_args: dict[str, object]) -> bool:
+            payloads.append(dict(confirm_args))
+            return True
+
+        agent = make_agent(True, approve)
+        result = agent._execute_tool(tool, dict(args))
+        assert result.ok, result.content
+        assert preview.call_count == 1
+        assert payloads[0]["verification"] == verdict, payloads
+        assert "verification" not in registry.calls[0][1], registry.calls
+
+        agent = make_agent(True, lambda _t, _a: False)
+        denied = agent._execute_tool(tool, dict(args))
+        assert not denied.ok, denied.content
+        assert len(registry.calls) == 1, registry.calls
+
+    # Отключённый гейт — осознанный выбор пользователя: кнопки не должно быть.
+    agent = make_agent(False, lambda _t, _a: (_ for _ in ()).throw(
+        AssertionError("confirm не должен вызываться при confirm_installs=false")
+    ))
+    allowed = agent._execute_tool(tool, dict(args))
+    assert allowed.ok, allowed.content
+    assert len(registry.calls) == 2, registry.calls
+    print("ok  Agent: verified install требует реального подтверждения")
+
+
 def test_download_creates_folder_and_returns_hash(tmp_path: Path) -> None:
     """Скачивание само создаёт data/downloads и отдаёт путь, размер и SHA-256."""
     seen: list[str] = []
@@ -795,6 +899,8 @@ def main() -> None:
         root = Path(tmp)
         test_skill_found_for_generic_install_request()
         test_install_command_requires_confirmation_in_full_auto()
+        test_permission_matrix_for_install_and_torrent_tools()
+        test_agent_install_gate_uses_real_confirmation()
         test_download_creates_folder_and_returns_hash(root / "a")
         test_download_rejects_plain_http(root / "b")
         test_download_enforces_size_limit(root / "c")

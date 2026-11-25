@@ -1948,10 +1948,9 @@ class TelegramBot:
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        from nemus.core.providers.hf_download import subscribe_model_download
-
+        # Только единая шина: legacy-подписка модели дублировала бы события,
+        # потому что hf_download сам публикует их и в общий канал.
         self._subscribe_download()
-        subscribe_model_download(self._download_listener)
         try:
             self._app = self._build_application()
             self._api = TelegramAdvancedAPI(self._app.bot)
@@ -2075,6 +2074,11 @@ class TelegramBot:
         force = event.phase in {"done", "error", "cancelled"}
         await progress.download(text, force=force)
         if force:
+            self._download_rows.pop(key, None)
+
+    def _clear_download_rows(self, chat_id: int) -> None:
+        """Убирает строки этого чата при закрытии задачи, даже без terminal-события."""
+        for key in [key for key in self._download_rows if key[0] == int(chat_id)]:
             self._download_rows.pop(key, None)
 
     def _subscribe_download(self) -> None:
@@ -4048,6 +4052,7 @@ class TelegramBot:
                         pass
                 await self._cancel_stop_note()
                 await progress.close()
+                self._clear_download_rows(chat_id)
                 self._chat_id = None
                 self._user_id = None
                 self._message_id = None
@@ -4859,19 +4864,30 @@ class TelegramBot:
                 self._request_stop(int(chat_id), draft_id=draft_id)
 
     # -------------------------------------------------------- подтверждение
-    def _confirm(self, tool: Any, args: dict[str, Any]) -> bool:
-        """Спрашивает разрешение кнопками (вызывается из потока агента)."""
-        chat_id = self._chat_id
-        user_id = self._user_id
-        if chat_id is None or user_id is None or self._loop is None:
-            return False
+    def _wait_confirm_future(self, future: Any) -> bool:
+        """Ждёт ответа на кнопку, не блокируя Stop дольше четверти секунды.
+
+        ``td:``-согласие приходит как ``asyncio.Future`` из event loop бота,
+        обычное подтверждение — как ``concurrent.futures.Future``. У обоих
+        типов разные ``result(timeout=...)``, поэтому asyncio-фьючерс сначала
+        оборачивается в wait_for внутри цикла бота.
+        """
+        deadline = time.monotonic() + CONFIRM_TIMEOUT + 30
+        waiter = future
+        if isinstance(future, asyncio.Future):
+            loop = self._loop
+
+            async def resolve() -> bool:
+                remaining = max(0.1, deadline - asyncio.get_running_loop().time())
+                return bool(
+                    await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
+                )
+
+            try:
+                waiter = asyncio.run_coroutine_threadsafe(resolve(), loop)
+            except RuntimeError:
+                return False
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._ask_confirm(chat_id, user_id, tool, args), self._loop
-            )
-            # Ждём короткими шагами: Stop должен освободить агентский поток
-            # сразу, а не через CONFIRM_TIMEOUT.
-            deadline = time.monotonic() + CONFIRM_TIMEOUT + 30
             while True:
                 if self._stop_event is not None and self._stop_event.is_set():
                     return False
@@ -4879,9 +4895,37 @@ class TelegramBot:
                 if remaining <= 0:
                     return False
                 try:
-                    return bool(future.result(timeout=min(0.25, remaining)))
+                    return bool(waiter.result(timeout=min(0.25, remaining)))
                 except TimeoutError:
                     continue
+                except Exception:  # noqa: BLE001
+                    return False
+        finally:
+            if waiter is not future and not waiter.done():
+                waiter.cancel()
+
+    def _confirm(self, tool: Any, args: dict[str, Any]) -> bool:
+        """Спрашивает разрешение кнопками (вызывается из потока агента)."""
+        chat_id = self._chat_id
+        user_id = self._user_id
+        if chat_id is None or user_id is None or self._loop is None:
+            return False
+        try:
+            if getattr(tool, "name", "") == "torrent_download":
+                # Реальный производственный вызов _ask_torrent: согласие
+                # приходит через td:-кнопки и превращается в одноразовый токен.
+                detail = json.dumps(args, ensure_ascii=False, default=str)
+                future = self._ask_torrent(chat_id, user_id, detail[:2000])
+                allowed = self._wait_confirm_future(future)
+                if allowed:
+                    from nemus.core.tools.torrents import grant_torrent_consent
+
+                    args.update(grant_torrent_consent(tool, args, True))
+                return allowed
+            future = asyncio.run_coroutine_threadsafe(
+                self._ask_confirm(chat_id, user_id, tool, args), self._loop
+            )
+            return self._wait_confirm_future(future)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Telegram: подтверждение не получено: {exc}")
             return False
