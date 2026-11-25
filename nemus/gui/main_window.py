@@ -718,16 +718,28 @@ class MainWindow(QMainWindow):
                 self._download_hide_timer.start(8000)
             return
         if event.phase == "cancelled":
-            self._render_download_rows(i18n.tr("download.cancelled"))
+            if event.kind == "model":
+                final = i18n.tr("download.cancelled")
+            else:
+                final = i18n.tr("download.file_cancelled", name=name)
+            self._render_download_rows(final)
             self.download_bar.setVisible(False)
             self._download_rows.pop(key, None)
             if not self._download_rows:
                 self._download_hide_timer.start(5000)
             return
         if event.phase == "error":
-            self._render_download_rows(
-                i18n.tr("download.failed", msg=(event.message or "")[:180])
-            )
+            if event.kind == "model":
+                final = i18n.tr(
+                    "download.failed", msg=(event.message or "")[:180]
+                )
+            else:
+                final = i18n.tr(
+                    "download.file_failed",
+                    name=name,
+                    msg=(event.message or "")[:180],
+                )
+            self._render_download_rows(final)
             self.download_bar.setVisible(False)
             self._download_rows.pop(key, None)
             if not self._download_rows:

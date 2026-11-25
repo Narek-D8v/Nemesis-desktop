@@ -113,10 +113,39 @@ def main() -> int:
     assert window.download_bar.value() == 670, window.download_bar.value()
     print("ok  GUI: прогресс файла показывает имя и проценты")
 
-    window.submit_text("Сколько будет 7*6?")
-    # пока агент думает, в чате должен быть статус «Думаю…», а не «Слушаю…»
     from nemus.gui import i18n
 
+    publish_download(
+        DownloadEvent(
+            kind="file",
+            phase="cancelled",
+            name="setup.exe",
+            task_id="gui-file",
+        )
+    )
+    QApplication.processEvents()
+    text = window.download_label.text()
+    assert "setup.exe" in text and "отменено" in text, text
+    assert i18n.tr("download.cancelled") not in text, text
+
+    publish_download(
+        DownloadEvent(
+            kind="torrent",
+            phase="error",
+            name="ubuntu.iso.torrent",
+            message="нет сети",
+            task_id="gui-torrent",
+        )
+    )
+    QApplication.processEvents()
+    text = window.download_label.text()
+    assert "ubuntu.iso.torrent" in text and "нет сети" in text, text
+    assert "Загрузка модели" not in text, text
+    assert i18n.tr("download.cancelled") not in text, text
+    print("ok  GUI: отмена и ошибка файла/торрента без модели")
+
+    window.submit_text("Сколько будет 7*6?")
+    # пока агент думает, в чате должен быть статус «Думаю…», а не «Слушаю…»
     assert i18n.tr("state.thinking") in window.state_label.text(), (
         window.state_label.text()
     )

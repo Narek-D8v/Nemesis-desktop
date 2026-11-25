@@ -79,6 +79,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "download.done": "✅ Модель скачана: {name}",
         "download.failed": "⚠️ Загрузка модели: {msg}",
         "download.cancelled": "⏹ Загрузка модели отменена",
+        "download.file_failed": "{name}: ошибка — {msg}",
+        "download.file_cancelled": "{name}: отменено",
         "remind.fired": "⏰ Напоминание: {text}",
         # состояния
         "state.idle": "Готова",
@@ -854,6 +856,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "download.done": "✅ Model downloaded: {name}",
         "download.failed": "⚠️ Model download: {msg}",
         "download.cancelled": "⏹ Model download cancelled",
+        "download.file_failed": "{name}: error — {msg}",
+        "download.file_cancelled": "{name}: cancelled",
         "state.idle": "Ready",
         "state.listening": "Listening…",
         "state.thinking": "Thinking…",
