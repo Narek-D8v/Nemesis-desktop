@@ -198,9 +198,20 @@ def test_builtin_skills(tmp: Path) -> None:
 
     names = [s.name for s in load_skills(tmp)]
     assert "code-craft" in names, names
+    assert "idea-arbiter" in names, names
     assert "code-craft" in [
         s.name for s in search_skills("напиши скрипт", load_skills(tmp))
     ]
+    assert "idea-arbiter" in [
+        s.name for s in search_skills("арбитр идей", load_skills(tmp))
+    ]
+    for query, skill in (
+        ("анализ экрана", "context-companion"),
+        ("чистка проекта", "workspace-steward"),
+        ("саммари пропущенных", "memory-companion"),
+        ("инлайн-опрос", "social-companion"),
+    ):
+        assert skill in [s.name for s in search_skills(query, load_skills(tmp))], query
     assert len(names) == len(set(names)), names
     assert "code-craft" not in [s.name for s in load_skills(tmp, builtin=False)]
 
@@ -219,6 +230,12 @@ def test_builtin_skills(tmp: Path) -> None:
     assert "брейншторм" in body.lower(), body[:200]
     assert "D) Свой вариант: _________" in body, body[:400]
     assert "(рекомендую)" in body, body[:400]
+
+    arbiter = (BUILTIN_SKILLS_DIR / "idea-arbiter" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "оппонентом и соавтором" in arbiter, arbiter[:400]
+    assert "аргументированно критикует" in arbiter, arbiter[:400]
 
     prompt = build_system_prompt(_cfg_for(tmp), ToolRegistry())
     assert "- code-craft:" in prompt, prompt
@@ -326,12 +343,17 @@ def test_gui_tab(tmp: Path) -> None:
         assert set(dlg._skill_checks) == {
             "build-tools",  # вложенный репозиторий cmd-skills/…
             "code-craft",
+            "context-companion",
             "dup-tools",
+            "idea-arbiter",
+            "memory-companion",
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
+            "social-companion",
             "software-install",
             "vtoroy-skill",
+            "workspace-steward",
         }, list(dlg._skill_checks)
         assert dlg._skill_checks["pdf-instrumenty"].isChecked()  # не отключён
         assert not dlg._skill_checks["vtoroy-skill"].isChecked()  # отключён
@@ -342,12 +364,17 @@ def test_gui_tab(tmp: Path) -> None:
         assert set(dlg._skill_checks) == {
             "build-tools",
             "code-craft",
+            "context-companion",
             "dup-tools",
+            "idea-arbiter",
+            "memory-companion",
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
+            "social-companion",
             "software-install",
             "vtoroy-skill",
+            "workspace-steward",
         }
         # запись отключённых — ровно то, что не отмечено галочкой
         cfg = dlg.config

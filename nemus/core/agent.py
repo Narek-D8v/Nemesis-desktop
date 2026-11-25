@@ -26,7 +26,7 @@ from nemus.core.language import (
     quick_reply,
     reply_language_directive,
 )
-from nemus.core.llm import LLMClient
+from nemus.core.llm import LLMClient, retry_after_seconds
 from nemus.core.permissions import Decision, PermissionManager
 from nemus.core.providers import Message, ProviderError, ToolCall
 from nemus.core.todo import TodoList, current_todo
@@ -83,8 +83,11 @@ ACCESS_DENIAL_RETRIES = 2
 
 #: паузы перед повторным заходом, когда все провайдеры ответили временной
 #: ошибкой (429/503). Минутный лимит Gemini успевает сброситься, и задача
-#: продолжается сама, без нового сообщения пользователя.
-PROVIDER_RETRY_DELAYS = (10.0, 30.0)
+#: продолжается сама, без нового сообщения пользователя. Третий повтор нужен,
+#: потому что «retry shortly» у OpenRouter часто означает больше минуты —
+#: раньше агент сдавался после 10+30 с, хотя кнопка «Повторить» через минуту
+#: всё делала.
+PROVIDER_RETRY_DELAYS = (10.0, 30.0, 60.0)
 
 #: неудач подряд на один инструмент, после которых модели предлагается
 #: сменить способ (а не долбить одно и то же)
@@ -209,6 +212,26 @@ def is_promise_only(text: str) -> bool:
     return any(word in first for word in _DEFER_WORDS)
 
 
+def _is_retryable_provider_error(exc: Exception) -> bool:
+    """Временный отказ провайдера, который стоит переждать внутри шага.
+
+    ``ProviderError`` уже несёт флаг ``retryable`` из ``llm.stream``. Но
+    ``litellm.RateLimitError`` может прийти и напрямую (fake/обёртка/другой
+    путь), поэтому проверяем и класс, и текст ошибки.
+    """
+    if getattr(exc, "retryable", False):
+        return True
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return (
+        "ratelimit" in name
+        or "rate_limit" in text
+        or "rate limit" in text
+        or "rate-limited" in text
+        or bool(re.search(r"\b429\b", text))
+    )
+
+
 @dataclass
 class AgentEvent:
     """Событие, порождаемое агентом в процессе обработки запроса."""
@@ -291,17 +314,16 @@ def _looks_like_open_brief(text: str) -> bool:
 
 
 def _looks_like_quality_choice(text: str) -> bool:
-    """Ответ на брейншторм вида «1A, 2B», «всё A», «делай оба»."""
+    """Только явный выбор варианта: «1A, 2B», «всё A», «оба».
+
+    Раньше сюда попадали любые короткие «да», «ок», «погнали», «начинай» —
+    из-за этого обычная мысль после старой creative-задачи снова включала
+    quality gate и агент требовал ``todo_write`` ни за что.
+    """
     low = " ".join((text or "").strip().lower().split())
     if not low or len(low) > 240:
         return False
-    return bool(
-        re.match(
-            r"^(?:\d+\s*[a-dа-г]|все\b|всё\b|да\b|ок\b|делай\b|оба\b|"
-            r"погнали\b|начинай\b|вариант\b|без вопросов\b)",
-            low,
-        )
-    )
+    return bool(re.match(r"^(?:\d+\s*[a-dа-г]|все\b|всё\b|оба\b)", low))
 
 
 def _looks_like_brainstorm(text: str) -> bool:
@@ -2054,14 +2076,24 @@ class Agent:
             or _looks_like_brainstorm_answers(user_text)
         ):
             seen_users = 0
+            seen_brief = False
             for previous in reversed(self.history[:-1]):
+                if previous.role == "assistant" and _looks_like_open_brief(
+                    _message_text(previous)
+                ):
+                    seen_brief = True
                 if previous.role != "user":
                     continue
                 seen_users += 1
                 if seen_users > 4:
                     break
                 previous_text = _message_text(previous)
-                if is_creation_request(previous_text):
+                # Короткий ответ продолжает задачу только если агент реально
+                # задал по ней брейншторм. Иначе «да, я так думаю» после старой
+                # просьбы написать скрипт не должно требовать todo_write.
+                if is_creation_request(previous_text) and (
+                    seen_brief or _looks_like_brainstorm_answers(user_text)
+                ):
                     quality_task = previous_text
                     break
 
@@ -2235,11 +2267,18 @@ class Agent:
                 text = self._finalize_stopped(exc.partial)
                 yield AgentEvent(kind="stopped", text=text)
                 return
-            except ProviderError as exc:
-                if getattr(exc, "retryable", False) and provider_retries < len(
-                    PROVIDER_RETRY_DELAYS
+            except Exception as exc:  # noqa: BLE001 — провайдеры кидают разное
+                if (
+                    _is_retryable_provider_error(exc)
+                    and provider_retries < len(PROVIDER_RETRY_DELAYS)
                 ):
-                    delay = PROVIDER_RETRY_DELAYS[provider_retries]
+                    # Подсказку провайдера («retryDelay: 37s») уважаем: ждём
+                    # хотя бы её, иначе три быстрых повтора попадут в тот же
+                    # поминутный лимит и агент всё равно сдастся.
+                    delay = max(
+                        PROVIDER_RETRY_DELAYS[provider_retries],
+                        retry_after_seconds(str(exc)),
+                    )
                     provider_retries += 1
                     logger.warning(
                         "Все провайдеры временно недоступны — повторяю шаг "
@@ -2256,10 +2295,8 @@ class Agent:
                     else:
                         time.sleep(delay)
                     continue
-                yield AgentEvent(kind="error", error=redact_secrets(str(exc)))
-                return
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Сбой агента")
+                if not isinstance(exc, ProviderError):
+                    logger.exception("Сбой агента")
                 yield AgentEvent(kind="error", error=redact_secrets(str(exc)))
                 return
 
@@ -2398,6 +2435,14 @@ class Agent:
                         f"{(response.content or '')[:120]!r}"
                     )
                     if self._quality_gate.nudges <= 2:
+                        # Модель не всегда выполняет обязательные шаги даже
+                        # после прямого указания. Выполняем пропущенные шаги
+                        # настоящими инструментами, вместо того чтобы сдаваться.
+                        forced = yield from self._force_quality_steps(
+                            self._quality_gate, quality_task or user_text
+                        )
+                        if forced:
+                            continue
                         nudge = Message(
                             role="user", content=_INTERNAL_PREFIX + gate_reason
                         )
@@ -2567,6 +2612,65 @@ class Agent:
                 f"{usage.get('total_tokens')} токенов"
             )
         return final
+
+    def _force_quality_steps(
+        self, gate: QualityGate, task_text: str
+    ) -> Iterator[AgentEvent]:
+        """Выполнить пропущенные обязательные шаги вместо текстового уговора.
+
+        Гейт по-прежнему требует find_skills и todo_write для задач на код.
+        Если модель пытается сдать результат без них, оркестратор вызывает
+        эти инструменты сам — настоящими вызовами с реальными результатами.
+        Фактическую работу (создание файла, запуск, проверку) модель всё равно
+        должна выполнить herself: production_done остаётся снятым.
+        """
+        calls: list[ToolCall] = []
+        stamp = int(time.time() * 1000)
+        if not gate.research_done:
+            query = " ".join((task_text or "").split())[:200] or "код"
+            calls.append(
+                ToolCall(
+                    id=f"qg-research-{stamp}",
+                    name="find_skills",
+                    arguments={"query": query},
+                )
+            )
+        if not gate.plan_done:
+            calls.append(
+                ToolCall(
+                    id=f"qg-plan-{stamp}",
+                    name="todo_write",
+                    arguments={
+                        "items": [
+                            {
+                                "title": "найти подходящие скиллы по теме",
+                                "status": "in_progress",
+                            },
+                            {
+                                "title": "сформулировать подход и шаги",
+                                "status": "pending",
+                            },
+                            {
+                                "title": "выполнить работу инструментами",
+                                "status": "pending",
+                            },
+                            {
+                                "title": "проверить результат",
+                                "status": "pending",
+                            },
+                        ]
+                    },
+                )
+            )
+        if not calls:
+            return False
+        logger.warning(
+            "Quality gate: модель пропустила обязательные шаги — "
+            "выполняю их принудительно"
+        )
+        for call in calls:
+            yield from self._handle_tool_call(call)
+        return True
 
     def _handle_tool_call(
         self, call: ToolCall, images: list[str] | None = None

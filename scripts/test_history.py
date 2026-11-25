@@ -25,6 +25,7 @@ from nemus.core.agent import (  # noqa: E402
     Agent,
     QualityGate,
     _is_poll_call,
+    _looks_like_quality_choice,
     _requested_video_seconds,
     pair_tool_messages,
 )
@@ -259,6 +260,57 @@ def test_provider_error_retried_inside_run() -> None:
     finals = [e for e in events if e.kind == "final"]
     assert finals and finals[-1].text == "Ответ после паузы", events
     print("ok  временный отказ провайдеров → автоповтор шага, без ошибки")
+
+
+class _TwiceFlakyLLM:
+    """Два 429 подряд, причём второй приходит не обёрнутым в ProviderError."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def stream(self, messages, tools=None, **_: Any):  # noqa: ANN001
+        from nemus.core.llm import StreamEvent
+
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderError(
+                "openrouter/google/gemma: litellm.RateLimitError: "
+                '{"code":429,"message":"temporarily rate-limited upstream"}',
+                retryable=True,
+            )
+        if self.calls == 2:
+            raise RuntimeError("google/gemma is temporarily rate-limited, 429")
+        yield StreamEvent(
+            kind="final",
+            response=LLMResponse(content="Сделано после двух 429"),
+        )
+
+
+def test_two_rate_limits_retried_inside_run() -> None:
+    """429 не должен уходить пользователю, пока есть повторы внутри хода."""
+    from unittest import mock
+
+    cfg = get_config()
+    llm = _TwiceFlakyLLM()
+    agent = Agent(
+        config=cfg,  # type: ignore[arg-type]
+        llm=llm,  # type: ignore[arg-type]
+        registry=ToolRegistry(),
+        permissions=PermissionManager(cfg),
+    )
+    with mock.patch("nemus.core.agent.PROVIDER_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+        events = list(
+            agent.run(
+                "Объясни подробно, чем отличаются TCP и UDP, и приведи примеры "
+                "использования в реальных проектах."
+            )
+        )
+
+    assert llm.calls == 3, llm.calls
+    assert not [e for e in events if e.kind == "error"], events
+    finals = [e for e in events if e.kind == "final"]
+    assert finals and finals[-1].text == "Сделано после двух 429", events
+    print("ok  два 429 подряд → агент сам дождался и выполнил задачу")
 
 
 def test_empty_answer_gives_error() -> None:
@@ -607,6 +659,86 @@ def test_quality_gate_blocks_shortcuts() -> None:
         "Готово: скрипт написан и проверен."
     ]
     print("ok  quality gate: production заблокирован до research и todo_write")
+
+
+def test_quality_gate_forces_missing_steps() -> None:
+    """Пропущенные find_skills/todo_write выполняются, а не становятся отказом."""
+    cfg = get_config()
+    _WriteTool.executions = 0
+    registry = ToolRegistry()
+    registry.register_many([FindSkillsTool(), TodoWriteTool(), _WriteTool()])
+    llm = _FakeLLM(
+        [
+            LLMResponse(content="Готово, скрипт написан"),
+            LLMResponse(content="Готово, всё сделано"),
+            LLMResponse(
+                tool_calls=[ToolCall(id="w1", name="write_file", arguments={})]
+            ),
+            LLMResponse(content="Готово: скрипт создан и проверен."),
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm=llm,  # type: ignore[arg-type]
+        registry=registry,
+        permissions=PermissionManager(cfg),
+    )
+    events = list(agent.run("напиши скрипт для отчёта"))
+
+    forced = [e.tool_name for e in events if e.kind == "tool_call"]
+    assert forced[:2] == ["find_skills", "todo_write"], forced
+    assert _WriteTool.executions == 1, _WriteTool.executions
+    assert llm.calls == 4, llm.calls
+    assert [e.text for e in events if e.kind == "final"] == [
+        "Готово: скрипт создан и проверен."
+    ], [(e.kind, getattr(e, "text", "")) for e in events]
+    errors = [e.error for e in events if e.kind == "error"]
+    assert not any("Не сдаю результат" in str(error) for error in errors), errors
+    print("ok  quality gate: пропущенные research/план выполнены принудительно")
+
+
+def test_quality_choice_is_not_ordinary_thought() -> None:
+    """Обычные короткие реплики больше не выглядят как ответ на брейншторм."""
+    for thought in (
+        "да, я так думаю",
+        "ок, поняла",
+        "погнали",
+        "начинай",
+        "делай как хочешь",
+        "без вопросов, просто болтаю",
+    ):
+        assert not _looks_like_quality_choice(thought), thought
+    for choice in ("1A, 2B", "всё A", "оба"):
+        assert _looks_like_quality_choice(choice), choice
+    print("ok  выбор варианта отделён от обычных мыслей")
+
+
+def test_plain_thought_after_creation_does_not_require_todo() -> None:
+    """Мысль после старой creative-задачи не вызывает quality gate."""
+    cfg = get_config()
+    registry = ToolRegistry()
+    registry.register_many([FindSkillsTool(), TodoWriteTool()])
+    llm = _FakeLLM([LLMResponse(content="Это просто мысль, код не трогаю.")])
+    agent = Agent(
+        config=cfg,
+        llm=llm,  # type: ignore[arg-type]
+        registry=registry,
+        permissions=PermissionManager(cfg),
+    )
+    agent.history.append(Message(role="user", content="напиши скрипт для отчёта"))
+
+    events = list(agent.run("да, я так думаю"))
+
+    assert not [e.tool_name for e in events if e.kind == "tool_call"], events
+    assert [e.text for e in events if e.kind == "final"] == [
+        "Это просто мысль, код не трогаю."
+    ], events
+    assert not any(
+        _INTERNAL_PREFIX in str(message.content)
+        for message in agent.history
+        if message.role == "user"
+    ), [str(m.content) for m in agent.history if m.role == "user"]
+    print("ok  обычная мысль после creation-задачи не требует todo_write")
 
 
 class _VerifyWebsiteStub(Tool):
@@ -965,11 +1097,15 @@ def main() -> int:
     test_agent_boot_with_legacy_db()
     test_empty_answer_retried()
     test_provider_error_retried_inside_run()
+    test_two_rate_limits_retried_inside_run()
     test_empty_answer_gives_error()
     test_truncated_answer_raises_token_budget()
     test_error_sent_back_for_rework()
     test_error_directives_sequence()
     test_quality_gate_blocks_shortcuts()
+    test_quality_gate_forces_missing_steps()
+    test_quality_choice_is_not_ordinary_thought()
+    test_plain_thought_after_creation_does_not_require_todo()
     test_website_requires_verification()
     test_telegram_gate_requires_brainstorm_answers()
     test_telegram_open_brief_answers_unlock()
