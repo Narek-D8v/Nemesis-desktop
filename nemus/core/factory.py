@@ -24,6 +24,7 @@ from nemus.core.tools.memory_tools import memory_tools
 from nemus.core.tools.notes_tools import notes_tools
 from nemus.core.tools.registry import ToolRegistry
 from nemus.core.tools.remind import remind_tools
+from nemus.core.tools.roadmap import roadmap_tools
 from nemus.core.tools.sandbox import PathGuard
 from nemus.core.tools.skills_tool import skill_tools
 from nemus.core.tools.spotify import spotify_tools
@@ -343,7 +344,8 @@ def build_core(
 
     plugin_count = registry.load_plugins(PLUGINS_DIR)
     logger.info(
-        f"Инструментов зарегистрировано: {len(registry)} (плагинов: {plugin_count})"
+        f"Базовых инструментов зарегистрировано: {len(registry)} "
+        f"(плагинов: {plugin_count})"
     )
 
     # --- Model Context Protocol (MCP) ---
@@ -386,6 +388,30 @@ def build_core(
         memory=memory,
         system_suffix=system_suffix,
     )
+
+    # Локальные инструменты дорожной карты: registry ещё mutable, агент берёт
+    # схемы каждый шаг, поэтому можно зарегистрировать их после создания агента.
+    def _roadmap_todo():
+        return agent.todo.dump()
+
+    def _roadmap_calendar():
+        return registry.execute("calendar", {"action": "upcoming"}).to_model()
+
+    def _roadmap_weather():
+        return registry.execute("weather", {"location": "home"}).to_model()
+
+    registry.register_many(
+        roadmap_tools(
+            PROJECT_ROOT / "data",
+            memory=memory,
+            notes=notes,
+            diary=diary,
+            todo_provider=_roadmap_todo,
+            calendar_provider=_roadmap_calendar,
+            weather_provider=_roadmap_weather,
+        )
+    )
+    logger.info(f"Всего инструментов зарегистрировано: {len(registry)}")
 
     return Core(
         config=config,

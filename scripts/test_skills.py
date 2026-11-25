@@ -205,6 +205,13 @@ def test_builtin_skills(tmp: Path) -> None:
     assert "idea-arbiter" in [
         s.name for s in search_skills("арбитр идей", load_skills(tmp))
     ]
+    for query, skill in (
+        ("анализ экрана", "context-companion"),
+        ("чистка проекта", "workspace-steward"),
+        ("саммари пропущенных", "memory-companion"),
+        ("инлайн-опрос", "social-companion"),
+    ):
+        assert skill in [s.name for s in search_skills(query, load_skills(tmp))], query
     assert len(names) == len(set(names)), names
     assert "code-craft" not in [s.name for s in load_skills(tmp, builtin=False)]
 
@@ -336,13 +343,17 @@ def test_gui_tab(tmp: Path) -> None:
         assert set(dlg._skill_checks) == {
             "build-tools",  # вложенный репозиторий cmd-skills/…
             "code-craft",
+            "context-companion",
             "dup-tools",
             "idea-arbiter",
+            "memory-companion",
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
+            "social-companion",
             "software-install",
             "vtoroy-skill",
+            "workspace-steward",
         }, list(dlg._skill_checks)
         assert dlg._skill_checks["pdf-instrumenty"].isChecked()  # не отключён
         assert not dlg._skill_checks["vtoroy-skill"].isChecked()  # отключён
@@ -353,13 +364,17 @@ def test_gui_tab(tmp: Path) -> None:
         assert set(dlg._skill_checks) == {
             "build-tools",
             "code-craft",
+            "context-companion",
             "dup-tools",
             "idea-arbiter",
+            "memory-companion",
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
+            "social-companion",
             "software-install",
             "vtoroy-skill",
+            "workspace-steward",
         }
         # запись отключённых — ровно то, что не отмечено галочкой
         cfg = dlg.config
