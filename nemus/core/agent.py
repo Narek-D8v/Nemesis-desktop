@@ -2388,6 +2388,14 @@ class Agent:
                         f"{(response.content or '')[:120]!r}"
                     )
                     if self._quality_gate.nudges <= 2:
+                        # Модель не всегда выполняет обязательные шаги даже
+                        # после прямого указания. Выполняем пропущенные шаги
+                        # настоящими инструментами, вместо того чтобы сдаваться.
+                        forced = yield from self._force_quality_steps(
+                            self._quality_gate, quality_task or user_text
+                        )
+                        if forced:
+                            continue
                         nudge = Message(
                             role="user", content=_INTERNAL_PREFIX + gate_reason
                         )
@@ -2557,6 +2565,65 @@ class Agent:
                 f"{usage.get('total_tokens')} токенов"
             )
         return final
+
+    def _force_quality_steps(
+        self, gate: QualityGate, task_text: str
+    ) -> Iterator[AgentEvent]:
+        """Выполнить пропущенные обязательные шаги вместо текстового уговора.
+
+        Гейт по-прежнему требует find_skills и todo_write для задач на код.
+        Если модель пытается сдать результат без них, оркестратор вызывает
+        эти инструменты сам — настоящими вызовами с реальными результатами.
+        Фактическую работу (создание файла, запуск, проверку) модель всё равно
+        должна выполнить herself: production_done остаётся снятым.
+        """
+        calls: list[ToolCall] = []
+        stamp = int(time.time() * 1000)
+        if not gate.research_done:
+            query = " ".join((task_text or "").split())[:200] or "код"
+            calls.append(
+                ToolCall(
+                    id=f"qg-research-{stamp}",
+                    name="find_skills",
+                    arguments={"query": query},
+                )
+            )
+        if not gate.plan_done:
+            calls.append(
+                ToolCall(
+                    id=f"qg-plan-{stamp}",
+                    name="todo_write",
+                    arguments={
+                        "items": [
+                            {
+                                "title": "найти подходящие скиллы по теме",
+                                "status": "in_progress",
+                            },
+                            {
+                                "title": "сформулировать подход и шаги",
+                                "status": "pending",
+                            },
+                            {
+                                "title": "выполнить работу инструментами",
+                                "status": "pending",
+                            },
+                            {
+                                "title": "проверить результат",
+                                "status": "pending",
+                            },
+                        ]
+                    },
+                )
+            )
+        if not calls:
+            return False
+        logger.warning(
+            "Quality gate: модель пропустила обязательные шаги — "
+            "выполняю их принудительно"
+        )
+        for call in calls:
+            yield from self._handle_tool_call(call)
+        return True
 
     def _handle_tool_call(
         self, call: ToolCall, images: list[str] | None = None

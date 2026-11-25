@@ -609,6 +609,42 @@ def test_quality_gate_blocks_shortcuts() -> None:
     print("ok  quality gate: production заблокирован до research и todo_write")
 
 
+def test_quality_gate_forces_missing_steps() -> None:
+    """Пропущенные find_skills/todo_write выполняются, а не становятся отказом."""
+    cfg = get_config()
+    _WriteTool.executions = 0
+    registry = ToolRegistry()
+    registry.register_many([FindSkillsTool(), TodoWriteTool(), _WriteTool()])
+    llm = _FakeLLM(
+        [
+            LLMResponse(content="Готово, скрипт написан"),
+            LLMResponse(content="Готово, всё сделано"),
+            LLMResponse(
+                tool_calls=[ToolCall(id="w1", name="write_file", arguments={})]
+            ),
+            LLMResponse(content="Готово: скрипт создан и проверен."),
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm=llm,  # type: ignore[arg-type]
+        registry=registry,
+        permissions=PermissionManager(cfg),
+    )
+    events = list(agent.run("напиши скрипт для отчёта"))
+
+    forced = [e.tool_name for e in events if e.kind == "tool_call"]
+    assert forced[:2] == ["find_skills", "todo_write"], forced
+    assert _WriteTool.executions == 1, _WriteTool.executions
+    assert llm.calls == 4, llm.calls
+    assert [e.text for e in events if e.kind == "final"] == [
+        "Готово: скрипт создан и проверен."
+    ], [(e.kind, getattr(e, "text", "")) for e in events]
+    errors = [e.error for e in events if e.kind == "error"]
+    assert not any("Не сдаю результат" in str(error) for error in errors), errors
+    print("ok  quality gate: пропущенные research/план выполнены принудительно")
+
+
 class _VerifyWebsiteStub(Tool):
     """Заглушка браузерной проверки для quality gate."""
 
@@ -970,6 +1006,7 @@ def main() -> int:
     test_error_sent_back_for_rework()
     test_error_directives_sequence()
     test_quality_gate_blocks_shortcuts()
+    test_quality_gate_forces_missing_steps()
     test_website_requires_verification()
     test_telegram_gate_requires_brainstorm_answers()
     test_telegram_open_brief_answers_unlock()
