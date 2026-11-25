@@ -225,6 +225,7 @@ class VoiceManager:
         audio_blocks: list[np.ndarray] = []
         block_ms = self.recorder.config.block_ms
         max_wait_blocks = max(1, int(3000 / block_ms))  # ждём начала речи до 3 с
+        completed = False
         try:
             while self._running:
                 block = self.recorder.read_block()
@@ -240,24 +241,29 @@ class VoiceManager:
                 # защита от «зависшего» звука
                 if len(audio_blocks) > 1000:
                     break
+            completed = True
         finally:
             # THINKING ставим только если действительно поймали речь и ещё не остановлены
-            if self._running and audio_blocks:
+            if completed and self._running and audio_blocks:
                 self.on_state(AssistState.THINKING)
+            else:
+                self.on_state(AssistState.IDLE)
 
         # остановили во время записи (кнопка «Стоп») — ничего не распознаём
         if not self._running or not audio_blocks:
-            self.on_state(AssistState.IDLE)
             return
         audio = np.concatenate(audio_blocks)
-        # дать STT модели прогрузиться
-        text = self.stt.transcribe(audio)
-        if text:
-            logger.info(f"Распознано: {text}")
-            self.on_text(text)
-        else:
-            logger.info("Пустая расшифровка.")
-        self.on_state(AssistState.IDLE)
+        try:
+            # дать STT модели прогрузиться
+            text = self.stt.transcribe(audio)
+            if text:
+                logger.info(f"Распознано: {text}")
+                self.on_text(text)
+            else:
+                logger.info("Пустая расшифровка.")
+        finally:
+            # сбой STT или обработчика текста также снимает «Думаю…»
+            self.on_state(AssistState.IDLE)
 
     def _report_amplitude(self, block: np.ndarray) -> None:
         if self.on_amplitude is None:

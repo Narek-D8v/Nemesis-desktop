@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import importlib.util
 import os
@@ -10,12 +11,14 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
 from nemus.core.tools.base import RiskLevel, Tool, ToolResult
+from nemus.core.tools.downloads import _read_manifest
 from nemus.core.tools.sandbox import PathGuard, PathNotAllowed
-from nemus.core.tools.shell import run_capture
+from nemus.core.tools.shell import CapturedRun, run_capture
 from nemus.utils.logger import logger
 
 #: таймаут служебных PowerShell-запросов (секунды)
@@ -28,6 +31,12 @@ VERSION_TIMEOUT = 5
 DEFENDER_TIMEOUT = 300
 #: сколько символов вывода сканера отдаём модели
 SCAN_OUTPUT_LIMIT = 4000
+#: сколько символов вывода установщика отдаём модели
+INSTALL_OUTPUT_LIMIT = 4000
+#: запас на завершение потока сверх дедлайта run_capture
+INSTALL_JOIN_MARGIN = 2.0
+#: размер чанка при чтении файла для SHA-256
+HASH_CHUNK = 1024 * 1024
 #: флаги запроса версии — перебираются, пока не получим код 0
 VERSION_FLAGS = ("--version", "-version", "-V")
 #: готовые команды установки для известных зависимостей
@@ -436,6 +445,357 @@ class ScanFileTool(Tool):
             f"Windows Defender: угроз не найдено.\nФайл: {target}\n"
             f"Вывод сканера:\n{short}"
         )
+
+
+def _sha256_hex(value: object) -> str:
+    """Нормализованный 64-символьный SHA-256 или пустая строка."""
+    text = str(value or "").strip().casefold()
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        return ""
+    return text
+
+
+def _file_hash(path: Path) -> str:
+    """SHA-256 файла, считанный порциями (установщики бывают большими)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(HASH_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ps_literal(value: str) -> str:
+    """Экранирует путь для PowerShell-строки в одинарных кавычках."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _authenticode(path: Path) -> tuple[bool, str]:
+    """Проверяет подпись локальным PowerShell: только Get-AuthenticodeSignature."""
+    if not sys.platform.startswith("win"):
+        return False, "проверка подписи доступна только на Windows"
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        f"$sig = Get-AuthenticodeSignature -LiteralPath {_ps_literal(str(path))}; "
+        "$signer = ''; "
+        "if ($sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject }; "
+        "Write-Output ('Status=' + $sig.Status); "
+        "Write-Output ('Signer=' + $signer)"
+    )
+    try:
+        captured = run_capture(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            timeout=POWERSHELL_TIMEOUT,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"не удалось проверить подпись: {exc}"
+    if captured.timed_out:
+        return False, "проверка подписи не уложилась в таймаут"
+    raw = (captured.stdout or b"") + (captured.stderr or b"")
+    text = raw.decode("utf-8", errors="replace")
+    status_match = re.search(r"(?im)^Status=(.+)$", text)
+    signer_match = re.search(r"(?im)^Signer=(.+)$", text)
+    status = status_match.group(1).strip() if status_match else "Unknown"
+    signer = signer_match.group(1).strip() if signer_match else ""
+    detail = status + (f" ({signer})" if signer else "")
+    return captured.returncode == 0 and status.casefold() == "valid", detail
+
+
+class VerifyInstallerTool(Tool):
+    name = "verify_installer"
+    description = (
+        "Обязательная проверка скачанного установщика перед запуском: локальный "
+        "Windows Defender, SHA-256 (из аргумента или файла <path>.sha256) и "
+        "подпись Authenticode. Угроза или несовпадение хеша блокируют запуск "
+        "всегда; неподписанный файл блокируется, если явно не запрошено "
+        "explicit_piracy_request=True. Ничего не устанавливает."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Путь к скачанному файлу .exe или .msi.",
+            },
+            "expected_sha256": {
+                "type": "string",
+                "description": (
+                    "Ожидаемый SHA-256; важнее файла <path>.sha256. При "
+                    "расхождении с манифестом проверка считается проваленной."
+                ),
+            },
+            "explicit_piracy_request": {
+                "type": "boolean",
+                "description": (
+                    "Явный запрос на неподписанный установщик: вместо блокировки "
+                    "возвращается предупреждение и требуется подтверждение при "
+                    "установке."
+                ),
+            },
+        },
+        "required": ["path"],
+    }
+    risk = RiskLevel.SAFE
+
+    @staticmethod
+    def _result(
+        verdict: str,
+        defender: str,
+        signature: str,
+        sha256: str,
+        *,
+        ok: bool,
+        warning: str = "",
+        details: str = "",
+    ) -> ToolResult:
+        lines = [
+            f"verdict: {verdict}",
+            f"defender: {defender}",
+            f"signature: {signature}",
+            f"sha256: {sha256}",
+        ]
+        if warning:
+            lines.append(f"warning: {warning}")
+        if details:
+            lines.extend(("", details[:SCAN_OUTPUT_LIMIT]))
+        content = "\n".join(lines)
+        return ToolResult.success(content) if ok else ToolResult.failure(content)
+
+    def execute(
+        self,
+        path: str = "",
+        expected_sha256: str = "",
+        explicit_piracy_request: bool = False,
+        **_: object,
+    ) -> ToolResult:
+        raw = str(path or "").strip().strip('"')
+        # Сканирование вызывается всегда, даже если хеш заведомо не сходится.
+        scan = ScanFileTool().execute(path=raw)
+        defender = "clean" if scan.ok else "threat-or-inconclusive"
+        if not raw:
+            return self._result(
+                "blocked", defender, "not-checked", "unavailable",
+                ok=False, details="Не указан путь к установщику.",
+            )
+        target = Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+        if not target.is_file():
+            return self._result(
+                "blocked", defender, "not-checked", "unavailable",
+                ok=False, details=f"Файл не найден: {target}",
+            )
+
+        details = f"Файл: {target}"
+        if not scan.ok:
+            details += f"\nПроверка Defender:\n{scan.content}"
+        signature_ok, signature_detail = _authenticode(target)
+        signature = (
+            f"Valid ({signature_detail[:200]})"
+            if signature_ok
+            else f"Unsigned/Invalid: {signature_detail[:200]}"
+        )
+        warning = ""
+        if explicit_piracy_request and not signature_ok:
+            warning = (
+                "подпись отсутствует или недействительна; установка разрешена только "
+                "с отдельным подтверждением (confirmed=True)"
+            )
+
+        expected_raw = str(expected_sha256 or "").strip()
+        expected = _sha256_hex(expected_sha256)
+        if expected_raw and not expected:
+            return self._result(
+                "blocked", defender, signature, "invalid-expected",
+                ok=False, warning=warning,
+                details=details + "\nexpected_sha256 должен содержать 64 hex-символа.",
+            )
+
+        manifest = _read_manifest(target)
+        if expected and manifest and expected != manifest.casefold():
+            return self._result(
+                "blocked", defender, signature,
+                f"conflict (expected={expected}, manifest={manifest.casefold()})",
+                ok=False, warning=warning,
+                details=details + "\nХеш из аргумента и манифест не совпадают.",
+            )
+        wanted = expected or (manifest.casefold() if manifest else "")
+        if not wanted:
+            return self._result(
+                "blocked", defender, signature, "no-expected-hash",
+                ok=False, warning=warning,
+                details=details + "\nНет хеша: передай expected_sha256 или создай манифест.",
+            )
+
+        try:
+            actual = _file_hash(target)
+        except OSError as exc:
+            return self._result(
+                "blocked", defender, signature, f"unavailable ({exc})",
+                ok=False, warning=warning, details=details,
+            )
+        if actual != wanted:
+            return self._result(
+                "blocked", defender, signature,
+                f"mismatch (actual={actual}, expected={wanted})",
+                ok=False, warning=warning, details=details,
+            )
+        if not scan.ok:
+            return self._result(
+                "blocked", defender, signature, f"match ({actual})",
+                ok=False, warning=warning, details=details,
+            )
+        if not signature_ok and not explicit_piracy_request:
+            return self._result(
+                "blocked", defender, signature, f"match ({actual})",
+                ok=False, details=details + "\nНеподписанный файл: нужен явный запрос.",
+            )
+        verdict = "warning" if warning else "pass"
+        return self._result(
+            verdict, defender, signature, f"match ({actual})",
+            ok=True, warning=warning, details=details,
+        )
+
+
+def verification_confirmation(
+    path: str = "",
+    expected_sha256: str = "",
+    explicit_piracy_request: bool = False,
+) -> dict[str, str]:
+    """Короткий вердикт для окна подтверждения установки/проверки.
+
+    Только информирует человека: инструмент при Execute всё равно повторяет
+    проверку. ``warning`` (неподписанный файл по явной просьбе) показывается
+    пользователю до нажатия кнопки, а не только после запуска.
+    """
+    result = VerifyInstallerTool().execute(
+        path=path,
+        expected_sha256=expected_sha256,
+        explicit_piracy_request=explicit_piracy_request,
+    )
+    fields = {"ok": "true" if result.ok else "false"}
+    for line in result.content.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in {
+            "verdict", "defender", "signature", "sha256", "warning"
+        }:
+            fields[key.strip()] = value.strip()[:300]
+    return fields
+
+
+class InstallVerifiedTool(Tool):
+    name = "install_verified"
+    description = (
+        "Устанавливает скачанный .exe/.msi только после verify_installer и "
+        "явного подтверждения (confirmed=True). Без подтверждения или при "
+        "проваленной проверке ничего не запускает. Запуск идёт в отдельном "
+        "потоке с жёстким дедлайтом; вывод установщика возвращается вместе с кодом."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Путь к проверенному установщику .exe или .msi.",
+            },
+            "expected_sha256": {"type": "string", "description": "Ожидаемый SHA-256."},
+            "explicit_piracy_request": {
+                "type": "boolean",
+                "description": "Разрешить неподписанный файл (с предупреждением).",
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": "Обязательное подтверждение установки.",
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Максимальное время установки в секундах (по умолчанию 300).",
+            },
+        },
+        "required": ["path"],
+    }
+    risk = RiskLevel.DANGEROUS
+
+    def execute(
+        self,
+        path: str = "",
+        expected_sha256: str = "",
+        explicit_piracy_request: bool = False,
+        confirmed: bool = False,
+        timeout: int = 300,
+        **_: object,
+    ) -> ToolResult:
+        verification = VerifyInstallerTool().execute(
+            path=path,
+            expected_sha256=expected_sha256,
+            explicit_piracy_request=explicit_piracy_request,
+        )
+        if not verification.ok:
+            return ToolResult.failure(
+                "Установка отменена: проверка не пройдена.\n"
+                + verification.content[:SCAN_OUTPUT_LIMIT]
+            )
+        if not confirmed:
+            return ToolResult.failure(
+                "Установка отменена: требуется явное подтверждение (confirmed=True).\n"
+                + verification.content[:SCAN_OUTPUT_LIMIT]
+            )
+
+        raw = str(path or "").strip().strip('"')
+        target = Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+        suffix = target.suffix.casefold()
+        if suffix == ".exe":
+            command = (
+                f"$process = Start-Process -FilePath {_ps_literal(str(target))} "
+                "-Wait -PassThru; exit $process.ExitCode"
+            )
+            argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+        elif suffix == ".msi":
+            argv = ["msiexec.exe", "/i", str(target), "/qb"]
+        else:
+            return ToolResult.failure(
+                f"Поддерживаются только установщики .exe и .msi: {target}"
+            )
+
+        try:
+            limit = max(1, int(timeout))
+        except (TypeError, ValueError):
+            limit = 300
+        outcomes: list[CapturedRun | str] = []
+
+        def launch() -> None:
+            try:
+                outcomes.append(
+                    run_capture(argv, timeout=limit, creationflags=CREATE_NO_WINDOW)
+                )
+            except Exception as exc:  # noqa: BLE001
+                outcomes.append(f"ошибка запуска: {exc}")
+
+        thread = threading.Thread(target=launch, daemon=True, name="install-verified")
+        thread.start()
+        thread.join(timeout=limit + INSTALL_JOIN_MARGIN)
+        if thread.is_alive():
+            return ToolResult.failure(
+                f"Установщик не вернул результат за {limit} секунд: {target}. "
+                "Состояние установки неизвестно — проверь вручную."
+            )
+        if not outcomes:
+            return ToolResult.failure(f"Установщик не вернул результат: {target}")
+        item = outcomes[0]
+        if isinstance(item, str):
+            return ToolResult.failure(f"{item}\nФайл: {target}")
+        raw_output = (item.stdout or b"") + (item.stderr or b"")
+        output = raw_output.decode("utf-8", errors="replace").strip()
+        short = output[-INSTALL_OUTPUT_LIMIT:]
+        report = (
+            f"verification: {verification.content[:SCAN_OUTPUT_LIMIT]}\n"
+            f"Файл: {target}\nКод: {item.returncode}\nВывод:\n{short}"
+        )
+        if item.timed_out:
+            return ToolResult.failure(
+                f"Таймаут установки: не уложилась в {limit} секунд.\n{report}"
+            )
+        if item.returncode != 0:
+            return ToolResult.failure(f"Установка завершилась с ошибкой.\n{report}")
+        return ToolResult.success(f"Установка завершена.\n{report}")
 
 
 class ScreenshotTool(Tool):

@@ -24,6 +24,7 @@ from PySide6.QtCore import QTimer, QUrl  # noqa: E402
 
 from nemus.config import get_config  # noqa: E402
 from nemus.core.agent import Agent  # noqa: E402
+from nemus.core.download_events import DownloadEvent, publish_download  # noqa: E402
 from nemus.core.factory import Core  # noqa: E402
 from nemus.core.llm import LLMClient, StreamEvent  # noqa: E402
 from nemus.core.permissions import PermissionManager  # noqa: E402
@@ -91,13 +92,124 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication([])
     core = build_fake_core()
+    from nemus.core.providers import hf_download  # noqa: PLC0415
+
+    legacy_before = len(hf_download._LISTENERS)
     window = MainWindow(core)
     window.show()
+    assert len(hf_download._LISTENERS) == legacy_before, (
+        "GUI не должен подписываться на legacy-канал модели"
+    )
+
+    emitted: list[DownloadEvent] = []
+    window.download_event.connect(emitted.append)
+    publish_download(
+        DownloadEvent(
+            kind="file",
+            phase="progress",
+            name="setup.exe",
+            done=84,
+            total=125,
+            task_id="gui-file",
+        )
+    )
+    QApplication.processEvents()
+    assert len(emitted) == 1, "одно событие должно давать один Qt-сигнал"
+    assert "setup.exe" in window.download_label.text(), (
+        window.download_label.text()
+    )
+    assert "67%" in window.download_label.text(), window.download_label.text()
+    assert window.download_bar.value() == 670, window.download_bar.value()
+    print("ok  GUI: прогресс файла показывает имя и проценты")
+
+    # Подтверждение торрента в GUI выдаёт токен, который инструмент принимает
+    from nemus.core.tools.base import RiskLevel, Tool, ToolResult  # noqa: PLC0415
+    from nemus.core.tools.torrents import (  # noqa: PLC0415
+        consume_torrent_consent,
+        grant_torrent_consent,
+    )
+    from nemus.gui.worker import AgentWorker  # noqa: PLC0415
+
+    class _TorrentStub(Tool):
+        name = "torrent_download"
+        description = "stub"
+        parameters = {"type": "object", "properties": {}}
+        risk = RiskLevel.DANGEROUS
+
+        def execute(self, **_: object) -> ToolResult:
+            return ToolResult.success("stub")
+
+    worker = AgentWorker(core.agent, "test")
+    torrent_args = {"magnet": "magnet:?xt=urn:btih:gui"}
+    worker._confirm_args = torrent_args
+    extra = grant_torrent_consent(_TorrentStub(), torrent_args, True)
+    worker.resolve_confirmation(True, extra=extra)
+    assert torrent_args["consent_token"] == extra["consent_token"]
+    assert consume_torrent_consent(
+        torrent_args["consent_token"], torrent_args["magnet"]
+    )
+    print("ok  GUI: ConfirmDialog выдаёт одноразовый токен согласия на торрент")
+
+    from nemus.gui import i18n
+
+    publish_download(
+        DownloadEvent(
+            kind="file",
+            phase="cancelled",
+            name="setup.exe",
+            task_id="gui-file",
+        )
+    )
+    QApplication.processEvents()
+    text = window.download_label.text()
+    assert "setup.exe" in text and "отменено" in text, text
+    assert i18n.tr("download.cancelled") not in text, text
+
+    publish_download(
+        DownloadEvent(
+            kind="torrent",
+            phase="error",
+            name="ubuntu.iso.torrent",
+            message="нет сети",
+            task_id="gui-torrent",
+        )
+    )
+    QApplication.processEvents()
+    text = window.download_label.text()
+    assert "ubuntu.iso.torrent" in text and "нет сети" in text, text
+    assert "Загрузка модели" not in text, text
+    assert i18n.tr("download.cancelled") not in text, text
+    print("ok  GUI: отмена и ошибка файла/торрента без модели")
+
+    # realtime-инструмент не должен оставлять «Думаю…» после завершения
+    from types import SimpleNamespace
+
+    from nemus.core.state import AssistState
+
+    window.set_state(AssistState.SPEAKING)
+    window.show_realtime_tool("probe", {}, "start")
+    assert i18n.tr("state.thinking") in window.state_label.text(), (
+        window.state_label.text()
+    )
+    window.show_realtime_tool("probe", {}, "ok")
+    assert i18n.tr("state.thinking") not in window.state_label.text(), (
+        window.state_label.text()
+    )
+    assert i18n.tr("state.speaking") in window.state_label.text(), (
+        window.state_label.text()
+    )
+    window.show_realtime_tool("probe2", {}, "start")
+    window._on_agent_event(
+        SimpleNamespace(kind="error", error="сбой realtime", text="")
+    )
+    assert i18n.tr("state.thinking") not in window.state_label.text(), (
+        window.state_label.text()
+    )
+    window.set_state(AssistState.IDLE)
+    print("ok  GUI: realtime-инструмент возвращает previous state и не липнет")
 
     window.submit_text("Сколько будет 7*6?")
     # пока агент думает, в чате должен быть статус «Думаю…», а не «Слушаю…»
-    from nemus.gui import i18n
-
     assert i18n.tr("state.thinking") in window.state_label.text(), (
         window.state_label.text()
     )

@@ -51,6 +51,12 @@ from nemus.core.cleanup import (
 )
 from nemus.core.diary import diary_access
 from nemus.core.document_text import SUPPORTED_SUFFIXES, document_context
+from nemus.core.download_events import (
+    DownloadEvent,
+    render_progress_bar,
+    subscribe_download,
+    unsubscribe_download,
+)
 from nemus.core.emotions import EmotionManager, EmotionState, summary_html
 from nemus.core.language import looks_like_skills_question
 from nemus.core.proactive import compose_proactive_message
@@ -444,6 +450,7 @@ class _Progress:
         self._download = ""
         self._tail = ""
         self._last = 0.0
+        self._closed = False
 
     def _render(self) -> str:
         parts = [self._base, *self._notes, self._download]
@@ -465,10 +472,10 @@ class _Progress:
         self._notes = self._notes[-6:]
         await self._flush()
 
-    async def download(self, text: str) -> None:
-        """Строка прогресса скачивания модели (не дублируется в notes)."""
+    async def download(self, text: str, *, force: bool = False) -> None:
+        """Строка прогресса загрузки (не дублируется в notes)."""
         self._download = text
-        await self._flush()
+        await self._flush(force=force)
 
     async def tail(self, text: str, *, force: bool = False) -> None:
         self._tail = (text or "").strip()
@@ -489,25 +496,33 @@ class _Progress:
             pass  # «message is not modified» и гонки правок — не повод падать
 
     async def close(self) -> None:
+        """Удаляет статус; повторные вызовы (старый путь + finally) безопасны."""
+        if self._closed:
+            return
+        self._closed = True
         if self.message_id is None:
             return
+        message_id = self.message_id
+        self.message_id = None
         try:
-            await self.bot.delete_message(self.chat_id, self.message_id)
+            await self.bot.delete_message(self.chat_id, message_id)
         except Exception:  # noqa: BLE001
             pass
-        self.message_id = None
 
     async def fail(self, text: str, reply_markup: Any | None = None) -> None:
+        self._closed = True
         if self.message_id is None:
             await start_message(
                 self.bot, self.chat_id, text, reply_markup=reply_markup
             )
             return
+        message_id = self.message_id
+        self.message_id = None
         try:
             await self.bot.edit_message_text(
                 f"❌ {text}"[:3900],
                 chat_id=self.chat_id,
-                message_id=self.message_id,
+                message_id=message_id,
                 reply_markup=reply_markup,
             )
         except Exception:  # noqa: BLE001
@@ -517,6 +532,39 @@ class _Progress:
                 f"❌ {text}",
                 reply_markup=reply_markup,
             )
+            # редактирование не прошло — статус всё ещё висит в чате
+            try:
+                await self.bot.delete_message(self.chat_id, message_id)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def plain(self, text: str) -> None:
+        """Показывает ответ простым текстом, если отправка с разметкой упала."""
+        plain_text = clip_utf16(
+            (text or "Ответ не отправлен").strip()[:3900], 3900
+        )
+        self._closed = True
+        if self.message_id is not None:
+            message_id = self.message_id
+            try:
+                await self.bot.edit_message_text(
+                    plain_text, chat_id=self.chat_id, message_id=message_id
+                )
+                self.message_id = None
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await self.bot.send_message(self.chat_id, plain_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Telegram: простой ответ не отправлен: %s", exc)
+        if self.message_id is not None:
+            message_id = self.message_id
+            self.message_id = None
+            try:
+                await self.bot.delete_message(self.chat_id, message_id)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class _DraftProgress:
@@ -576,12 +624,12 @@ class _DraftProgress:
         self._notes = self._notes[-6:]
         await self._flush()
 
-    async def download(self, text: str) -> None:
+    async def download(self, text: str, *, force: bool = False) -> None:
         if self._fallback is not None:
-            await self._fallback.download(text)
+            await self._fallback.download(text, force=force)
             return
         self._download = text
-        await self._flush()
+        await self._flush(force=force)
 
     async def tail(self, text: str, *, force: bool = False) -> None:
         if self._fallback is not None:
@@ -641,15 +689,27 @@ class _DraftProgress:
             await progress.tail(self._tail, force=True)
         self._fallback = progress
 
+    def _clear_text(self) -> None:
+        """Очищает состояние черновика (пустой draft = «Thinking…» в Telegram)."""
+        self._base = ""
+        self._notes = []
+        self._download = ""
+        self._tail = ""
+
     async def close(self) -> None:
+        """Снимает черновик «Думаю…»; повторный вызов ничего не делает."""
+        if self._closed:
+            return
         self._closed = True
         self._cancel_keepalive()
+        self._clear_text()
         if self._fallback is not None:
             await self._fallback.close()
 
     async def fail(self, text: str, reply_markup: Any | None = None) -> None:
         self._closed = True
         self._cancel_keepalive()
+        self._clear_text()
         if self._fallback is not None:
             await self._fallback.fail(text, reply_markup=reply_markup)
             return
@@ -659,6 +719,22 @@ class _DraftProgress:
             f"❌ {text}",
             reply_markup=reply_markup,
         )
+
+    async def plain(self, text: str) -> None:
+        """Черновик нельзя редактировать — шлём ответ обычным сообщением."""
+        self._closed = True
+        self._cancel_keepalive()
+        self._clear_text()
+        if self._fallback is not None:
+            await self._fallback.plain(text)
+            return
+        plain_text = clip_utf16(
+            (text or "Ответ не отправлен").strip()[:3900], 3900
+        )
+        try:
+            await self.bot.send_message(self.chat_id, plain_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Telegram: простой ответ не отправлен: %s", exc)
 
 
 async def start_message(
@@ -724,6 +800,11 @@ class TelegramBot:
             )
         self._loop: asyncio.AbstractEventLoop | None = None
         self._download_listener = self._on_model_download_event
+        #: единая шина прогресса: строки загрузок по (чат, task_id)
+        self._download_rows: dict[tuple[int, str], str] = {}
+        # подписка создаётся в потоке бота: незапущенный экземпляр не должен
+        # оставлять слушателя в глобальной шине
+        self._download_token = ""
         self._app: Any = None
         #: raw-адаптер Bot API 10.3/10.4 (создаётся в потоке бота)
         self._api: TelegramAdvancedAPI | None = None
@@ -766,6 +847,8 @@ class TelegramBot:
         self._draft_id: int | None = None
         self._draft_chat_id: int | None = None
         self._active_progress: Any | None = None
+        #: отложенная заметка «Останавливаю…» от кнопки Stop
+        self._stop_note_task: asyncio.Task | None = None
         #: снимок контекста работающей задачи для /btw
         self._active_context: dict[str, Any] | None = None
         #: поток текущей задачи, чтобы stop() дождался его, а не бросал в фоне
@@ -1576,6 +1659,7 @@ class TelegramBot:
         """Останавливает polling и закрывает поток бота."""
         global _active_bot, _last_error
         self._stopping.set()
+        self._unsubscribe_download()
         # Просим агентский поток завершиться, а не только глушим polling.
         stop_event = self._stop_event
         if stop_event is not None:
@@ -1864,9 +1948,9 @@ class TelegramBot:
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        from nemus.core.providers.hf_download import subscribe_model_download
-
-        subscribe_model_download(self._download_listener)
+        # Только единая шина: legacy-подписка модели дублировала бы события,
+        # потому что hf_download сам публикует их и в общий канал.
+        self._subscribe_download()
         try:
             self._app = self._build_application()
             self._api = TelegramAdvancedAPI(self._app.bot)
@@ -1914,46 +1998,100 @@ class TelegramBot:
             if not self._ready.is_set():
                 self._ready.set()
 
-    # ------------------------------------------------ прогресс моделей
+    # -------------------------------------------------- прогресс загрузок
+    @staticmethod
+    def _model_to_download(event: Any) -> DownloadEvent:
+        """Приводит legacy-событие GGUF к общей шине прогресса."""
+        return DownloadEvent(
+            kind="model",
+            phase=getattr(event, "phase", "progress"),
+            name=getattr(event, "name", "") or getattr(event, "filename", "модель"),
+            done=getattr(event, "done", 0),
+            total=getattr(event, "total", 0),
+            path=getattr(event, "path", ""),
+            message=getattr(event, "message", ""),
+        )
+
     def _on_model_download_event(self, event: Any) -> None:
         """Событие загрузчика из чужого потока → в asyncio-цикл бота."""
+        self._on_download_event(self._model_to_download(event))
+
+    async def _update_model_download(self, event: Any) -> None:
+        """Обратная совместимость: старый вызов теперь идёт через общую шину."""
+        await self._update_download(self._model_to_download(event))
+
+    def _on_download_event(self, event: DownloadEvent) -> None:
+        """Событие загрузки из чужого потока → в asyncio-цикл бота."""
         loop = self._loop
         if loop is None or loop.is_closed():
             return
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._update_model_download(event), loop
-            )
+            asyncio.run_coroutine_threadsafe(self._update_download(event), loop)
         except RuntimeError:
             pass
 
-    async def _update_model_download(self, event: Any) -> None:
-        """Обновляет статус «Думаю…» прогрессом скачивания GGUF."""
+    @staticmethod
+    def _download_line(event: DownloadEvent) -> str:
+        """Одна строка статуса с полосой из 20 символов."""
+        name = (event.name or "файл")[:90]
+        if event.phase == "start":
+            if event.kind == "model":
+                return f"⬇️ Скачиваю модель {name}"
+            return f"⬇️ {name}: {render_progress_bar(None)}"
+        if event.phase == "done":
+            if event.kind == "model":
+                return f"✅ Модель скачана: {name}"
+            return f"✅ {name}: {render_progress_bar(100)}"
+        if event.phase == "cancelled":
+            return f"⏹ {name}: загрузка отменена"
+        if event.phase == "error":
+            detail = (event.message or "ошибка загрузки")[:200]
+            return f"⚠️ {name}: {detail}"
+        from nemus.core.providers.hf_download import format_bytes
+
+        bar = render_progress_bar(event.percent)
+        if event.percent is None:
+            return f"⬇️ {name}: {bar} ({format_bytes(event.done)})"
+        return (
+            f"⬇️ {name}: {bar} "
+            f"({format_bytes(event.done)} / {format_bytes(event.total)})"
+        )
+
+    async def _update_download(self, event: DownloadEvent) -> None:
+        """Обновляет строки прогресса в текущем «живом» сообщении."""
         progress = self._active_progress
         if progress is None:
             return
-        from nemus.core.providers.hf_download import format_bytes
+        chat_id = getattr(progress, "chat_id", None)
+        if chat_id is None:
+            chat_id = self._chat_id or self._notify_chat_id or 0
+        chat_id = int(chat_id)
+        key = (chat_id, event.task_id or "model")
+        self._download_rows[key] = self._download_line(event)
+        text = "\n".join(
+            line for (cid, _), line in self._download_rows.items() if cid == chat_id
+        )
+        force = event.phase in {"done", "error", "cancelled"}
+        await progress.download(text, force=force)
+        if force:
+            self._download_rows.pop(key, None)
 
-        name = (getattr(event, "name", "") or "модель")[:90]
-        if event.phase == "start":
-            await progress.download(f"⬇️ Скачиваю модель {name}")
-        elif event.phase == "progress":
-            percent = getattr(event, "percent", None)
-            if percent is None:
-                text = f"⬇️ {name}: {format_bytes(event.done)}"
-            else:
-                text = (
-                    f"⬇️ {name}: {percent}% "
-                    f"({format_bytes(event.done)} / {format_bytes(event.total)})"
-                )
-            await progress.download(text)
-        elif event.phase == "done":
-            await progress.download(f"✅ Модель скачана: {name}")
-        elif event.phase == "cancelled":
-            await progress.download("⏹ Загрузка модели отменена")
-        elif event.phase == "error":
-            detail = (getattr(event, "message", "") or "")[:200]
-            await progress.download(f"⚠️ Не удалось скачать модель: {detail}")
+    def _clear_download_rows(self, chat_id: int) -> None:
+        """Убирает строки этого чата при закрытии задачи, даже без terminal-события."""
+        for key in [key for key in self._download_rows if key[0] == int(chat_id)]:
+            self._download_rows.pop(key, None)
+
+    def _subscribe_download(self) -> None:
+        """Подписывает работающий бот на общую шину (идемпотентно)."""
+        if not self._download_token:
+            self._download_token = subscribe_download(self._on_download_event)
+
+    def _unsubscribe_download(self) -> None:
+        """Снимает подписку с единой шины (идемпотентно)."""
+        token = getattr(self, "_download_token", "")
+        if token:
+            unsubscribe_download(token)
+            self._download_token = ""
 
     def _mask(self, text: str) -> str:
         """Убирает токен из текста ошибки, чтобы он не попал в лог и GUI."""
@@ -1965,6 +2103,7 @@ class TelegramBot:
         from nemus.core.providers.hf_download import unsubscribe_model_download
 
         unsubscribe_model_download(self._download_listener)
+        self._unsubscribe_download()
         self._stop_webapp()
         loop = self._loop
         self._loop = None
@@ -3679,6 +3818,30 @@ class TelegramBot:
             reply_markup=self._keyboard(rows),
         )
 
+    async def _send_final_or_plain(
+        self,
+        progress: Any,
+        chat_id: int,
+        message_id: int | None,
+        text: str,
+        *,
+        stopped: bool = False,
+        rich: bool = True,
+    ) -> None:
+        """Отправляет финал; если разметка не ушла — оставляет простой текст."""
+        try:
+            await self._send_final(
+                chat_id, message_id, text, stopped=stopped, rich=rich
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Telegram: финальный ответ не отправлен (%s) — показываю текстом",
+                self._mask(str(exc)),
+            )
+            await progress.plain(text)
+        else:
+            await progress.close()
+
     async def _run_task_for(
         self,
         chat_id: int,
@@ -3757,38 +3920,43 @@ class TelegramBot:
             else:
                 progress = _Progress(self._app.bot, chat_id)
             self._active_progress = progress
-            await progress.start("⏳ Думаю…")
-            typing = asyncio.create_task(self._keep_typing(chat_id))
-            queue: asyncio.Queue = asyncio.Queue()
-            loop = asyncio.get_running_loop()
-
-            def push(event: Any) -> None:
-                try:
-                    loop.call_soon_threadsafe(queue.put_nowait, event)
-                except RuntimeError:
-                    pass  # бота остановили посреди задачи
-
-            def work() -> None:
-                try:
-                    for event in self.agent.run(
-                        text, images=images, stop=stop_event, observe=observe
-                    ):
-                        push(event)
-                except Exception as exc:  # noqa: BLE001
-                    push(AgentEvent(kind="error", error=str(exc)))
-                finally:
-                    push(None)
-
-            agent_thread = threading.Thread(
-                target=work, name="telegram-agent", daemon=True
-            )
-            self._agent_thread = agent_thread
-            agent_thread.start()
-
-            final_text = ""
-            error = ""
-            stopped = False
+            typing: asyncio.Task | None = None
+            agent_thread: threading.Thread | None = None
+            # Всё выполнение задачи — включая финальную отправку и ранние
+            # return — живёт внутри outer finally: статус не должен залипать
+            # ни при ошибке, ни при отмене, ни при падении форматирования.
             try:
+                await progress.start("⏳ Думаю…")
+                typing = asyncio.create_task(self._keep_typing(chat_id))
+                queue: asyncio.Queue = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+
+                def push(event: Any) -> None:
+                    try:
+                        loop.call_soon_threadsafe(queue.put_nowait, event)
+                    except RuntimeError:
+                        pass  # бота остановили посреди задачи
+
+                def work() -> None:
+                    try:
+                        for event in self.agent.run(
+                            text, images=images, stop=stop_event, observe=observe
+                        ):
+                            push(event)
+                    except Exception as exc:  # noqa: BLE001
+                        push(AgentEvent(kind="error", error=str(exc)))
+                    finally:
+                        push(None)
+
+                agent_thread = threading.Thread(
+                    target=work, name="telegram-agent", daemon=True
+                )
+                self._agent_thread = agent_thread
+                agent_thread.start()
+
+                final_text = ""
+                error = ""
+                stopped = False
                 while True:
                     event = await queue.get()
                     if event is None:
@@ -3816,12 +3984,75 @@ class TelegramBot:
                         final_text = event.text or final_text
                     elif event.kind == "error":
                         error = event.error or event.text
+
+                if stopped:
+                    final_text = (final_text or "").strip()
+                    stopped_text = (
+                        f"{final_text}\n\n⏹ Остановлено."
+                        if final_text
+                        else "⏹ Остановила задачу."
+                    )
+                    await self._send_final_or_plain(
+                        progress,
+                        chat_id,
+                        message_id,
+                        stopped_text,
+                        stopped=True,
+                        rich=chat_type == "private",
+                    )
+                    return
+                if error:
+                    await progress.fail(
+                        error_text(self._mask(error)),
+                        reply_markup=self._error_keyboard(chat_id),
+                    )
+                    return
+                final_text = (final_text or "").strip()
+                if not final_text:
+                    await progress.fail(
+                        error_text(
+                            "Пустой ответ модели. Попробуйте переформулировать задачу."
+                        ),
+                        reply_markup=self._error_keyboard(chat_id),
+                    )
+                    return
+                groups = parse_choices(final_text) or parse_grilling_choices(
+                    final_text
+                )
+                if groups:
+                    await self._send_brainstorm(
+                        chat_id,
+                        message_id,
+                        groups,
+                        user_id=user_id,
+                        chat_type=chat_type,
+                    )
+                    return
+                await self._send_final_or_plain(
+                    progress,
+                    chat_id,
+                    message_id,
+                    final_text,
+                    rich=chat_type == "private",
+                )
+                await self._maybe_show_first_hint(chat_id)
+                # Агент в общем наборе инструментов часто отвечает эмодзи в тексте,
+                # а не вызывает react_telegram. Спрашиваем отдельно и ставим сами,
+                # только если агент уже не поставил реакцию.
+                if message_id and not self._reaction_set:
+                    asyncio.create_task(
+                        self._auto_react(text, final_text, chat_id, message_id)
+                    )
             finally:
-                typing.cancel()
-                try:
-                    await typing
-                except asyncio.CancelledError:
-                    pass
+                if typing is not None:
+                    typing.cancel()
+                    try:
+                        await typing
+                    except asyncio.CancelledError:
+                        pass
+                await self._cancel_stop_note()
+                await progress.close()
+                self._clear_download_rows(chat_id)
                 self._chat_id = None
                 self._user_id = None
                 self._message_id = None
@@ -3832,62 +4063,8 @@ class TelegramBot:
                 self._stop_event = None
                 self._current_task_id = None
                 self._current_task_chat = None
-                if self._agent_thread is agent_thread:
+                if agent_thread is not None and self._agent_thread is agent_thread:
                     self._agent_thread = None
-
-            if stopped:
-                await progress.close()
-                final_text = (final_text or "").strip()
-                stopped_text = (
-                    f"{final_text}\n\n⏹ Остановлено."
-                    if final_text
-                    else "⏹ Остановила задачу."
-                )
-                await self._send_final(
-                    chat_id,
-                    message_id,
-                    stopped_text,
-                    stopped=True,
-                    rich=chat_type == "private",
-                )
-                return
-            if error:
-                await progress.fail(
-                    error_text(self._mask(error)),
-                    reply_markup=self._error_keyboard(chat_id),
-                )
-                return
-            final_text = (final_text or "").strip()
-            if not final_text:
-                await progress.fail(
-                    error_text("Пустой ответ модели. Попробуйте переформулировать задачу."),
-                    reply_markup=self._error_keyboard(chat_id),
-                )
-                return
-            await progress.close()
-            groups = parse_choices(final_text) or parse_grilling_choices(
-                final_text
-            )
-            if groups:
-                await self._send_brainstorm(
-                    chat_id,
-                    message_id,
-                    groups,
-                    user_id=user_id,
-                    chat_type=chat_type,
-                )
-                return
-            await self._send_final(
-                chat_id, message_id, final_text, rich=chat_type == "private"
-            )
-            await self._maybe_show_first_hint(chat_id)
-            # Агент в общем наборе инструментов часто отвечает эмодзи в тексте,
-            # а не вызывает react_telegram. Спрашиваем отдельно и ставим сами,
-            # только если агент уже не поставил реакцию.
-            if message_id and not self._reaction_set:
-                asyncio.create_task(
-                    self._auto_react(text, final_text, chat_id, message_id)
-                )
 
     # ---------------------------------------------------------- настройки
     def _autostart_state(self, *, force: bool = False) -> bool | None:
@@ -4639,12 +4816,26 @@ class TelegramBot:
         progress = self._active_progress
         if progress is not None:
             try:
-                asyncio.get_running_loop().create_task(
+                self._stop_note_task = asyncio.get_running_loop().create_task(
                     progress.note("⏹ Останавливаю…")
                 )
             except RuntimeError:
                 pass  # задача уже завершилась
         return True
+
+    async def _cancel_stop_note(self) -> None:
+        """Гасит заметку Stop до закрытия прогресса, чтобы не было гонки."""
+        task = getattr(self, "_stop_note_task", None)
+        self._stop_note_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def _deny_pending_confirmations(self, chat_id: int) -> None:
         """Отклоняет все ждущие подтверждения этого чата."""
@@ -4673,19 +4864,30 @@ class TelegramBot:
                 self._request_stop(int(chat_id), draft_id=draft_id)
 
     # -------------------------------------------------------- подтверждение
-    def _confirm(self, tool: Any, args: dict[str, Any]) -> bool:
-        """Спрашивает разрешение кнопками (вызывается из потока агента)."""
-        chat_id = self._chat_id
-        user_id = self._user_id
-        if chat_id is None or user_id is None or self._loop is None:
-            return False
+    def _wait_confirm_future(self, future: Any) -> bool:
+        """Ждёт ответа на кнопку, не блокируя Stop дольше четверти секунды.
+
+        ``td:``-согласие приходит как ``asyncio.Future`` из event loop бота,
+        обычное подтверждение — как ``concurrent.futures.Future``. У обоих
+        типов разные ``result(timeout=...)``, поэтому asyncio-фьючерс сначала
+        оборачивается в wait_for внутри цикла бота.
+        """
+        deadline = time.monotonic() + CONFIRM_TIMEOUT + 30
+        waiter = future
+        if isinstance(future, asyncio.Future):
+            loop = self._loop
+
+            async def resolve() -> bool:
+                remaining = max(0.1, deadline - asyncio.get_running_loop().time())
+                return bool(
+                    await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
+                )
+
+            try:
+                waiter = asyncio.run_coroutine_threadsafe(resolve(), loop)
+            except RuntimeError:
+                return False
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._ask_confirm(chat_id, user_id, tool, args), self._loop
-            )
-            # Ждём короткими шагами: Stop должен освободить агентский поток
-            # сразу, а не через CONFIRM_TIMEOUT.
-            deadline = time.monotonic() + CONFIRM_TIMEOUT + 30
             while True:
                 if self._stop_event is not None and self._stop_event.is_set():
                     return False
@@ -4693,9 +4895,37 @@ class TelegramBot:
                 if remaining <= 0:
                     return False
                 try:
-                    return bool(future.result(timeout=min(0.25, remaining)))
+                    return bool(waiter.result(timeout=min(0.25, remaining)))
                 except TimeoutError:
                     continue
+                except Exception:  # noqa: BLE001
+                    return False
+        finally:
+            if waiter is not future and not waiter.done():
+                waiter.cancel()
+
+    def _confirm(self, tool: Any, args: dict[str, Any]) -> bool:
+        """Спрашивает разрешение кнопками (вызывается из потока агента)."""
+        chat_id = self._chat_id
+        user_id = self._user_id
+        if chat_id is None or user_id is None or self._loop is None:
+            return False
+        try:
+            if getattr(tool, "name", "") == "torrent_download":
+                # Реальный производственный вызов _ask_torrent: согласие
+                # приходит через td:-кнопки и превращается в одноразовый токен.
+                detail = json.dumps(args, ensure_ascii=False, default=str)
+                future = self._ask_torrent(chat_id, user_id, detail[:2000])
+                allowed = self._wait_confirm_future(future)
+                if allowed:
+                    from nemus.core.tools.torrents import grant_torrent_consent
+
+                    args.update(grant_torrent_consent(tool, args, True))
+                return allowed
+            future = asyncio.run_coroutine_threadsafe(
+                self._ask_confirm(chat_id, user_id, tool, args), self._loop
+            )
+            return self._wait_confirm_future(future)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Telegram: подтверждение не получено: {exc}")
             return False
@@ -4769,6 +4999,108 @@ class TelegramBot:
         finally:
             self._pending.pop(key, None)
             if stopped:
+                try:
+                    await message.edit_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _ask_torrent(
+        self, chat_id: int, user_id: int, text: str
+    ) -> asyncio.Future[bool]:
+        """Спрашивает согласие на торрент инлайн-кнопками ``td:``.
+
+        Возвращает future сразу, чтобы вызывающий мог ждать её в своём потоке.
+        Ключ в ``_pending`` привязан к чату и человеку; тот же ключ разбирает
+        ``_on_callback``. Таймаут и Stop обрабатывает ``_wait_torrent``.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "Нет event loop для инлайн-согласия на торрент"
+                ) from exc
+        key = f"{int(chat_id)}:{int(user_id)}:{time.time_ns()}"
+        future: asyncio.Future[bool] = loop.create_future()
+        original = f"⬇️ Скачать через торрент?\n\n{str(text or '')}"[:3500]
+        markup = self._keyboard([
+            [
+                ("⬇️ Скачать через торрент", f"td:{key}:y"),
+                ("❌ Отмена", f"td:{key}:n"),
+            ]
+        ])
+        # Регистрируем future до отправки: быстрый клик не должен видеть
+        # «кнопка устарела» и заставлять пользователя ждать таймаута.
+        self._pending[key] = (future, original)
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._wait_torrent(chat_id, key, future, original, markup, loop),
+                loop,
+            )
+        except RuntimeError:
+            self._pending.pop(key, None)
+            if not future.done():
+                future.set_result(False)
+            raise
+        return future
+
+    async def _wait_torrent(
+        self,
+        chat_id: int,
+        key: str,
+        future: asyncio.Future,
+        original: str,
+        markup: Any,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Отправляет запрос и гасит его по кнопке, Stop или таймауту."""
+        message: Any = None
+        stopped = False
+        timed_out = False
+        try:
+            try:
+                message = await self._app.bot.send_message(
+                    chat_id, original[:3900], reply_markup=markup
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Telegram: не удалось спросить согласие на торрент: {exc}")
+                if not future.done():
+                    future.set_result(False)
+                return False
+
+            deadline = loop.time() + CONFIRM_TIMEOUT
+            while True:
+                if self._stop_event is not None and self._stop_event.is_set():
+                    stopped = True
+                    if not future.done():
+                        future.set_result(False)
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    timed_out = True
+                    if not future.done():
+                        future.set_result(False)
+                    return False
+                try:
+                    return bool(
+                        await asyncio.wait_for(
+                            asyncio.shield(future), timeout=min(0.25, remaining)
+                        )
+                    )
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            self._pending.pop(key, None)
+            if timed_out:
+                try:
+                    await self._app.bot.send_message(
+                        chat_id,
+                        "⌛ Время на согласие истекло — торрент не запущен.",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            if (stopped or timed_out) and message is not None:
                 try:
                     await message.edit_reply_markup(reply_markup=None)
                 except Exception:  # noqa: BLE001
@@ -5110,6 +5442,9 @@ class TelegramBot:
         if data.startswith("ux:"):
             await self._on_ux_callback(update, query)
             return
+        if data.startswith("td:"):
+            await self._on_torrent_callback(query, data)
+            return
         parts = data.split(":")
         if len(parts) < 5 or parts[0] != "tg":
             await query.answer()
@@ -5140,6 +5475,47 @@ class TelegramBot:
             await query.edit_message_text(
                 f"{original}\n\n"
                 + ("✅ Разрешено" if allowed else "❌ Отклонено"),
+                reply_markup=None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _on_torrent_callback(self, query: Any, data: str) -> None:
+        """Разбирает ``td:<chat>:<user>:<ns>:y|n`` и решает future согласия."""
+        parts = data.split(":")
+        if len(parts) != 5 or parts[0] != "td" or parts[4] not in ("y", "n"):
+            await query.answer("Кнопка устарела")
+            return
+        try:
+            chat_id, user_id, namespace = (int(part) for part in parts[1:4])
+        except ValueError:
+            await query.answer("Кнопка устарела")
+            return
+        actual_chat = getattr(query.message, "chat_id", None)
+        if actual_chat is None:
+            actual_chat = getattr(getattr(query.message, "chat", None), "id", None)
+        actual_user = getattr(query.from_user, "id", None)
+        if actual_chat != chat_id or actual_user != user_id:
+            await query.answer("Кнопка не для этого чата", show_alert=True)
+            return
+        key = f"{chat_id}:{user_id}:{namespace}"
+        entry = self._pending.get(key)
+        if entry is None:
+            await query.answer("Кнопка устарела")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        future, original = entry
+        allowed = parts[4] == "y"
+        if not future.done():
+            future.set_result(allowed)
+        await query.answer("Разрешено" if allowed else "Отклонено")
+        try:
+            await query.edit_message_text(
+                f"{original}\n\n"
+                + ("✅ Скачиваем через торрент" if allowed else "❌ Отмена"),
                 reply_markup=None,
             )
         except Exception:  # noqa: BLE001

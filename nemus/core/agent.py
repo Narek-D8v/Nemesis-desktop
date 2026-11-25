@@ -619,15 +619,25 @@ def build_system_prompt(config: Config, registry: ToolRegistry) -> str:
         "`data/downloads` создаётся сама), затем проверяй подпись и хеш.\n"
         "• Игры: Steam — через `steam://install/<appid>`, Epic — через клиент, "
         "standalone — официальный установщик. Уже скачанный пользователем exe "
-        "запускай только после проверки. Сам не ищи пиратские сборки и «кряки».\n"
+        "запускай только после проверки. Сам не ищи пиратские сборки и «кряки»: "
+        "по явной просьбе пользователя разрешено только через `verify_installer` "
+        "и `install_verified`. Неподписанный файл по явной просьбе — "
+        "предупреждение и отдельное подтверждение, но Defender с угрозой и "
+        "несовпавший SHA-256 — жёсткие блокировщики.\n"
+        "• Цепочка загрузки: `download_file` → `browser_download_file` → "
+        "`torrent_download`. Торрент — только последний шаг и только после "
+        "одобрения пользователя: он сам даёт magnet/ссылку и подтверждает "
+        "инлайн (кнопка в Telegram, диалог в GUI); без одобрения не запускай.\n"
         "• Любой файл из неофициального источника ОБЯЗАТЕЛЬНО проверь "
-        "инструментом scan_file до запуска. Если Defender нашёл угрозу — остановись, "
-        "покажи результат и не запускай файл; никогда не отключай защиту и не "
-        "добавляй исключения.\n"
+        "инструментом scan_file до запуска; перед запуском установщика вызови "
+        "`verify_installer`. Если Defender нашёл угрозу или SHA-256 не совпал — "
+        "остановись, покажи результат и не запускай файл; никогда не отключай "
+        "защиту и не добавляй исключения.\n"
         "• Если нужен администратор — скажи об этом и дождись подтверждения UAC; "
         "не обходи UAC и не сохраняй пароль. После установки проверь наличие "
         "программы, при согласии запусти и убедись, что процесс жив; создай ярлык, "
-        "если просили, и коротко отчитайся: что, откуда, куда, проверка, ярлык.\n"
+        "если просили, и коротко отчитайся: что, откуда, куда, проверка, вердикт "
+        "Defender, подпись, SHA-256, предупреждение, ярлык.\n"
         "• Обновляй и удаляй только по отдельной просьбе, с подтверждением и "
         "через тот же источник. Не выдумывай успех: проверяй фактически.",
         "Для реальных действий используй инструменты, не выдумывай результаты.",
@@ -2645,12 +2655,37 @@ class Agent:
         self.history.append(Message(role="user", content=parts))
         # в историю БД картинки не пишем
 
+    _INSTALL_TOOL_CONFIRM = frozenset({"verify_installer", "install_verified"})
+
+    def _confirmation_args(self, tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет в окно подтверждения вердикт проверки установщика.
+
+        Копия нужна, чтобы информационный предпросмотр не попал в сам вызов
+        инструмента и не подменил аргументы, пришедшие от модели.
+        """
+        if tool.name not in self._INSTALL_TOOL_CONFIRM:
+            return args
+        from nemus.core.tools.system import verification_confirmation
+
+        payload = dict(args)
+        try:
+            payload["verification"] = verification_confirmation(
+                path=str(args.get("path", "") or ""),
+                expected_sha256=str(args.get("expected_sha256", "") or ""),
+                explicit_piracy_request=bool(args.get("explicit_piracy_request", False)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload["verification"] = {"error": str(exc)[:300]}
+        return payload
+
     def _execute_tool(self, tool: Tool, args: dict[str, Any]) -> ToolResult:
         decision = self.permissions.check(tool, args)
         if decision == Decision.DENY:
             return ToolResult.failure(f"Инструмент '{tool.name}' запрещён политикой.")
         if decision == Decision.ASK:
-            if self.confirm is None or not self.confirm(tool, args):
+            if self.confirm is None or not self.confirm(
+                tool, self._confirmation_args(tool, args)
+            ):
                 return ToolResult.failure(
                     f"Пользователь отклонил вызов инструмента '{tool.name}'."
                 )

@@ -36,10 +36,14 @@ from PySide6.QtWidgets import (
 
 from nemus.config import save_config
 from nemus.core.agent import AgentEvent
+from nemus.core.download_events import (
+    DownloadEvent,
+    subscribe_download,
+    unsubscribe_download,
+)
 from nemus.core.providers.hf_download import (
     ModelDownloadEvent,
     format_bytes,
-    subscribe_model_download,
     unsubscribe_model_download,
 )
 from nemus.core.skill_commands import parse_skill_commands
@@ -207,6 +211,7 @@ class MainWindow(QMainWindow):
     """Основное окно (редизайн 2025): тёмная тема, сайдбар, пилюля ввода."""
 
     model_download_event = Signal(object)
+    download_event = Signal(object)
     listen_toggled = Signal(bool)
     realtime_toggled = Signal(bool)
     settings_requested = Signal()
@@ -236,8 +241,13 @@ class MainWindow(QMainWindow):
 
         # подписываемся после создания виджетов: прогресс может прийти сразу
         self._download_listener = self._emit_model_download
+        self._download_rows: dict[str, str] = {}
+        self._download_token = ""
         self.model_download_event.connect(self._on_model_download_event)
-        subscribe_model_download(self._download_listener)
+        self.download_event.connect(self._on_download_event)
+        # hf_download публикует модели и в общую шину: legacy-подписка давала
+        # бы по два обновления на каждое событие.
+        self._download_token = subscribe_download(self._emit_download)
         self.destroyed.connect(self._unsubscribe_downloads)
         self._download_hide_timer = QTimer(self)
         self._download_hide_timer.setSingleShot(True)
@@ -315,6 +325,9 @@ class MainWindow(QMainWindow):
 
         self.orb = WaveformWidget()
         self.orb.set_state(AssistState.IDLE)
+        # realtime-инструменты временно ставят THINKING; предыдущий статус
+        # запоминается стеком, чтобы «Думаю…» не осталось после их завершения
+        self._realtime_states: list[AssistState] = []
         orb_container = QWidget()
         orb_layout = QHBoxLayout(orb_container)
         orb_layout.setContentsMargins(0, 0, 0, 0)
@@ -614,71 +627,126 @@ class MainWindow(QMainWindow):
                     self.chat.add_assistant(message.content, name)
 
     # -------------------------------------------------------------- behaviour
-    # --------------------------------------------------- загрузка модели
+    # ---------------------------------------------------- прогресс загрузок
+    @staticmethod
+    def _model_to_download(event: ModelDownloadEvent) -> DownloadEvent:
+        """Приводит legacy-событие GGUF к общей шине прогресса."""
+        return DownloadEvent(
+            kind="model",
+            phase=event.phase,
+            name=event.name,
+            done=event.done,
+            total=event.total,
+            path=event.path,
+            message=event.message,
+        )
+
     def _emit_model_download(self, event: ModelDownloadEvent) -> None:
         """Вызывается из потока загрузчика — сигнал переводит в GUI-поток."""
         self.model_download_event.emit(event)
 
+    def _emit_download(self, event: DownloadEvent) -> None:
+        """Вызывается из потока загрузчика — сигнал переводит в GUI-поток."""
+        self.download_event.emit(event)
+
     def _unsubscribe_downloads(self, *_: Any) -> None:
         unsubscribe_model_download(self._download_listener)
+        if self._download_token:
+            unsubscribe_download(self._download_token)
+            self._download_token = ""
 
     def _on_model_download_event(self, event: ModelDownloadEvent) -> None:
-        """Показывает прогресс скачивания GGUF в сайдбаре."""
+        """Обратная совместимость: legacy-прогресс модели идёт в общую панель."""
+        self._on_download_event(self._model_to_download(event))
+
+    def _render_download_rows(self, final: str = "") -> None:
+        lines = list(self._download_rows.values())
+        if final:
+            lines.append(final)
+        self.download_label.setText("\n".join(lines))
+        self.download_label.setVisible(True)
+
+    def _on_download_event(self, event: DownloadEvent) -> None:
+        """Показывает прогресс файлов, браузера, торрента и моделей."""
+        key = event.task_id or "model"
+        name = event.name or "файл"
+        self._download_hide_timer.stop()
         if event.phase == "start":
-            self._download_hide_timer.stop()
+            self._download_rows[key] = i18n.tr(
+                "download.starting", name=name
+            )
             self.download_bar.setRange(0, 0)
             self.download_bar.setVisible(True)
-            self.download_label.setText(
-                i18n.tr("download.starting", name=event.name)
-            )
-            self.download_label.setVisible(True)
+            self._render_download_rows()
             return
         if event.phase == "progress":
             if event.total > 0:
                 percent = event.percent or 0
+                self._download_rows[key] = i18n.tr(
+                    "download.file_progress",
+                    name=name,
+                    percent=percent,
+                    done=format_bytes(event.done),
+                    total=format_bytes(event.total),
+                )
                 self.download_bar.setRange(0, 1000)
                 self.download_bar.setValue(percent * 10)
-                self.download_label.setText(
-                    i18n.tr(
-                        "download.progress",
-                        name=event.filename,
-                        percent=percent,
-                        done=format_bytes(event.done),
-                        total=format_bytes(event.total),
-                    )
-                )
             else:
-                self.download_bar.setRange(0, 0)
-                self.download_label.setText(
-                    i18n.tr(
-                        "download.progress_unknown",
-                        name=event.filename,
-                        done=format_bytes(event.done),
-                    )
+                self._download_rows[key] = i18n.tr(
+                    "download.progress_unknown",
+                    name=name,
+                    done=format_bytes(event.done),
                 )
+                self.download_bar.setRange(0, 0)
             self.download_bar.setVisible(True)
-            self.download_label.setVisible(True)
+            self._render_download_rows()
             return
         if event.phase == "done":
+            if event.kind == "model":
+                final = i18n.tr("download.done", name=name)
+            else:
+                final = i18n.tr(
+                    "download.file_progress",
+                    name=name,
+                    percent=100,
+                    done=format_bytes(event.done or event.total),
+                    total=format_bytes(event.total),
+                )
             self.download_bar.setRange(0, 1000)
             self.download_bar.setValue(1000)
-            self.download_label.setText(
-                i18n.tr("download.done", name=event.filename)
-            )
-            self._download_hide_timer.start(8000)
+            self.download_bar.setVisible(True)
+            self._render_download_rows(final)
+            self._download_rows.pop(key, None)
+            if not self._download_rows:
+                self._download_hide_timer.start(8000)
             return
         if event.phase == "cancelled":
-            self.download_label.setText(i18n.tr("download.cancelled"))
+            if event.kind == "model":
+                final = i18n.tr("download.cancelled")
+            else:
+                final = i18n.tr("download.file_cancelled", name=name)
+            self._render_download_rows(final)
             self.download_bar.setVisible(False)
-            self._download_hide_timer.start(5000)
+            self._download_rows.pop(key, None)
+            if not self._download_rows:
+                self._download_hide_timer.start(5000)
             return
         if event.phase == "error":
+            if event.kind == "model":
+                final = i18n.tr(
+                    "download.failed", msg=(event.message or "")[:180]
+                )
+            else:
+                final = i18n.tr(
+                    "download.file_failed",
+                    name=name,
+                    msg=(event.message or "")[:180],
+                )
+            self._render_download_rows(final)
             self.download_bar.setVisible(False)
-            self.download_label.setText(
-                i18n.tr("download.failed", msg=event.message[:180])
-            )
-            self.download_label.setVisible(True)
-            self._download_hide_timer.start(12000)
+            self._download_rows.pop(key, None)
+            if not self._download_rows:
+                self._download_hide_timer.start(12000)
 
     def _hide_download_progress(self) -> None:
         self.download_bar.setVisible(False)
@@ -793,18 +861,23 @@ class MainWindow(QMainWindow):
         """
         if phase == "start":
             self.chat.add_tool_card(name, args)
+            self._realtime_states.append(self.orb.state)
             self.set_state(AssistState.THINKING)
             return
         ok = phase == "ok"
-        self.chat.add_system(
-            i18n.tr(
-                "tool.result",
-                name=name,
-                status=i18n.tr("tool.ok" if ok else "tool.fail"),
+        try:
+            self.chat.add_system(
+                i18n.tr(
+                    "tool.result",
+                    name=name,
+                    status=i18n.tr("tool.ok" if ok else "tool.fail"),
+                )
             )
-        )
-        if not ok and detail:
-            self.chat.add_error(detail)
+            if not ok and detail:
+                self.chat.add_error(detail)
+        finally:
+            if self._realtime_states:
+                self.set_state(self._realtime_states.pop())
 
     # ----------------------------------------------------------------- agent
     def submit_text(self, text: str) -> None:
@@ -865,21 +938,28 @@ class MainWindow(QMainWindow):
             self.chat.stream_end(event.text)
             if event.text.strip():
                 self.speak_request.emit(event.text)
+            self._realtime_states.clear()
             self.set_state(AssistState.IDLE)
         elif event.kind == "error":
             self.chat.thought_end()
             self.chat.add_error(event.error if event.error else event.text)
+            self._realtime_states.clear()
+            self.set_state(AssistState.IDLE)
 
     def _on_confirm_requested(self, payload: Any) -> None:
         tool, args = payload
         allowed = ConfirmDialog.ask(tool, args, self)
+        from nemus.core.tools.torrents import grant_torrent_consent
+
+        extra = grant_torrent_consent(tool, args, allowed)
         if self._worker is not None:
-            self._worker.resolve_confirmation(allowed)
+            self._worker.resolve_confirmation(allowed, extra=extra)
 
     def _on_run_finished(self) -> None:
         self.chat.thought_end()
         self.chat.stream_end()
         self._set_busy(False)
+        self._realtime_states.clear()
         self.set_state(AssistState.IDLE)
         self._worker = None
         # первая реплика могла назвать диалог — обновляем кнопку и список
