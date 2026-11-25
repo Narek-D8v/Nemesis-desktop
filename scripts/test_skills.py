@@ -198,8 +198,12 @@ def test_builtin_skills(tmp: Path) -> None:
 
     names = [s.name for s in load_skills(tmp)]
     assert "code-craft" in names, names
+    assert "idea-arbiter" in names, names
     assert "code-craft" in [
         s.name for s in search_skills("напиши скрипт", load_skills(tmp))
+    ]
+    assert "idea-arbiter" in [
+        s.name for s in search_skills("арбитр идей", load_skills(tmp))
     ]
     assert len(names) == len(set(names)), names
     assert "code-craft" not in [s.name for s in load_skills(tmp, builtin=False)]
@@ -219,6 +223,12 @@ def test_builtin_skills(tmp: Path) -> None:
     assert "брейншторм" in body.lower(), body[:200]
     assert "D) Свой вариант: _________" in body, body[:400]
     assert "(рекомендую)" in body, body[:400]
+
+    arbiter = (BUILTIN_SKILLS_DIR / "idea-arbiter" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "оппонентом и соавтором" in arbiter, arbiter[:400]
+    assert "аргументированно критикует" in arbiter, arbiter[:400]
 
     prompt = build_system_prompt(_cfg_for(tmp), ToolRegistry())
     assert "- code-craft:" in prompt, prompt
@@ -327,6 +337,7 @@ def test_gui_tab(tmp: Path) -> None:
             "build-tools",  # вложенный репозиторий cmd-skills/…
             "code-craft",
             "dup-tools",
+            "idea-arbiter",
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
@@ -343,6 +354,7 @@ def test_gui_tab(tmp: Path) -> None:
             "build-tools",
             "code-craft",
             "dup-tools",
+            "idea-arbiter",
             "novyy-navyk",
             "pdf-instrumenty",
             "pdf-tools",
